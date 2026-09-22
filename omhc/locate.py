@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+import hashlib
+import os
+import subprocess
+from typing import Optional
+
+
+def resolve_repo_root(start: Optional[str] = None) -> str:
+    """레포 루트의 THE 정의. git toplevel, 없으면 realpath(cwd).
+
+    호출 지점마다 다르게 정의하면 서브디렉터리에서 세션 목록이 조용히 0건이
+    된다. Codex는 rollout에 레포 루트를 기록하므로 equal-or-descendant 판정과
+    짝을 이뤄야 한다.
+    """
+    base = os.path.realpath(start or os.getcwd())
+    try:
+        out = subprocess.run(
+            ["git", "-C", base, "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return os.path.realpath(out.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return base
+
+
+def repo_key(repo_root: str) -> str:
+    """사람이 읽을 수 있는 basename + 경로 해시. 다른 경로의 동명 레포를 구분한다."""
+    digest = hashlib.sha1(repo_root.encode("utf-8")).hexdigest()[:8]
+    return "{}-{}".format(os.path.basename(repo_root.rstrip("/")), digest)
+
+
+def is_within(repo_root: str, candidate: str) -> bool:
+    """equal-or-descendant. list_sessions 의 cwd 일치 규칙."""
+    root = os.path.realpath(repo_root).rstrip("/")
+    cand = os.path.realpath(candidate).rstrip("/")
+    return cand == root or cand.startswith(root + "/")
+
+
+def relativize(repo_root: str, path: str) -> Optional[str]:
+    """절대경로 → 레포 상대 POSIX 경로. 레포 밖이면 None."""
+    if not is_within(repo_root, path):
+        return None
+    root = os.path.realpath(repo_root).rstrip("/")
+    rel = os.path.realpath(path)[len(root) :].lstrip("/")
+    return rel or "."
+
+
+def state_dir(key: str, home: Optional[str] = None) -> str:
+    """이 레포의 상태 루트. 작업 트리를 오염시키지 않도록 홈 아래에 둔다."""
+    return os.path.join(home or os.path.expanduser("~"), ".omhc", key)
