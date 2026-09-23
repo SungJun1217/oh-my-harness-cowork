@@ -31,6 +31,11 @@ _ONE_TAG = re.compile(r"^<([a-zA-Z][\w:-]*)(\s[^>]*)?>.*?</\1>\s*", re.S)
 # 사람이 쓰지 않았는데 사람 턴처럼 보이는 합성 문자열. 실물에서 목격된 것만 넣는다.
 SYNTHETIC = ("[Request interrupted by user]",)
 
+# 슬래시 명령 봉투 안의 <command-args> 는 사람이 실제로 타이핑한 말이므로 회수한다.
+# omhc.guard 와 같은 규칙을 의도적으로 중복 구현한다 — 이 스크립트가 어댑터를
+# import 하면 골든이 피검증 코드로 생성되어 순환 검증이 된다.
+_COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+
 
 def is_envelope(text: str) -> bool:
     """내용 전체가 최상위 XML 봉투들로만 이뤄졌는가(태그 밖 산문 없음)."""
@@ -64,7 +69,12 @@ def human_text(row: dict):
         text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
     else:
         return None
-    if is_envelope(text) or text.strip() in SYNTHETIC:
+    if is_envelope(text):
+        for body in _COMMAND_ARGS.findall(text):
+            if body.strip():
+                return " ".join(body.split())[:600]
+        return None
+    if text.strip() in SYNTHETIC:
         return None
     return text
 

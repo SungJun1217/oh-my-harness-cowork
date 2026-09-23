@@ -153,6 +153,12 @@ def _text_of(content) -> Optional[str]:
     return None
 
 
+def _one_line_limit(text: str, limit: int = 600) -> str:
+    """봉투에서 꺼낸 본문은 아주 길 수 있다. 한 줄로 접고 상한을 둔다."""
+    flat = " ".join(text.split())
+    return flat[:limit]
+
+
 def _arg_of(tool_input) -> str:
     if not isinstance(tool_input, dict):
         return ""
@@ -289,6 +295,16 @@ class ClaudeCodeAdapter:
                         bump("tool_result")
                         continue
                     text = guard.redact_b64(text.strip())
+                    if guard.is_envelope(text):
+                        # 슬래시 명령 봉투 안의 <command-args> 는 사람이 실제로
+                        # 타이핑한 말이다. 봉투째 버리면 세션 첫 메시지(대개 목표
+                        # 진술)가 사라져 GOAL 슬롯이 중간 메시지로 채워진다.
+                        inner = guard.unwrap_command_args(text)
+                        if inner:
+                            text = _one_line_limit(inner)
+                        else:
+                            bump("envelope")
+                            continue
                     if not guard.safe(text, "human"):
                         bump("guarded_human")
                         continue

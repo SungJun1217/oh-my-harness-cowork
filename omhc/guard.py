@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 # 외래 하네스의 기계장치 태그. 실물에서 목격된 것만 넣는다.
 #
@@ -73,6 +74,23 @@ def is_envelope(text: str) -> bool:
             return False
         rest = rest[m.end() :].strip()
     return True
+
+
+_COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+
+
+def unwrap_command_args(text: str) -> Optional[str]:
+    """슬래시 명령 봉투 안의 <command-args> 는 사람이 실제로 타이핑한 말이다.
+
+    봉투 전체를 버리면 세션의 첫 메시지(대개 목표 진술)가 사라진다 — 실측에서
+    GOAL 슬롯이 대화 중간 메시지로 채워지는 원인이었다.
+    """
+    matches = _COMMAND_ARGS.findall(text)
+    for body in matches:
+        body = body.strip()
+        if body:
+            return body
+    return None
 
 
 def redact_b64(text: str) -> str:
