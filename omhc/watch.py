@@ -6,7 +6,7 @@ import signal
 import time
 from typing import Dict, List, Optional
 
-from . import adapters, index, locate, pin
+from . import adapters, fsio, index, locate, pin
 
 LOCK_NAME = "watch.lock"
 POLL_SECONDS = 5.0
@@ -50,16 +50,10 @@ def read_lock(state_dir: str) -> Optional[int]:
 
 
 def acquire(state_dir: str) -> None:
-    os.makedirs(state_dir, exist_ok=True)
     if read_lock(state_dir) is not None:
         raise LockBusy("watcher already running")
-    path = _lock_path(state_dir)
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
+    if not fsio.claim_exclusive(_lock_path(state_dir), str(os.getpid())):
         raise LockBusy("watcher already running")
-    with os.fdopen(fd, "w") as fh:
-        fh.write(str(os.getpid()))
 
 
 def release(state_dir: str) -> None:

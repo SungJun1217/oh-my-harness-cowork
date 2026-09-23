@@ -4,7 +4,7 @@ import os
 import time
 from typing import Optional
 
-from . import adapters, agents_md
+from . import adapters, agents_md, fsio
 from .adapter import (
     AdapterUnavailable,
     Capability,
@@ -44,13 +44,9 @@ def file_drop(bundle: HandoffBundle, why: str, *, now: float) -> InstallReceipt:
         path = os.path.join(
             directory, "{}-to-{}.md".format(_iso(now), bundle.to_adapter_id)
         )
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write("<!-- omhc file drop: {} -->\n".format(why))
-            fh.write(bundle.body_md)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        fsio.write_atomic(
+            path, "<!-- omhc file drop: {} -->\n{}".format(why, bundle.body_md)
+        )
     except OSError as exc:
         return InstallReceipt(
             channel="nowhere",

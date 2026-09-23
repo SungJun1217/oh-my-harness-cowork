@@ -206,16 +206,9 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     rows = [r for r in ledger.read(home=home) if r.get("repo") == key]
     artifact = os.path.join(state, ARTIFACT_NAME)
 
-    lag_lines = []
-    for path in _index_files(state):
-        session = os.path.basename(path)[: -len(".idx")]
-        watermark = index.watermark(path)
-        source = os.path.join(pin.pinned_dir(state, session), "source.jsonl")
-        try:
-            size = os.path.getsize(source)
-        except OSError:
-            size = 0
-        lag_lines.append((session, watermark, size, size - watermark))
+    # watch.lag 가 정확히 이 계산을 소유한다. 두 벌로 두면 고정 레이아웃이
+    # 바뀔 때 한쪽만 고쳐진다.
+    lag_rows = watch.lag(state)
 
     pulls = len([r for r in rows if r.get("event") == "pull"])
     injections = 0
@@ -228,9 +221,7 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         out.write(json.dumps({
             "repo_root": root, "repo_key": key, "state_dir": state,
             "adapters": installed, "ledger_rows": len(rows),
-            "archive": [{"session": s, "indexed_through": w, "size": z,
-                         "tail_bytes_after_last_event": l}
-                        for s, w, z, l in lag_lines],
+            "archive": lag_rows,
             "injections": injections, "pulls": pulls,
             "off": due.is_off(state), "watcher_pid": watch.read_lock(state),
         }, ensure_ascii=False, indent=2) + "\n")
@@ -241,9 +232,9 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     ok &= _check(out, "adapters", bool(installed), ", ".join(installed) or "none found")
     ok &= _check(out, "ledger", bool(rows),
                  "{} rows for this repo".format(len(rows)))
-    ok &= _check(out, "archive", bool(lag_lines),
-                 "; ".join("{} tail={}B".format(s[:8], l)
-                           for s, _w, _z, l in lag_lines)
+    ok &= _check(out, "archive", bool(lag_rows),
+                 "; ".join("{} tail={}B".format(r["session"][:8], r["lag_bytes"])
+                           for r in lag_rows)
                  or "nothing pinned yet")
     ok &= _check(out, "off switch", not due.is_off(state),
                  "off" if due.is_off(state) else "on")

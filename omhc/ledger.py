@@ -4,6 +4,8 @@ import json
 import os
 from typing import List, Optional
 
+from . import fsio
+
 LEDGER_NAME = "ledger.jsonl"
 
 # PIPE_BUF(4096) 이하의 단일 write(2) 는 O_APPEND 에서 원자적이다. 400바이트
@@ -46,13 +48,7 @@ def append(record: dict, home: Optional[str] = None) -> bool:
                 break
         if len(line.encode("utf-8")) + 1 > MAX_LINE:
             return False
-    path = _path(home)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        os.write(fd, (line + "\n").encode("utf-8"))
-    finally:
-        os.close(fd)
+    fsio.append_line(_path(home), line)
     return True
 
 

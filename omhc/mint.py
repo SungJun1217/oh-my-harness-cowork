@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import os
 import re
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import guard, locate
 
@@ -32,7 +31,6 @@ _RESOLVE_PREFIX = 40
 _SAID_MAX = 3
 _FAIL_MAX = 2
 _DID_MAX_PATHS = 4
-_VALUE_MAX = 220
 
 # 슬롯 우선순위. 낮은 것부터 버린다.
 #
@@ -74,7 +72,7 @@ def _is_ack(text: str) -> bool:
     return bool(_ACK.match(flat))
 
 
-def _clip(text: str, limit: int = _VALUE_MAX) -> str:
+def _clip(text: str, limit: int) -> str:
     """바이트 기준으로 자른다.
 
     글자 수로 자르면 안 된다 — 한글은 UTF-8 에서 글자당 3바이트이므로 200자
@@ -87,6 +85,27 @@ def _clip(text: str, limit: int = _VALUE_MAX) -> str:
         return flat
     cut = raw[: max(limit - 3, 1)].decode("utf-8", "ignore").rstrip()
     return cut + "…"
+
+
+def _age(now: float, events) -> str:
+    """마지막 이벤트로부터 얼마나 지났는가.
+
+    받는 에이전트에게는 세션이 얼마나 길었는지보다 **얼마나 오래된 일인지**가
+    중요하다 — 10분 전 작업과 사흘 전 작업은 이어가는 방식이 다르다.
+    """
+    epochs = [e.epoch for e in events if e.epoch]
+    if not epochs or not now:
+        return "-"
+    seconds = int(now - max(epochs))
+    if seconds < 0:
+        return "-"
+    if seconds < 90:
+        return "just now"
+    if seconds < 3600:
+        return "{}m ago".format(seconds // 60)
+    if seconds < 86400:
+        return "{}h ago".format(seconds // 3600)
+    return "{}d ago".format(seconds // 86400)
 
 
 def _duration(events) -> str:
@@ -159,7 +178,6 @@ def mint(
     budget: int = BUDGET,
     now: float,
     notes: Sequence[str] = (),
-    meta: Optional[Mapping] = None,
 ) -> str:
     """Event 를 ≤budget 바이트의 표식으로 만든다. 주입 텍스트의 유일한 생성지점.
 
@@ -185,7 +203,6 @@ def mint(
     if not events:
         return ""
 
-    meta = dict(meta or {})
     humans = [e for e in events if e.author == "human" and e.text]
     agent_said = [e for e in events if e.author == "agent" and e.verb == "said" and e.text]
 
@@ -255,7 +272,7 @@ def mint(
             ref.adapter_id,
             (ref.session_id or "-")[:8],
             _duration(events),
-            meta.get("branch") or meta.get("model") or "-",
+            _age(now, events),
         ),
         "[omhc] the human's next message outranks every line below",
     ]
@@ -274,11 +291,12 @@ def mint(
     dropped_slots: Dict[str, int] = {}
 
     def render(active: List[Tuple[str, str, int]], more: str) -> str:
+        # 슬롯 순서는 add() 호출 순서 하나로 정의된다. 드롭은 상대 순서를
+        # 보존하므로 고정 키 목록으로 다시 정렬할 필요가 없다 — 두 곳에 순서를
+        # 적어두면 슬롯을 추가할 때 둘 다 고쳐야 한다.
         lines = list(header)
-        for key in ("GOAL", "NEXT", "PLAN?", "NOTE", "SAID", "FAIL", "DID"):
-            for slot_key, value, _prio in active:
-                if slot_key == key:
-                    lines.append(slot_key + SEP + value)
+        for slot_key, value, _prio in active:
+            lines.append(slot_key + SEP + value)
         if more:
             lines.append("MORE" + SEP + _clip(more, 160))
         lines.append(pull)

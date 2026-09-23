@@ -7,7 +7,7 @@ import time
 import traceback
 from typing import Optional
 
-from . import adapters, due, gate, index, locate, mint, pin
+from . import adapters, due, fsio, gate, index, locate, mint, pin
 from .adapters import claude_code
 from .adapter import SessionRef
 
@@ -49,12 +49,10 @@ def _write_refs(state_dir: str, ref, tags) -> None:
                    str(ev.length), str(ev.seq)))
         for tag, ev in tags
     ]
-    path = os.path.join(state_dir, REFS_NAME)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        if lines:
-            fh.write("\n".join(lines) + "\n")
-    os.replace(tmp, path)
+    fsio.write_atomic(
+        os.path.join(state_dir, REFS_NAME),
+        "\n".join(lines) + "\n" if lines else "",
+    )
 
 
 def read_refs(state_dir: str) -> dict:
@@ -197,11 +195,7 @@ def compute(
     # 주입한 본문을 파일로도 남긴다. `cat ~/.omhc/<key>/omhc.txt` 로 무엇이
     # 들어갔는지 사람이 직접 확인하고 편집기로 고칠 수 있어야 한다.
     try:
-        artifact = os.path.join(state, ARTIFACT_NAME)
-        tmp = artifact + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(body)
-        os.replace(tmp, artifact)
+        fsio.write_atomic(os.path.join(state, ARTIFACT_NAME), body)
     except OSError as exc:
         _log_failure(home, "artifact write failed: {}".format(exc))
 

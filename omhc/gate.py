@@ -4,6 +4,8 @@ import json
 import os
 from typing import Optional
 
+from . import fsio
+
 
 def _gate_dir(state_dir: str) -> str:
     return os.path.join(state_dir, "gate")
@@ -21,27 +23,9 @@ def claim(state_dir: str, adapter_id: str, session_id: str) -> bool:
     """
     if not session_id:
         return False
-    directory = _gate_dir(state_dir)
-    try:
-        os.makedirs(directory, exist_ok=True)
-    except OSError:
-        return False
-    path = os.path.join(directory, "{}.{}".format(adapter_id, session_id))
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        return False
-    except OSError:
-        return False
-    os.close(fd)
-    return True
-
-
-def released(state_dir: str, adapter_id: str, session_id: str) -> bool:
-    """이 세션이 이미 선점됐는가. 진단용이며 판단에는 claim 을 쓴다."""
-    return os.path.exists(
-        os.path.join(_gate_dir(state_dir), "{}.{}".format(adapter_id, session_id))
-    )
+    path = os.path.join(_gate_dir(state_dir),
+                        "{}.{}".format(adapter_id, session_id))
+    return fsio.claim_exclusive(path)
 
 
 def session_id_from_hook_payload(raw: str) -> Optional[str]:

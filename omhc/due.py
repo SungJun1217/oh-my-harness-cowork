@@ -4,7 +4,7 @@ import collections
 import os
 from typing import Optional
 
-from . import ledger, locate
+from . import fsio, ledger, locate
 
 # 이 namedtuple 과 색인 TSV 의 paths 열이 함께 동시성 seam 을 이룬다.
 Watermark = collections.namedtuple(
@@ -51,15 +51,10 @@ def mark_delivered(state_dir: str, watermark, *, to_harness: str, epoch: float) 
     """이 세션을 이 하네스에 전달했다고 기록한다. 같은 것을 두 번 밀지 않기 위함."""
     if watermark is None:
         return
-    os.makedirs(state_dir, exist_ok=True)
     line = "\t".join(
         (watermark.session_id, to_harness, watermark.harness, "{:.0f}".format(epoch))
     )
-    fd = os.open(_delivered_path(state_dir), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        os.write(fd, (line + "\n").encode("utf-8"))
-    finally:
-        os.close(fd)
+    fsio.append_line(_delivered_path(state_dir), line)
 
 
 def due(

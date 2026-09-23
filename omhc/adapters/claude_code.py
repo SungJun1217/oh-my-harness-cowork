@@ -8,7 +8,7 @@ import re
 import time
 from typing import Dict, List, Optional, Tuple
 
-from .. import guard, locate
+from .. import fsio, guard, locate
 from ..adapter import (
     Capability,
     HandoffBundle,
@@ -398,12 +398,7 @@ class ClaudeCodeAdapter:
         state = locate.state_dir(key, home=self._home)
         os.makedirs(state, exist_ok=True)
         path = os.path.join(state, ARTIFACT_NAME)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(bundle.body_md)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        fsio.write_atomic(path, bundle.body_md)
         return InstallReceipt(
             channel="sessionstart-hook",
             paths_written=(path,),

@@ -4,6 +4,8 @@ import os
 import re
 from typing import Optional
 
+from . import fsio
+
 MARKER_ID = "omhc"
 BEGIN_PREFIX = "<!-- {}:begin".format(MARKER_ID)
 END = "<!-- {}:end -->".format(MARKER_ID)
@@ -56,15 +58,7 @@ def splice(path: str, body: str, *, captured_at: float, file_header: str = "") -
             prefix, existing, "\n" if existing else "", block
         )
 
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    tmp = path + ".omhc.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(updated)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    fsio.write_atomic(path, updated)
 
 
 def strip(path: str) -> bool:
@@ -86,12 +80,7 @@ def strip(path: str) -> bool:
     # splice 가 끼워 넣은 빈 줄 하나를 되돌린다.
     if remainder.endswith("\n\n"):
         remainder = remainder[:-1]
-    tmp = path + ".omhc.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(remainder)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    fsio.write_atomic(path, remainder)
     return True
 
 

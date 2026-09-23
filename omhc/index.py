@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from typing import Iterable, List, NamedTuple, Optional, Tuple
 
+from . import fsio
+
 # 열 순서. 행당 60~90바이트를 목표로 한다.
 COLUMNS = ("seq", "epoch", "author", "verb", "ok", "offset", "length", "paths", "arg")
 
@@ -52,15 +54,7 @@ def append_rows(path: str, events: Iterable) -> int:
         )
     if not lines:
         return 0
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    blob = ("\n".join(lines) + "\n").encode("utf-8")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        os.write(fd, blob)
-    finally:
-        os.close(fd)
+    fsio.append_blob(path, "\n".join(lines) + "\n")
     return len(lines)
 
 

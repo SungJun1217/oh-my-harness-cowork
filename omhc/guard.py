@@ -24,18 +24,6 @@ FOREIGN_MARKERS = (
 # 비어 있는 것이 정상이다. 목격 테스트가 항목별로 이것을 확인한다.
 UNWITNESSED_OK: dict = {}
 
-# 교차 벤더 툴 이름. Event 스키마에 툴 이름 필드가 없으므로 이것은 2차 방어이며,
-# 사람이 쓴 문장에는 적용하지 않는다(거짓 양성을 낸다).
-FOREIGN_TOOLS = frozenset(
-    {
-        # Claude Code
-        "Read", "Edit", "Write", "Bash", "Task", "Glob", "Grep", "NotebookEdit",
-        "WebFetch", "WebSearch", "TodoWrite", "ExitPlanMode",
-        # Codex CLI
-        "shell", "local_shell_call", "apply_patch", "update_plan", "view_image",
-    }
-)
-
 # 사람이 쓰지 않았는데 사람 턴처럼 보이는 합성 문자열. 실물에서 목격된 것만.
 SYNTHETIC_HUMAN = ("[Request interrupted by user]",)
 
@@ -122,9 +110,3 @@ def safe(text: str, author: str) -> bool:
     if len(text) > MAX_DERIVED_CHARS:
         return False
     return not any(marker in text for marker in FOREIGN_MARKERS)
-
-
-def mentions_foreign_tool(text: str) -> bool:
-    """기계·에이전트 슬롯의 사후 검사용. 사람의 문장에는 적용하지 않는다."""
-    words = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text))
-    return bool(words & FOREIGN_TOOLS)
