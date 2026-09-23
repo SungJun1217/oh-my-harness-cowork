@@ -4,31 +4,17 @@ import json
 import os
 import unittest
 
-from ._repo import REPO
+from ._repo import (
+    CLAUDE_LIVE,
+    CLAUDE_SUB,
+    CODEX_EXEC,
+    MISSING,
+    REPO,
+    iter_json,
+    load_expected,
+)
 
-FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
-EXPECTED = os.path.join(FIX, "expected.json")
-CLAUDE_LIVE = os.path.join(FIX, "claude", "live.jsonl")
-CLAUDE_SUB = os.path.join(FIX, "claude", "subagent.jsonl")
-CODEX_EXEC = os.path.join(FIX, "codex", "exec.jsonl")
-
-MISSING = "픽스처가 없다. `python3 tests/harvest.py` 를 먼저 실행하라."
-
-have_fixtures = all(os.path.exists(p) for p in (EXPECTED, CLAUDE_LIVE, CODEX_EXEC))
-
-
-def load_expected() -> dict:
-    with open(EXPECTED, encoding="utf-8") as fh:
-        return json.load(fh)
-
-
-def iter_json(path: str):
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for i, line in enumerate(fh):
-            try:
-                yield i, json.loads(line)
-            except ValueError:
-                continue
+have_fixtures = __import__("tests._repo", fromlist=["have_fixtures"]).have_fixtures()
 
 
 @unittest.skipUnless(have_fixtures, MISSING)

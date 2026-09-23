@@ -246,7 +246,14 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     _check(out, "watcher (optional)", True,
            "running pid {}".format(watcher) if watcher
            else "not running — brief falls back to inline parsing")
-    out.write("\nartifact {}\n".format(
+    verbs = {}
+    for path in _index_files(state):
+        for row in index.rows(path):
+            verbs[row.verb] = verbs.get(row.verb, 0) + 1
+    if verbs:
+        out.write("\nevents  {}\n".format(
+            " ".join("{}={}".format(k, verbs[k]) for k in sorted(verbs))))
+    out.write("artifact {}\n".format(
         "{}B".format(os.path.getsize(artifact)) if os.path.exists(artifact)
         else "none"))
     return 0 if ok else 1
@@ -383,6 +390,17 @@ def main(argv=None, *, home=None, out=None) -> int:
         parser.print_help(out or sys.stdout)
         return 0
     stream = out or sys.stdout
+    # --harness 를 **여기서** 해소한다. 자유 문자열로 흘려보내면 오타가 세 깊이에서
+    # 서로 다르게 조용히 열화된다 — 와이어 표는 기본값으로 떨어지고, 같은 벤더
+    # 단축이 매칭을 멈추고, adapters.get 은 brief 의 bare except 안에서 터져
+    # 아무것도 출력하지 않는다. 경계에서 한 번 실패하는 것이 낫다.
+    harness = getattr(args, "harness", None)
+    if harness:
+        try:
+            adapters.get(harness, home=home)
+        except AdapterUnavailable as exc:
+            stream.write("{}\n".format(exc))
+            return 1
     try:
         return args.func(args, home=home, out=stream)
     except AdapterUnavailable as exc:

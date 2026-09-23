@@ -9,36 +9,23 @@ import unittest
 from omhc import adapter as A
 from omhc.adapters import codex_cli as CX
 
-from ._repo import REPO
+from . import _repo
+from ._repo import MISSING, REPO
+from ._repo import CODEX_EXEC as EXEC
 
-FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
-EXEC = os.path.join(FIX, "codex", "exec.jsonl")
-have_fixtures = os.path.exists(EXEC)
-MISSING = "픽스처가 없다. `python3 tests/harvest.py` 를 먼저 실행하라."
+have_fixtures = _repo.have_fixtures(EXEC)
 
 
 
 def ref_for(path: str) -> A.SessionRef:
-    return A.SessionRef(
-        adapter_id="codex-cli",
-        session_id="test-session",
-        source_path=path,
-        cwd=REPO,
-        epoch=0.0,
-        size=os.path.getsize(path) if os.path.exists(path) else 0,
-    )
+    return _repo.ref_for("codex-cli", path, session_id="test-session")
 
 
 def write_rollout(rows) -> str:
-    fh = tempfile.NamedTemporaryFile(
-        "w", suffix=".jsonl", delete=False, encoding="utf-8"
-    )
-    with fh:
-        for i, row in enumerate(rows):
-            row.setdefault("ordinal", i)
-            row.setdefault("timestamp", "2026-09-22T16:30:0{}.000Z".format(i % 10))
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    return fh.name
+    for i, row in enumerate(rows):
+        row.setdefault("ordinal", i)
+        row.setdefault("timestamp", "2026-09-22T16:30:0{}.000Z".format(i % 10))
+    return _repo.write_jsonl(rows)
 
 
 def msg(role: str, text: str) -> dict:

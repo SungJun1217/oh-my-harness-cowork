@@ -17,13 +17,10 @@ from omhc import guard, mint
 from omhc.adapters import claude_code as CC
 from omhc.adapters import codex_cli as CX
 
-from ._repo import REPO
+from . import _repo
+from ._repo import CLAUDE_LIVE, CODEX_EXEC, MISSING, REPO
 
-FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
-CLAUDE_LIVE = os.path.join(FIX, "claude", "live.jsonl")
-CODEX_EXEC = os.path.join(FIX, "codex", "exec.jsonl")
-have_fixtures = os.path.exists(CLAUDE_LIVE) and os.path.exists(CODEX_EXEC)
-MISSING = "픽스처가 없다. `python3 tests/harvest.py` 를 먼저 실행하라."
+have_fixtures = _repo.have_fixtures(CLAUDE_LIVE, CODEX_EXEC)
 
 NOW = 1758500000.0
 
@@ -31,19 +28,10 @@ SENTINEL = "OMHC-SENTINEL-8f3a2b1c-MUST-NEVER-BE-RELAYED"
 
 
 def ref_for(adapter_id: str, path: str) -> A.SessionRef:
-    return A.SessionRef(
-        adapter_id=adapter_id, session_id="s1", source_path=path, cwd=REPO,
-        epoch=0.0, size=os.path.getsize(path),
-    )
+    return _repo.ref_for(adapter_id, path, session_id="s1")
 
 
-def write_jsonl(rows) -> str:
-    fh = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False,
-                                     encoding="utf-8")
-    with fh:
-        for row in rows:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    return fh.name
+write_jsonl = _repo.write_jsonl
 
 
 def mint_claude(rows, budget=900) -> str:

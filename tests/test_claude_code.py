@@ -8,31 +8,21 @@ import unittest
 from omhc import adapter as A
 from omhc.adapters import claude_code as CC
 
-from ._repo import REPO
+from . import _repo
+from ._repo import MISSING, REPO
+from ._repo import CLAUDE_LIVE as LIVE
+from ._repo import CLAUDE_SUB as SUB
 
-FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
-EXPECTED = os.path.join(FIX, "expected.json")
-LIVE = os.path.join(FIX, "claude", "live.jsonl")
-SUB = os.path.join(FIX, "claude", "subagent.jsonl")
-have_fixtures = os.path.exists(LIVE) and os.path.exists(EXPECTED)
-MISSING = "픽스처가 없다. `python3 tests/harvest.py` 를 먼저 실행하라."
+have_fixtures = _repo.have_fixtures(LIVE, _repo.EXPECTED)
 
 
 
 def expected() -> dict:
-    with open(EXPECTED, encoding="utf-8") as fh:
-        return json.load(fh)
+    return _repo.load_expected()
 
 
 def ref_for(path: str, cwd=REPO) -> A.SessionRef:
-    return A.SessionRef(
-        adapter_id="claude-code",
-        session_id=os.path.basename(path)[: -len(".jsonl")],
-        source_path=path,
-        cwd=cwd,
-        epoch=0.0,
-        size=os.path.getsize(path) if os.path.exists(path) else 0,
-    )
+    return _repo.ref_for("claude-code", path, cwd=cwd)
 
 
 class TestSlug(unittest.TestCase):

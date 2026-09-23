@@ -7,65 +7,27 @@ import tempfile
 import time
 import unittest
 
-from omhc import index, locate, watch
+from omhc import index, watch
 
-
-def git(repo: str, *args: str) -> None:
-    subprocess.run(["git", "-C", repo] + list(args), check=True, capture_output=True)
+from . import _repo
 
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = os.path.join(self.tmp.name, "home")
-        self.repo = os.path.join(self.tmp.name, "repo")
-        os.makedirs(self.home)
-        os.makedirs(self.repo)
-        git(self.repo, "init", "-q")
-        self.root = os.path.realpath(self.repo)
-        self.state = locate.state_dir(locate.repo_key(self.root), home=self.home)
+        self.t = _repo.TempRepo()
+        self.addCleanup(self.t.close)
+        self.home = self.t.home
+        self.root = self.t.root
+        self.state = self.t.state
         # 스킵 캐시는 모듈 전역이다. 테스트 간 오염을 막는다.
         watch.forget()
 
-    def tearDown(self):
-        self.tmp.cleanup()
-
     def plant_codex(self, session_id="cx1", extra_turns=0):
-        stamp = time.gmtime()
-        directory = os.path.join(self.home, ".codex", "sessions",
-                                 time.strftime("%Y/%m/%d", stamp))
-        os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, "rollout-{}.jsonl".format(session_id))
-        rows = [
-            {"timestamp": "2026-09-22T16:30:00.000Z", "ordinal": 0,
-             "type": "session_meta",
-             "payload": {"session_id": session_id, "cwd": self.root}},
-            {"timestamp": "2026-09-22T16:30:01.000Z", "ordinal": 1,
-             "type": "response_item",
-             "payload": {"type": "message", "role": "user", "id": "u0",
-                         "content": [{"type": "input_text", "text": "첫 말"}]}},
-        ]
-        for i in range(extra_turns):
-            rows.append({
-                "timestamp": "2026-09-22T16:30:0{}.000Z".format(2 + i % 8),
-                "ordinal": 2 + i, "type": "response_item",
-                "payload": {"type": "function_call", "name": "shell",
-                            "call_id": "c{}".format(i),
-                            "arguments": json.dumps({"command": ["ls", str(i)]})}})
-        with open(path, "w", encoding="utf-8") as fh:
-            for row in rows:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-        return path
+        return self.t.plant_codex(session_id=session_id, human="첫 말",
+                                  shell_turns=extra_turns)
 
     def append_turn(self, path, i):
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({
-                "timestamp": "2026-09-22T16:31:00.000Z", "ordinal": 90 + i,
-                "type": "response_item",
-                "payload": {"type": "function_call", "name": "shell",
-                            "call_id": "late{}".format(i),
-                            "arguments": json.dumps({"command": ["echo", str(i)]})},
-            }, ensure_ascii=False) + "\n")
+        _repo.append_codex_turn(path, ordinal=90 + i)
 
 
 class TestLock(Base):

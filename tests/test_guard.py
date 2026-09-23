@@ -6,9 +6,10 @@ import unittest
 
 from omhc import guard
 
-FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
-CLAUDE_LIVE = os.path.join(FIX, "claude", "live.jsonl")
-CODEX_EXEC = os.path.join(FIX, "codex", "exec.jsonl")
+from . import _repo
+
+CLAUDE_LIVE = _repo.CLAUDE_LIVE
+CODEX_EXEC = _repo.CODEX_EXEC
 have_fixtures = os.path.exists(CLAUDE_LIVE) and os.path.exists(CODEX_EXEC)
 MISSING = "픽스처가 없다. `python3 tests/harvest.py` 를 먼저 실행하라."
 

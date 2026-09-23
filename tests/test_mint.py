@@ -102,11 +102,28 @@ class TestBudget(unittest.TestCase):
             "내용이 하나도 없는 표식은 쓸모가 없다: {!r}".format(out),
         )
 
-    def test_priority_keeps_verified_facts_over_an_unverified_claim(self):
-        """PLAN? 은 이전 에이전트의 주장이다. GOAL/DID 보다 먼저 버려야 한다."""
-        self.assertGreater(mint._PRIORITY["GOAL"], mint._PRIORITY["PLAN?"])
-        self.assertGreater(mint._PRIORITY["DID"], mint._PRIORITY["PLAN?"])
-        self.assertGreater(mint._PRIORITY["NEXT"], mint._PRIORITY["GOAL"])
+    def test_budget_pressure_keeps_verified_facts_over_an_unverified_claim(self):
+        """PLAN? 은 이전 에이전트의 주장이므로 GOAL 보다 먼저 버려져야 한다.
+
+        사적 상수(_PRIORITY)를 단정하면 드롭 메커니즘을 리팩터링할 때마다 동작
+        변화 없이 테스트가 깨지고, 게다가 숫자가 맞아도 루프가 엉뚱한 것을 버릴 수
+        있어 보장을 증명하지 못한다. 관측 가능한 결과로 단정한다.
+        """
+        events = [
+            ev(1, text="목표를 세운다 " * 12),
+            ev(2, author="agent", text="이전 에이전트의 계획 주장 " * 12),
+            ev(3, text="응"),
+        ]
+        roomy = slots_of(mint.mint(read_of(events), to_adapter_id="claude-code",
+                                   budget=900, now=NOW))
+        self.assertIn("GOAL", roomy)
+        self.assertIn("PLAN?", roomy)
+
+        tight = slots_of(mint.mint(read_of(events), to_adapter_id="claude-code",
+                                   budget=480, now=NOW))
+        self.assertIn("GOAL", tight, "검증된 목표가 주장보다 먼저 버려졌다")
+        self.assertNotIn("PLAN?", tight)
+        self.assertIn("plan?", " ".join(tight.get("MORE", [])).lower())
 
 
 class TestProvenanceSlots(unittest.TestCase):

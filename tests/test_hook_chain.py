@@ -8,7 +8,9 @@ import subprocess
 import tempfile
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from . import _repo
+
+ROOT = _repo.REPO
 OMHC = os.path.join(ROOT, "bin", "omhc")
 FRAGMENTS = {
     "claude-code": os.path.join(ROOT, "hooks", "claude-settings.fragment.json"),
@@ -70,18 +72,11 @@ class TestHookChainExecution(unittest.TestCase):
     """배포된 명령을 실제로 실행한다. 인자 문자열의 오타까지 잡는다."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = os.path.join(self.tmp.name, "home")
-        self.repo = os.path.join(self.tmp.name, "repo")
-        os.makedirs(self.home)
-        os.makedirs(self.repo)
-        subprocess.run(["git", "-C", self.repo, "init", "-q"], check=True,
-                       capture_output=True)
-        self.env = dict(os.environ, HOME=self.home)
-        self.env.pop("OMHC_OFF", None)
-
-    def tearDown(self):
-        self.tmp.cleanup()
+        self.t = _repo.TempRepo()
+        self.addCleanup(self.t.close)
+        self.home = self.t.home
+        self.repo = self.t.repo
+        self.env = self.t.env
 
     def _run(self, command: str, stdin_text: str):
         # 배포된 명령의 $HOME/.local/bin/omhc 를 이 레포의 런처로 바꾼다.
@@ -95,28 +90,8 @@ class TestHookChainExecution(unittest.TestCase):
                            "session_id": session_id})
 
     def _plant_codex(self, session_id="cx1"):
-        import time as _time
-
-        stamp = _time.gmtime()
-        directory = os.path.join(self.home, ".codex", "sessions",
-                                 _time.strftime("%Y/%m/%d", stamp))
-        os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, "rollout-{}.jsonl".format(session_id))
-        rows = [
-            {"timestamp": "2026-09-22T16:30:00.000Z", "ordinal": 0,
-             "type": "session_meta",
-             "payload": {"session_id": session_id,
-                         "cwd": os.path.realpath(self.repo)}},
-            {"timestamp": "2026-09-22T16:30:01.000Z", "ordinal": 1,
-             "type": "response_item",
-             "payload": {"type": "message", "role": "user", "id": "u1",
-                         "content": [{"type": "input_text",
-                                      "text": "리더를 붙여서 양방향으로 만들기"}]}},
-        ]
-        with open(path, "w", encoding="utf-8") as fh:
-            for row in rows:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-        return path
+        return self.t.plant_codex(session_id=session_id,
+                                  human="리더를 붙여서 양방향으로 만들기")
 
     def test_claude_chain_with_nothing_to_send_is_silent(self):
         for command in shipped_commands(FRAGMENTS["claude-code"]):
@@ -172,18 +147,11 @@ class TestF7ZeroCase(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = os.path.join(self.tmp.name, "home")
-        self.repo = os.path.join(self.tmp.name, "repo")
-        os.makedirs(self.home)
-        os.makedirs(self.repo)
-        subprocess.run(["git", "-C", self.repo, "init", "-q"], check=True,
-                       capture_output=True)
-        self.env = dict(os.environ, HOME=self.home)
-        self.env.pop("OMHC_OFF", None)
-
-    def tearDown(self):
-        self.tmp.cleanup()
+        self.t = _repo.TempRepo()
+        self.addCleanup(self.t.close)
+        self.home = self.t.home
+        self.repo = self.t.repo
+        self.env = self.t.env
 
     def _chain(self, session_id: str):
         outputs = []

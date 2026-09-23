@@ -9,9 +9,7 @@ from omhc import adapter as A
 from omhc import agents_md, managed_block
 
 
-def git(repo: str, *args: str) -> None:
-    subprocess.run(["git", "-C", repo] + list(args), check=True,
-                   capture_output=True, text=True)
+from ._repo import git  # noqa: E402  (공유 정의)
 
 
 class TestAgentsMd(unittest.TestCase):

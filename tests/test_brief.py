@@ -7,66 +7,33 @@ import subprocess
 import tempfile
 import unittest
 
-from omhc import brief, deliver, ledger, locate
+from omhc import brief, deliver, ledger
+
+from . import _repo
 from omhc.adapter import Capability, HandoffBundle
 
 NOW = 1758500000.0
 
 
-def git(repo: str, *args: str) -> None:
-    subprocess.run(["git", "-C", repo] + list(args), check=True, capture_output=True)
-
-
 class Harness:
-    """임시 홈 + 임시 레포에 Codex 세션 하나를 심어 두는 픽스처."""
+    """임시 홈 + 임시 레포. 세션 심기는 tests/_repo.plant_codex 가 소유한다."""
 
     def __init__(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = os.path.join(self.tmp.name, "home")
-        self.repo = os.path.join(self.tmp.name, "repo")
-        os.makedirs(self.home)
-        os.makedirs(self.repo)
-        git(self.repo, "init", "-q")
-        self.repo_root = os.path.realpath(self.repo)
-        self.key = locate.repo_key(self.repo_root)
-        self.state = locate.state_dir(self.key, home=self.home)
+        self.t = _repo.TempRepo()
+        self.home = self.t.home
+        self.repo = self.t.repo
+        self.repo_root = self.t.root
+        self.key = self.t.key
+        self.state = self.t.state
 
     def close(self):
-        self.tmp.cleanup()
+        self.t.close()
 
-    def plant_codex_session(self, session_id="cx1", human="필드 경로부터 다시 확인해줘"):
-        import time as _time
-
-        stamp = _time.gmtime(NOW)
-        directory = os.path.join(
-            self.home, ".codex", "sessions", _time.strftime("%Y/%m/%d", stamp)
-        )
-        os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, "rollout-{}.jsonl".format(session_id))
-        rows = [
-            {"timestamp": "2026-09-22T16:30:00.000Z", "ordinal": 0,
-             "type": "session_meta",
-             "payload": {"session_id": session_id, "cwd": self.repo_root}},
-            {"timestamp": "2026-09-22T16:30:01.000Z", "ordinal": 1,
-             "type": "response_item",
-             "payload": {"type": "message", "role": "user", "id": "u1",
-                         "content": [{"type": "input_text", "text": human}]}},
-            {"timestamp": "2026-09-22T16:30:02.000Z", "ordinal": 2,
-             "type": "response_item",
-             "payload": {"type": "function_call", "name": "shell", "call_id": "c1",
-                         "arguments": json.dumps({"command": ["pytest", "-q"]})}},
-            {"timestamp": "2026-09-22T16:30:03.000Z", "ordinal": 3,
-             "type": "response_item",
-             "payload": {"type": "function_call_output", "call_id": "c1",
-                         "output": json.dumps({"exit_code": 1, "output": "3 failed"})}},
-        ]
-        with open(path, "w", encoding="utf-8") as fh:
-            for row in rows:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-        ledger.append({"repo": self.key, "harness": "codex-cli",
-                       "session": session_id, "event": "start", "epoch": NOW - 600,
-                       "path": path, "cwd": self.repo_root}, home=self.home)
-        return path
+    def plant_codex_session(self, session_id="cx1",
+                            human="필드 경로부터 다시 확인해줘"):
+        return self.t.plant_codex(session_id=session_id, human=human,
+                                  shell_turns=1, failing_shell=True,
+                                  ledger_home=self.home, when=NOW)
 
 
 class TestCompute(unittest.TestCase):
