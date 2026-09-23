@@ -320,3 +320,30 @@ class TestDeliver(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWireFormat(unittest.TestCase):
+    """세 형식을 동시에 내보내면 Claude Code 가 중복 제거 없이 둘 다 읽어 두 번
+    주입된다 — 설치된 superpowers 훅의 주석에서 확인한 사실이다."""
+
+    def test_claude_wire_is_nested_only(self):
+        payload = json.loads(brief.hook_wire("x", "claude"))
+        self.assertEqual(list(payload), ["hookSpecificOutput"])
+        self.assertEqual(payload["hookSpecificOutput"]["additionalContext"], "x")
+
+    def test_cursor_wire_is_snake_case_only(self):
+        payload = json.loads(brief.hook_wire("x", "cursor"))
+        self.assertEqual(list(payload), ["additional_context"])
+
+    def test_sdk_wire_is_top_level_only(self):
+        payload = json.loads(brief.hook_wire("x", "sdk"))
+        self.assertEqual(list(payload), ["additionalContext"])
+
+    def test_no_wire_format_emits_more_than_one_field(self):
+        for wire in ("claude", "cursor", "sdk"):
+            payload = json.loads(brief.hook_wire("x", wire))
+            self.assertEqual(len(payload), 1, wire)
+
+    def test_wire_defaults_are_derived_from_the_harness(self):
+        self.assertEqual(brief.WIRE_BY_HARNESS["claude-code"], "claude")
+        self.assertEqual(brief.WIRE_BY_HARNESS["codex-cli"], "sdk")

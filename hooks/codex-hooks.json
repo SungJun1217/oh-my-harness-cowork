@@ -1,0 +1,36 @@
+{
+  "_comment": [
+    "~/.codex/hooks.json 으로 복사한다. 이 머신에는 원래 이 파일이 없었다.",
+    "",
+    "⚠️ 미검증: Codex 는 훅 신뢰(HookStateToml{enabled, trusted_hash})를 갖고 있어",
+    "손으로 떨어뜨린 파일을 거부할 수 있다. `codex exec --dangerously-bypass-hook-trust`",
+    "플래그가 존재한다는 것 자체가 그 메커니즘의 근거다. 이 머신은 Codex 인증이",
+    "없어(401) 훅이 실제로 발동하는지 확인하지 못했다.",
+    "",
+    "훅이 거부되어도 하루 루프의 절반은 동작한다: Codex→Claude 방향은 훅에",
+    "의존하지 않고 rollout 파일을 직접 읽는다. Codex 로 들어가는 방향은 Path B",
+    "(AGENTS.md 관리 구간)가 받고, 그것도 막히면 <repo>/.omhc/outbox/ 로 떨어진다.",
+    "",
+    "Codex 에는 종료 훅도 압축 훅도 없다. 6종 모두 '무언가가 시작될 때' 걸리므로",
+    "캡처는 다음 세션 시작의 지연 소급 수집으로만 가능하다 — 그 덕에 Ctrl-C 와",
+    "크래시가 정의상 문제가 되지 않는다.",
+    "",
+    "--wire sdk 는 최상위 {\"additionalContext\": …} 를 뜻한다(SDK 표준)."
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/omhc mark --harness codex-cli"
+          },
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/omhc brief --harness codex-cli --wire sdk"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -74,17 +74,42 @@ def read_refs(state_dir: str) -> dict:
     return out
 
 
-def hook_wire(text: str) -> str:
-    """Claude Code / Codex 가 세션 컨텍스트로 받아들이는 모양."""
-    return json.dumps(
-        {
+# 와이어 형식은 하네스마다 다르다. 실측된 세 가지:
+#   claude : {"hookSpecificOutput": {"hookEventName": "SessionStart",
+#                                    "additionalContext": …}}
+#   cursor : {"additional_context": …}            (snake_case)
+#   sdk    : {"additionalContext": …}             (최상위, SDK 표준 / Copilot CLI)
+#
+# **세 형식을 동시에 내보내면 안 된다.** Claude Code 는 additional_context 와
+# hookSpecificOutput 을 **중복 제거 없이 둘 다 읽으므로**(설치된 superpowers 훅의
+# 주석에서 확인) 핸드오프가 두 번 주입된다 — 게이트로 막은 중복을 와이어 레벨에서
+# 되살리는 셈이다.
+#
+# 환경변수로 플랫폼을 추측하지도 않는다. 우리가 하네스별 훅 설정을 직접 쓰므로
+# 대상을 이미 알고 있고, 추측은 틀릴 수 있다(우리는 플러그인이 아니라 설정 훅이라
+# CLAUDE_PLUGIN_ROOT 가 설정되지 않는다).
+WIRE_BY_HARNESS = {
+    "claude-code": "claude",
+    "codex-cli": "sdk",
+    "cursor-ide": "cursor",
+}
+DEFAULT_WIRE = "sdk"
+
+
+def hook_wire(text: str, wire: str = "claude") -> str:
+    """지정된 하나의 형식으로만 내보낸다."""
+    if wire == "cursor":
+        payload = {"additional_context": text}
+    elif wire == "sdk":
+        payload = {"additionalContext": text}
+    else:
+        payload = {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
                 "additionalContext": text,
             }
-        },
-        ensure_ascii=False,
-    )
+        }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def compute(
@@ -168,11 +193,14 @@ def run(argv, stdin_text: str = "", *, home: Optional[str] = None,
     budget = mint.BUDGET
     force = False
     as_text = False
+    wire = ""
     args = list(argv)
     while args:
         token = args.pop(0)
         if token == "--harness" and args:
             harness = args.pop(0)
+        elif token == "--wire" and args:
+            wire = args.pop(0)
         elif token == "--budget" and args:
             try:
                 budget = int(args.pop(0))
@@ -212,7 +240,8 @@ def run(argv, stdin_text: str = "", *, home: Optional[str] = None,
             # 출력 직전 재검사. 버그가 과대 페이로드를 주입하지 못하게 한다.
             _log_failure(home, "body exceeded budget at print time; suppressed")
             return 0
-        stream.write(body if as_text else hook_wire(body) + "\n")
+        chosen = wire or WIRE_BY_HARNESS.get(harness, DEFAULT_WIRE)
+        stream.write(body if as_text else hook_wire(body, chosen) + "\n")
         return 0
     except Exception:
         _log_failure(home, traceback.format_exc())

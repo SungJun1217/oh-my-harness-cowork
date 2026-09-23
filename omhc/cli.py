@@ -246,6 +246,8 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
 
 def cmd_brief(args, *, home=None, out=sys.stdout) -> int:
     argv = ["--harness", args.harness, "--budget", str(args.budget)]
+    if args.wire:
+        argv += ["--wire", args.wire]
     if args.force:
         argv.append("--force")
     if args.text or args.dry_run:
@@ -280,6 +282,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("brief", help="훅 경로: 전달할 표식을 stdout 으로")
     p.add_argument("--harness", required=True)
     p.add_argument("--budget", type=int, default=900)
+    p.add_argument("--wire", default="", choices=("", "claude", "cursor", "sdk"),
+                   help="주입 JSON 형식. 기본값은 --harness 에서 유도한다")
     p.add_argument("--force", action="store_true")
     p.add_argument("--text", action="store_true")
     p.add_argument("--dry-run", action="store_true")
