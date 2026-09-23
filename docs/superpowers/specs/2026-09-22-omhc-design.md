@@ -136,7 +136,7 @@ PULL  omhc show E1 · omhc log --last 30 · omhc log --grep function_call
 | `pinned/<session-id>/source.jsonl` | 하네스 원본에 대한 `os.link()` 하드링크 |
 | `pinned/<session-id>/tool-results/*.txt` | 사이드카 각각에 대한 하드링크 — `<persisted-output>` 스텁을 해소 가능하게 유지 |
 | `pinned/<session-id>/rescued/<agentId>.output` | **유일한 실제 복사본.** `/tmp` 참조물은 다른 파일시스템이고 재부팅에 죽는다. 5MB 상한 |
-| `index/<session-id>.idx` | TSV, Event당 1행: `seq epoch author verb ok offset length paths arg120`. 약 60~90 B/행. append-only, 마지막 행의 `offset+length`에서 재개 가능 |
+| `index/<session-id>.idx` | TSV, Event당 1행: `seq epoch author verb ok offset length paths arg120`. **실측 115 B/행** — 3.2MB 세션의 275 Event가 31.5KB(원본의 약 1%). append-only, 마지막 행의 `offset+length`에서 재개 가능. 잘린 마지막 행은 건너뛴다 |
 | `refs.tsv` | `tag session_id source_path offset length`. 매 mint가 재작성. 900바이트 안에 세션 id 없이도 `omhc show E1`이 풀리는 근거 |
 | `ledger.jsonl` (전역, `~/.omhc/`) | 세션 생명주기 및 인출 이벤트. §7.1 |
 
