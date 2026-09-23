@@ -50,7 +50,9 @@ v1 대상은 **Claude Code ↔ Codex CLI 양방향**, 같은 머신·같은 레�
 - 레코드별 타임스탬프는 **단조가 아니다** — 최대 파일에 역행 지점 254개, 최대 52ms 역행 → 순서 기준으로 쓸 수 없다.
 - Codex: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`이 source of truth이고 sqlite들(`thread_history_1`, `state_5`, `memories_1`, `goals_1`, `queue_1`, `logs_2`)은 그 투영이다. `~/.codex/history.jsonl`은 이 머신에 없다.
 - 이 머신의 유일한 Codex rollout에는 **어시스턴트 메시지 0개, 툴 호출 0개**다 → Codex 동사 매핑은 아직 실물로 검증되지 않았다. **최대 미지**.
-- Codex `role=="user"` 레코드 중 하나는 `content_item_kinds: ["environments.environment_context"]`로 환경 프롬프트를 싣고 있다 → 역할 기반 필터는 Codex 환경 프롬프트를 중계한다. **메타데이터 기반 판정이 필수.**
+- Codex `role=="user"` 레코드가 2개이고 **하나가 `<environment_context>…</environment_context>` 봉투**, 하나가 진짜 사람의 프롬프트다 → 역할 기반 필터만으로는 Codex 환경 프롬프트를 중계한다.
+  - **정정(2026-09-23, 실물 확인):** 정찰은 `content_item_kinds: ["environments.environment_context"]` 라는 메타데이터 필드로 판정해야 한다고 보고했으나, **그 필드는 두 rollout 어디에도 존재하지 않는다.** 실제 페이로드는 `{content: [{type: "input_text", text}], id, internal_chat_message_metadata_passthrough, role, type: "message"}` 다. 따라서 판별자는 메타데이터가 아니라 **봉투 구조**이고, Claude Code에 쓰는 봉투 판정 하나가 두 하네스를 동시에 처리한다 — 하네스별 특수 케이스가 하나 사라진다.
+  - `role=="developer"` 레코드는 `<skills_instructions>`(2484자) · `<permissions instructions>`(341) · `<collaboration_mode>`(1328) · `<multi_agent_role>`(2429) · `<multi_agent_mode>`(271) 로 순수 기계장치다. 역할 화이트리스트에서 제외한다.
 - Codex 샌드박스가 `{"type":"read-only"}`로 관측된 사례가 있다 → 레포 안으로 쓰는 경로를 전제하면 안 된다.
 - `~/.claude`와 `~/` 는 **같은 장치**다 → 하드링크 가능.
 
