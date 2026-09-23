@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import time
 from typing import Optional
 
@@ -24,6 +23,10 @@ def path_for(repo_root: str) -> str:
 
 def _is_tracked(repo_root: str) -> bool:
     """git 이 이미 추적 중인가. 추적 중이면 exclude 는 무효이고 건드리면 안 된다."""
+    # subprocess 는 select/selectors/threading 을 끌어와 import 에 약 4ms 든다.
+    # 이 함수는 Codex Path B 를 쓸 때만 불리므로 훅 경로의 대부분은 지불하지 않는다.
+    import subprocess
+
     try:
         out = subprocess.run(
             ["git", "-C", repo_root, "ls-files", "--error-unmatch", FILE_NAME],

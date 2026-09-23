@@ -2,30 +2,30 @@ from __future__ import annotations
 
 import hashlib
 import os
-import subprocess
 from typing import Optional
 
 
 def resolve_repo_root(start: Optional[str] = None) -> str:
-    """레포 루트의 THE 정의. git toplevel, 없으면 realpath(cwd).
+    """레포 루트의 THE 정의. `.git` 을 만나는 첫 조상, 없으면 realpath(cwd).
 
     호출 지점마다 다르게 정의하면 서브디렉터리에서 세션 목록이 조용히 0건이
-    된다. Codex는 rollout에 레포 루트를 기록하므로 equal-or-descendant 판정과
+    된다. Codex 는 rollout 에 레포 루트를 기록하므로 equal-or-descendant 판정과
     짝을 이뤄야 한다.
+
+    `git rev-parse --show-toplevel` 을 쓰지 않는다. 훅 경로에서 프로세스당 한 번
+    이상 불리는데 fork/exec 가 약 2.7ms 이고 subprocess import 가 약 3.7ms 라
+    합쳐서 예산의 4% 를 먹는다. 상향 탐색은 stat 몇 번이고 워크트리·서브모듈처럼
+    `.git` 이 파일인 경우도 같이 잡는다.
     """
     base = os.path.realpath(start or os.getcwd())
-    try:
-        out = subprocess.run(
-            ["git", "-C", base, "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if out.returncode == 0 and out.stdout.strip():
-            return os.path.realpath(out.stdout.strip())
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return base
+    current = base
+    while True:
+        if os.path.exists(os.path.join(current, ".git")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return base
+        current = parent
 
 
 def repo_key(repo_root: str) -> str:

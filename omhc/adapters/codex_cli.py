@@ -335,12 +335,7 @@ class CodexCliAdapter:
                     if _output_failed(payload):
                         idx = pending.get(payload.get("call_id"))
                         if idx is not None:
-                            old = events[idx]
-                            events[idx] = Event(
-                                seq=old.seq, epoch=old.epoch, author=old.author,
-                                verb=old.verb, ok=False, text=old.text, arg=old.arg,
-                                paths=old.paths, offset=old.offset, length=old.length,
-                            )
+                            events[idx] = events[idx]._replace(ok=False)
                     bump("tool_output")
                     continue
 

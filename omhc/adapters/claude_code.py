@@ -383,12 +383,7 @@ class ClaudeCodeAdapter:
             idx = pending.get(block.get("tool_use_id"))
             if idx is None:
                 continue
-            old = events[idx]
-            events[idx] = Event(
-                seq=old.seq, epoch=old.epoch, author=old.author, verb=old.verb,
-                ok=False, text=old.text, arg=old.arg, paths=old.paths,
-                offset=old.offset, length=old.length,
-            )
+            events[idx] = events[idx]._replace(ok=False)
 
     def classify(self, source_path: str) -> bool:
         """사람이 대화한 세션인가. entrypoint 와 서브체인 표식으로 판정한다.

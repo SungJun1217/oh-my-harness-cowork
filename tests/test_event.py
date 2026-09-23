@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 import unittest
 
 from omhc.event import AUTHORS, VERBS, Event, tally
@@ -43,16 +42,24 @@ class TestEvent(unittest.TestCase):
             mk(author="user")
 
     def test_event_has_no_field_that_could_hold_a_tool_name(self):
-        names = {f.name for f in dataclasses.fields(Event)}
         for forbidden in ("tool", "tool_name", "extra", "raw", "metadata", "payload"):
-            self.assertNotIn(forbidden, names)
+            self.assertNotIn(forbidden, Event._fields)
 
-    def test_event_is_frozen_against_declared_and_undeclared_names(self):
+    def test_event_is_immutable_against_declared_and_undeclared_names(self):
+        """namedtuple + __slots__ = () 이므로 어느 이름도 할당할 수 없다.
+
+        dataclasses 대신 namedtuple 을 쓰는 이유는 import 비용이다 — dataclasses 는
+        inspect·ast·dis·tokenize 를 끌어와 훅 경로 두 프로세스가 매번 8ms 씩
+        지불했다. 불변 보장은 동일하다.
+        """
         ev = mk()
-        with self.assertRaises(dataclasses.FrozenInstanceError):
+        with self.assertRaises(AttributeError):
             ev.text = "x"
-        with self.assertRaises(dataclasses.FrozenInstanceError):
+        with self.assertRaises(AttributeError):
             ev.smuggled = "x"
+
+    def test_event_instances_have_no_dict(self):
+        self.assertFalse(hasattr(mk(), "__dict__"))
 
     def test_tally_counts_by_verb_and_author(self):
         events = [

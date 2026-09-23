@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Dict, NamedTuple, Optional, Tuple
 
 from .event import Event
 
@@ -34,14 +33,12 @@ class NoInjectionChannel(OmhcAdapterError):
     """쓰기 능력이 없거나 모든 주입 경로가 막혔다. 호출자가 보편 바닥으로 보낸다."""
 
 
-@dataclass(frozen=True)
-class HarnessPresence:
+class HarnessPresence(NamedTuple):
     present: bool
     note: str = ""
 
 
-@dataclass(frozen=True)
-class SessionRef:
+class SessionRef(NamedTuple):
     """한 세션 파일을 가리키는 포인터.
 
     cwd 가 None 일 수 있다 — 작업 디렉터리 개념이 없는 하네스가 존재하며,
@@ -56,8 +53,7 @@ class SessionRef:
     size: int
 
 
-@dataclass(frozen=True)
-class SessionRead:
+class SessionRead(NamedTuple):
     """한 세션을 중립 Event 로 읽은 결과.
 
     unparsed/dropped 는 조용한 열화를 관측 가능하게 만든다. 모르는 레코드에서
@@ -66,19 +62,19 @@ class SessionRead:
 
     ref: SessionRef
     events: Tuple[Event, ...]
-    unparsed: int = 0
-    dropped: Dict[str, int] = field(default_factory=dict)
+    unparsed: int
+    # 기본값을 주지 않는다 — NamedTuple 의 기본값은 인스턴스 간에 공유되므로
+    # 가변 dict 를 기본값으로 두면 한 어댑터의 집계가 다른 어댑터에 새어든다.
+    dropped: Dict[str, int]
 
 
-@dataclass(frozen=True)
-class HandoffBundle:
+class HandoffBundle(NamedTuple):
     body_md: str
     repo_root: str
     to_adapter_id: str
 
 
-@dataclass(frozen=True)
-class InstallReceipt:
+class InstallReceipt(NamedTuple):
     """모든 주입 경로는 receipt 로 끝난다. 조용한 실패를 만들지 않는다."""
 
     channel: str

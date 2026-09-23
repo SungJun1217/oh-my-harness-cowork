@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 import unittest
 
 from omhc import adapter as A
@@ -37,14 +36,14 @@ class TestCapability(unittest.TestCase):
 
 
 class TestRecords(unittest.TestCase):
-    def test_records_are_frozen(self):
+    def test_records_are_immutable(self):
         ref = A.SessionRef(
             adapter_id="fake", session_id="s", source_path="/p", cwd="/c",
             epoch=1.0, size=2,
         )
-        with self.assertRaises(dataclasses.FrozenInstanceError):
+        with self.assertRaises(AttributeError):
             ref.session_id = "x"
-        with self.assertRaises(dataclasses.FrozenInstanceError):
+        with self.assertRaises(AttributeError):
             ref.smuggled = "x"
 
     def test_session_ref_cwd_may_be_none_for_cwdless_harnesses(self):
@@ -57,9 +56,9 @@ class TestRecords(unittest.TestCase):
     def test_no_record_has_a_field_that_could_hold_foreign_material(self):
         for cls in (A.SessionRef, A.SessionRead, A.HandoffBundle,
                     A.InstallReceipt, A.HarnessPresence):
-            names = {f.name for f in dataclasses.fields(cls)}
             for forbidden in ("raw", "extra", "metadata", "payload", "tool"):
-                self.assertNotIn(forbidden, names, "{}.{}".format(cls.__name__, forbidden))
+                self.assertNotIn(forbidden, cls._fields,
+                                 "{}.{}".format(cls.__name__, forbidden))
 
 
 class TestRegistry(unittest.TestCase):

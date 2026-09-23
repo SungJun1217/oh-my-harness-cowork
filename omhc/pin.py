@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import glob
 import os
-import shutil
 from typing import NamedTuple, Optional
 
 # 구조된 사본의 상한. /tmp 참조물은 다른 파일시스템이라 하드링크가 불가능하고
@@ -123,6 +122,10 @@ def rescue(state_dir: str, session_id: str, src: str) -> Optional[str]:
     os.makedirs(target_dir, exist_ok=True)
     target = os.path.join(target_dir, os.path.basename(src))
     tmp = target + ".tmp"
+    # shutil 은 zlib/bz2/lzma 를 끌어와 import 에 약 4ms 든다. rescue 는 훅 경로에서
+    # 불리지 않으므로 여기서만 들인다.
+    import shutil
+
     try:
         shutil.copyfile(src, tmp)
         os.replace(tmp, target)

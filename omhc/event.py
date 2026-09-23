@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import collections
-from dataclasses import dataclass
 from typing import Dict, Iterable, Tuple
 
 IR_VERSION = 1
@@ -18,25 +17,29 @@ VERBS = frozenset({"said", "inspected", "modified", "ran", "delegated", "researc
 AUTHORS = frozenset({"human", "agent", "harness"})
 
 
-# slots=True 는 이 머신의 Python 3.9.25 에 존재하지 않는다(TypeError).
-# frozen=True 단독으로 미선언 속성 할당까지 FrozenInstanceError 로 막히므로
-# "어댑터가 이물질을 런타임에 붙일 수 없다"는 보장은 그대로 유지된다.
-@dataclass(frozen=True)
-class Event:
-    """벤더 중립 레코드. 이 필드 목록이 곧 외래 물질의 공격 표면이다."""
+# NamedTuple 을 쓰는 이유는 import 비용이다. dataclasses 는 inspect·ast·dis·
+# tokenize·linecache·copy 를 끌어와 이 머신에서 import 만 8ms 이고, 훅 경로의
+# 두 프로세스가 매 세션 시작마다 그것을 지불한다(예산 150ms 의 11%).
+# 불변 보장은 동일하다 — 선언된 필드도 미선언 이름도 할당할 수 없다.
+# typing.NamedTuple 은 __new__ 재정의를 금지하므로 collections.namedtuple 을
+# 상속한다. __slots__ = () 로 인스턴스 dict 를 없애, 선언된 필드도 미선언 이름도
+# 할당할 수 없다는 보장을 유지한다.
+_EventBase = collections.namedtuple(
+    "Event", "seq epoch author verb ok text arg paths offset length"
+)
 
-    seq: int
-    epoch: float
-    author: str
-    verb: str
-    ok: bool
-    text: str
-    arg: str
-    paths: Tuple[str, ...]
-    offset: int
-    length: int
 
-    def __post_init__(self) -> None:
+class Event(_EventBase):
+    """벤더 중립 레코드. 이 필드 목록이 곧 외래 물질의 공격 표면이다.
+
+    필드: seq:int epoch:float author:str verb:str ok:bool text:str arg:str
+    paths:Tuple[str, ...] offset:int length:int
+    """
+
+    __slots__ = ()
+
+    def __new__(cls, *args, **kwargs):
+        self = super().__new__(cls, *args, **kwargs)
         if self.author not in AUTHORS:
             raise ValueError(
                 "author must be one of {}: {!r}".format(sorted(AUTHORS), self.author)
@@ -45,6 +48,7 @@ class Event:
             raise ValueError(
                 "verb must be one of {}: {!r}".format(sorted(VERBS), self.verb)
             )
+        return self
 
 
 def tally(events: Iterable[Event]) -> Dict[str, object]:
