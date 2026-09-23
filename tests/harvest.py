@@ -197,13 +197,75 @@ def harvest_codex() -> dict:
     }
 
 
+def _items(path: str):
+    """event_msg/item_completed 의 item 들. 도구 사실은 여기에만 있다(실측 0.156.1)."""
+    for _i, row in _iter_json(path):
+        payload = row.get("payload") or {}
+        if row.get("type") == "event_msg" and payload.get("type") == "item_completed":
+            item = payload.get("item")
+            if isinstance(item, dict):
+                yield item
+
+
+def _rollouts_newest_first():
+    root = os.path.join(HOME, ".codex", "sessions")
+    found = []
+    for dirpath, _dirs, names in os.walk(root):
+        for name in names:
+            if name.startswith("rollout-") and name.endswith(".jsonl"):
+                found.append(os.path.join(dirpath, name))
+    found.sort(key=os.path.getmtime, reverse=True)
+    return found
+
+
+def harvest_codex_tools() -> dict:
+    """셸 실패가 있는 세션 하나(tools.jsonl)와 파일 편집 세션 하나(edit.jsonl).
+
+    exec.jsonl 은 인증 실패 세션으로 이미 얼려져 있고 테스트가 그 사람 프롬프트를
+    단정하므로 덮지 않는다. 도구 호출은 별도 픽스처로 둔다.
+    """
+    wanted = {"tools": None, "edit": None}
+    for path in _rollouts_newest_first():
+        items = list(_items(path))
+        if wanted["tools"] is None and any(
+            i.get("type") == "CommandExecution" and i.get("status") == "failed"
+            for i in items
+        ):
+            wanted["tools"] = path
+        if wanted["edit"] is None and any(i.get("type") == "FileChange" for i in items):
+            wanted["edit"] = path
+        if all(wanted.values()):
+            break
+
+    out = {}
+    for name, src in wanted.items():
+        if src is None:
+            out[name] = None
+            continue
+        frozen = os.path.join(FIX, "codex", name + ".jsonl")
+        _freeze(src, frozen)
+        commands, failed, changed = [], [], []
+        for item in _items(frozen):
+            if item.get("type") == "CommandExecution":
+                argv = item.get("command") or []
+                commands.append(argv[-1] if argv else "")
+                if item.get("status") != "completed" or item.get("exit_code"):
+                    failed.append(argv[-1] if argv else "")
+            elif item.get("type") == "FileChange":
+                changed.extend(sorted((item.get("changes") or {}).keys()))
+        out[name] = {"source_name": os.path.basename(src), "commands": commands,
+                     "failed": failed, "changed": changed}
+    return out
+
+
 def main(argv=None) -> int:
     global FORCE
     argv = list(sys.argv[1:] if argv is None else argv)
     FORCE = "--force" in argv
     os.makedirs(os.path.join(FIX, "claude"), exist_ok=True)
     os.makedirs(os.path.join(FIX, "codex"), exist_ok=True)
-    expected = {"claude": harvest_claude(), "codex": harvest_codex()}
+    expected = {"claude": harvest_claude(), "codex": harvest_codex(),
+                "codex_tools": harvest_codex_tools()}
     with open(os.path.join(FIX, "expected.json"), "w", encoding="utf-8") as fh:
         json.dump(expected, fh, ensure_ascii=False, indent=2, sort_keys=True)
     c = expected["claude"]
@@ -213,6 +275,9 @@ def main(argv=None) -> int:
     print("codex: records={} types={} cwd={}".format(
         expected["codex"]["records"], len(expected["codex"]["types"]),
         expected["codex"]["cwd"]))
+    for name, got in sorted(expected["codex_tools"].items()):
+        print("codex {}: {}".format(name, got and {k: got[k] for k in
+                                                  ("commands", "failed", "changed")}))
     return 0
 
 

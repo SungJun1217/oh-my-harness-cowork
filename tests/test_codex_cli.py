@@ -130,12 +130,116 @@ class TestReadRealFixture(unittest.TestCase):
         self.assertEqual(self.read.unparsed, 0)
 
 
-class TestForgedToolCallShapes(unittest.TestCase):
-    """UNVERIFIED — Codex 인증이 없어(401) 실물 function_call 레코드를 얻지 못했다.
+@unittest.skipUnless(_repo.have_fixtures(_repo.CODEX_TOOLS, _repo.CODEX_EDIT,
+                                         _repo.EXPECTED), MISSING)
+class TestRealToolCalls(unittest.TestCase):
+    """실물(codex-cli 0.156.1, gpt-6-luna) 로 확인한 도구 레코드.
 
-    이 위조 레코드는 Rust serde 필드명 기준이며, `codex login` 후
-    `python3 tests/harvest.py --force` 로 실물을 확보해 골든을 갱신해야 한다.
-    이름에 UNVERIFIED 를 남겨두는 것은 의도적이다.
+    골든은 harvest.py 가 어댑터를 부르지 않고 독립 계산한다.
+    """
+
+    def setUp(self):
+        self.golden = _repo.load_expected()["codex_tools"]
+        self.tools = CX.CodexCliAdapter().read_session(ref_for(_repo.CODEX_TOOLS))
+        self.edit = CX.CodexCliAdapter().read_session(ref_for(_repo.CODEX_EDIT))
+
+    def machine(self, read):
+        return [e for e in read.events if e.verb != "said"]
+
+    def test_every_shell_command_becomes_one_event_with_its_real_text(self):
+        """이전 매핑은 arguments 가 없는 custom_tool_call 을 읽어 arg 가 비었다."""
+        self.assertEqual([e.arg for e in self.machine(self.tools)],
+                         self.golden["tools"]["commands"])
+
+    def test_a_nonzero_exit_marks_the_event_failed(self):
+        """이전 매핑은 출력 텍스트에서 exit_code 를 찾았고 거기엔 없다 → FAIL 영구 불가."""
+        failed = [e.arg for e in self.machine(self.tools) if not e.ok]
+        self.assertEqual(failed, self.golden["tools"]["failed"])
+        self.assertTrue(failed)
+
+    def test_file_change_becomes_modified_with_its_absolute_path(self):
+        modified = [e for e in self.edit.events if e.verb == "modified"]
+        self.assertEqual([p for e in modified for p in e.paths],
+                         self.golden["edit"]["changed"])
+        self.assertTrue(all(e.ok for e in modified))
+
+    def test_read_only_commands_are_inspected_not_ran(self):
+        """Codex 에는 읽기 전용 도구가 따로 없고 전부 셸로 간다. parsed_cmd 가 Codex
+        자신의 분류이므로 그것을 따른다 — 안 그러면 Codex 세션에 inspected 가 없다."""
+        self.assertEqual({e.verb for e in self.machine(self.tools)}, {"inspected"})
+
+    def test_the_js_wrapper_is_bookkeeping_not_an_event(self):
+        """custom_tool_call(name=exec) 는 사실의 사본이다. 둘 다 세면 이중 계상된다."""
+        self.assertEqual(len(self.machine(self.tools)),
+                         len(self.golden["tools"]["commands"]))
+        self.assertGreater(self.tools.dropped.get("js_exec", 0), 0)
+
+    def test_nothing_is_unparsed(self):
+        self.assertEqual(self.tools.unparsed, 0)
+        self.assertEqual(self.edit.unparsed, 0)
+
+    def test_tier_b_offset_points_at_the_command_record(self):
+        ev = self.machine(self.tools)[-1]
+        with open(_repo.CODEX_TOOLS, "rb") as fh:
+            fh.seek(ev.offset)
+            row = json.loads(fh.read(ev.length))
+        self.assertEqual(row["payload"]["item"]["type"], "CommandExecution")
+
+
+class TestMeasuredShapes(unittest.TestCase):
+    """픽스처 없이도 도는 실측 모양 단위 테스트."""
+
+    def _read(self, rows) -> A.SessionRead:
+        path = write_rollout(rows)
+        try:
+            return CX.CodexCliAdapter().read_session(ref_for(path))
+        finally:
+            os.unlink(path)
+
+    META = {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}}
+
+    def test_shell_wrapper_is_stripped_from_the_arg(self):
+        read = self._read([self.META] + _repo.codex_shell_rows(["pytest", "-q"]))
+        self.assertEqual([(e.verb, e.arg) for e in read.events], [("ran", "pytest -q")])
+
+    def test_failed_status_is_a_failure_even_without_an_exit_code(self):
+        rows = _repo.codex_shell_rows(["pytest"], failed=True)
+        del rows[1]["payload"]["item"]["exit_code"]
+        read = self._read([self.META] + rows)
+        self.assertFalse(read.events[0].ok)
+
+    def test_parsed_cmd_paths_are_resolved_against_the_item_cwd(self):
+        rows = _repo.codex_shell_rows(["cat", "a b.txt"], cwd="/w/my repo")
+        item = rows[1]["payload"]["item"]
+        item["cwd"] = "file:///w/my%20repo"
+        item["parsed_cmd"] = [{"type": "read", "cmd": "cat 'a b.txt'", "path": "a b.txt"}]
+        read = self._read([self.META] + rows)
+        self.assertEqual(read.events[0].verb, "inspected")
+        self.assertEqual(read.events[0].paths, ("/w/my repo/a b.txt",))
+
+    def test_a_mixed_pipeline_is_ran(self):
+        rows = _repo.codex_shell_rows(["cat x | python3 -"])
+        rows[1]["payload"]["item"]["parsed_cmd"] = [
+            {"type": "read", "cmd": "cat x", "path": "x"},
+            {"type": "unknown", "cmd": "python3 -"},
+        ]
+        self.assertEqual(self._read([self.META] + rows).events[0].verb, "ran")
+
+    def test_failed_file_change_is_a_failure(self):
+        read = self._read([self.META, _repo.codex_item_row({
+            "type": "FileChange", "status": "failed",
+            "changes": {"/w/a.py": {"type": "update", "unified_diff": ""}}}, 2)])
+        self.assertEqual([(e.verb, e.ok) for e in read.events], [("modified", False)])
+
+    def test_unknown_item_type_is_dropped_by_name(self):
+        read = self._read([self.META, _repo.codex_item_row({"type": "Brand2099"}, 2)])
+        self.assertEqual(read.events, ())
+        self.assertEqual(read.dropped.get("item:Brand2099"), 1)
+
+
+class TestLegacyToolCallShapes(unittest.TestCase):
+    """UNVERIFIED — 0.156.1 은 function_call 을 쓰지 않는다. 이전/다른 버전의
+    function_call·local_shell_call 을 위한 경로이고 실물로 확인된 적이 없다.
     """
 
     def _read(self, rows) -> A.SessionRead:

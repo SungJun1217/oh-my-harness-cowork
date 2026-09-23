@@ -27,6 +27,8 @@ EXPECTED = os.path.join(FIXTURES, "expected.json")
 CLAUDE_LIVE = os.path.join(FIXTURES, "claude", "live.jsonl")
 CLAUDE_SUB = os.path.join(FIXTURES, "claude", "subagent.jsonl")
 CODEX_EXEC = os.path.join(FIXTURES, "codex", "exec.jsonl")
+CODEX_TOOLS = os.path.join(FIXTURES, "codex", "tools.jsonl")
+CODEX_EDIT = os.path.join(FIXTURES, "codex", "edit.jsonl")
 
 MISSING = "픽스처가 없다. `python3 tests/harvest.py` 를 먼저 실행하라."
 
@@ -98,27 +100,39 @@ def codex_user_row(text: str, ordinal: int = 1) -> dict:
     }
 
 
-def codex_shell_rows(command, ordinal: int = 2, failed: bool = False):
-    """function_call (+ 실패 시 출력) 한 쌍.
+def codex_item_row(item: dict, ordinal: int) -> dict:
+    return {
+        "timestamp": "2026-09-22T16:30:03.000Z", "ordinal": ordinal,
+        "type": "event_msg",
+        "payload": {"type": "item_completed", "thread_id": "t", "turn_id": "u",
+                    "item": item},
+    }
 
-    UNVERIFIED — Codex 인증이 없어 실물 function_call 레코드를 얻지 못했다.
-    Rust serde 필드명 기준이며 `codex login` 후 갱신해야 한다.
+
+def codex_shell_rows(command, ordinal: int = 2, failed: bool = False, cwd: str = REPO):
+    """실측 모양(codex-cli 0.156.1). 한 번의 셸 실행은 레코드 두 개를 남긴다.
+
+    response_item/custom_tool_call(name="exec") 은 모델이 쓴 JS 래퍼라 명령도
+    종료 코드도 없다. 사실은 event_msg/item_completed 의 CommandExecution 에 있다.
     """
     call_id = "c{}".format(ordinal)
-    rows = [{
-        "timestamp": "2026-09-22T16:30:02.000Z", "ordinal": ordinal,
-        "type": "response_item",
-        "payload": {"type": "function_call", "name": "shell", "call_id": call_id,
-                    "arguments": json.dumps({"command": list(command)})},
-    }]
-    if failed:
-        rows.append({
-            "timestamp": "2026-09-22T16:30:03.000Z", "ordinal": ordinal + 1,
-            "type": "response_item",
-            "payload": {"type": "function_call_output", "call_id": call_id,
-                        "output": json.dumps({"exit_code": 1, "output": "3 failed"})},
-        })
-    return rows
+    line = " ".join(command)
+    return [
+        {"timestamp": "2026-09-22T16:30:02.000Z", "ordinal": ordinal,
+         "type": "response_item",
+         "payload": {"type": "custom_tool_call", "name": "exec", "call_id": call_id,
+                     "status": "completed",
+                     "input": "text((await tools.exec_command({{cmd:{}}})).output);"
+                              .format(json.dumps(line))}},
+        codex_item_row({
+            "type": "CommandExecution", "id": "exec-" + call_id,
+            "command": ["/bin/bash", "-lc", line], "cwd": "file://" + cwd,
+            "parsed_cmd": [{"type": "unknown", "cmd": line}],
+            "status": "failed" if failed else "completed",
+            "exit_code": 1 if failed else 0,
+            "stdout": "3 failed" if failed else "", "stderr": "",
+        }, ordinal + 1),
+    ]
 
 
 def plant_codex(
@@ -165,9 +179,8 @@ def plant_codex(
 
 def append_codex_turn(path: str, ordinal: int = 90) -> None:
     with open(path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(codex_shell_rows(["echo", str(ordinal)],
-                                             ordinal=ordinal)[0],
-                            ensure_ascii=False) + "\n")
+        for row in codex_shell_rows(["echo", str(ordinal)], ordinal=ordinal):
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 class TempRepo:

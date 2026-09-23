@@ -25,8 +25,9 @@ ARTIFACT_NAME = "omhc.txt"
 # 세션까지 전부 stat 한다. 훅 경로에서 돌아가므로 범위를 묶는다.
 SCAN_DAYS = 14
 
-# 파싱하는 봉투 타입. 나머지(event_msg, world_state, turn_context 등)는 부기다.
-_PARSED_ENVELOPES = frozenset({"response_item"})
+# 파싱하는 봉투 타입. 나머지(world_state, turn_context 등)는 부기다.
+# event_msg 는 item_completed 만 쓴다 — 셸·편집의 사실은 거기에만 있다.
+_PARSED_ENVELOPES = frozenset({"response_item", "event_msg"})
 
 # 통과시키는 role. developer 는 <skills_instructions> / <multi_agent_role> 등
 # 순수 기계장치이므로 파싱조차 하지 않는다.
@@ -35,11 +36,23 @@ _PARSED_ROLES = frozenset({"user", "assistant"})
 # 텍스트를 담는 블록 타입. user/developer 는 input_text, assistant 는 output_text.
 _TEXT_BLOCKS = frozenset({"input_text", "output_text", "text"})
 
-# --- UNVERIFIED -------------------------------------------------------------
-# 아래 매핑은 Codex 인증이 없어(401 Unauthorized) 실물 레코드로 검증되지 못했다.
-# Rust serde 필드명 기준으로 작성했고, 모르는 모양은 예외 대신 unparsed 로
-# 계상되어 `omhc status` 가 비율을 보고한다.
-# `codex login` 후 `python3 tests/harvest.py --force` 로 실물을 확보해 갱신하라.
+# --- 실측 (codex-cli 0.156.1, 2026-09-23) -----------------------------------
+# 셸 한 번은 레코드 두 개를 남긴다:
+#   response_item/custom_tool_call name="exec"  ← 모델이 쓴 JS 코드. 명령도
+#       종료 코드도 없고 출력은 성공·실패 모두 "Script completed" 로 시작한다.
+#   event_msg/item_completed item.type="CommandExecution"  ← argv, exit_code,
+#       status, cwd(file:// URI), parsed_cmd(Codex 자신의 분류)
+# 편집은 item.type="FileChange", changes={절대경로: {type, unified_diff}}.
+# 그래서 사실은 item 에서 읽고 JS 래퍼는 부기로 센다(둘 다 세면 이중 계상).
+_JS_WRAPPER_TOOL = "exec"
+# parsed_cmd 가 전부 이 종류면 읽기다. Codex 에는 읽기 전용 도구가 따로 없어서
+# 이걸 안 쓰면 Codex 세션에 inspected 가 영영 없다.
+_INSPECT_KINDS = frozenset({"read", "list_files", "search"})
+_SHELL_FLAGS = frozenset({"-c", "-lc"})
+
+# --- UNVERIFIED (이전/다른 버전) --------------------------------------------
+# 0.156.1 은 function_call 을 쓰지 않는다. 아래는 Rust serde 필드명 기준 추정이고
+# 실물로 확인된 적이 없다. 모르는 모양은 예외 대신 unparsed 로 계상된다.
 _VERB_BY_TOOL = {
     "shell": "ran",
     "local_shell": "ran",
@@ -159,6 +172,48 @@ def _arg_and_paths(payload: dict) -> Tuple[str, Tuple[str, ...]]:
     return guard.redact_b64(arg)[:ARG_LIMIT], paths
 
 
+def _uri_path(value) -> str:
+    if not isinstance(value, str):
+        return ""
+    if value.startswith("file://"):
+        value = value[len("file://"):]
+        if "%" in value:
+            from urllib.parse import unquote
+
+            value = unquote(value)
+    return value
+
+
+def _item_fact(item: dict):
+    """item_completed 의 item 하나 → (verb, ok, arg, paths). 모르는 타입이면 None."""
+    kind = item.get("type")
+    ok = item.get("status") == "completed"
+    if kind == "CommandExecution":
+        command = item.get("command")
+        if isinstance(command, list):
+            parts = [str(c) for c in command]
+            # ["/bin/bash", "-lc", "ls omhc"] — 셸 래퍼를 벗긴다.
+            arg = parts[2] if len(parts) == 3 and parts[1] in _SHELL_FLAGS else " ".join(parts)
+        else:
+            arg = str(command or "")
+        parsed = [p for p in item.get("parsed_cmd") or () if isinstance(p, dict)]
+        kinds = {p.get("type") for p in parsed}
+        verb = "inspected" if kinds and kinds <= _INSPECT_KINDS else "ran"
+        cwd = _uri_path(item.get("cwd"))
+        paths = tuple(
+            os.path.join(cwd, p["path"]) if cwd else p["path"]
+            for p in parsed if isinstance(p.get("path"), str) and p["path"]
+        )
+        code = item.get("exit_code")
+        ok = ok and (code is None or code == 0)
+        return verb, ok, guard.redact_b64(arg)[:ARG_LIMIT], paths
+    if kind == "FileChange":
+        changes = item.get("changes")
+        paths = tuple(str(k) for k in changes) if isinstance(changes, dict) else ()
+        return "modified", ok, (paths[0] if paths else "")[:ARG_LIMIT], paths
+    return None
+
+
 def _output_failed(payload: dict) -> bool:
     """UNVERIFIED: function_call_output.output 의 실패 표현을 추정한다."""
     output = payload.get("output")
@@ -274,6 +329,24 @@ class CodexCliAdapter:
                 epoch = iso_epoch(row.get("timestamp"))
                 kind = str(payload.get("type"))
 
+                if envelope == "event_msg":
+                    item = payload.get("item")
+                    if kind != "item_completed" or not isinstance(item, dict):
+                        bump(envelope)
+                        continue
+                    fact = _item_fact(item)
+                    if fact is None:
+                        # UserMessage/AgentMessage 는 response_item 의 사본이다.
+                        bump("item:" + str(item.get("type")))
+                        continue
+                    verb, ok, arg, paths = fact
+                    seq += 1
+                    events.append(Event(
+                        seq=seq, epoch=epoch, author="agent", verb=verb, ok=ok,
+                        text="", arg=arg, paths=paths, offset=start, length=len(raw),
+                    ))
+                    continue
+
                 if kind == "message":
                     role = str(payload.get("role"))
                     if role not in _PARSED_ROLES:
@@ -298,6 +371,10 @@ class CodexCliAdapter:
                         seq=seq, epoch=epoch, author=author, verb="said", ok=True,
                         text=text, arg="", paths=(), offset=start, length=len(raw),
                     ))
+                    continue
+
+                if kind == "custom_tool_call" and payload.get("name") == _JS_WRAPPER_TOOL:
+                    bump("js_exec")
                     continue
 
                 if kind in ("function_call", "local_shell_call", "custom_tool_call"):
