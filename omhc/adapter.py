@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import enum
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Tuple
+
+from .event import Event
+
+
+class Capability(enum.Enum):
+    """선언된 능력. 두 개뿐이며, 실물 하네스가 요구하지 않는 플래그는 두지 않는다.
+
+    읽기와 쓰기는 독립이다. Cursor 처럼 세션 훅이 없는 하네스는 읽기 전용
+    어댑터가 정상 상태이며 결함이 아니다.
+    """
+
+    READ = "read"
+    WRITE = "write"
+
+
+class OmhcAdapterError(Exception):
+    """어댑터 계층의 모든 예외의 기반."""
+
+
+class AdapterUnavailable(OmhcAdapterError):
+    """모르는 adapter_id, 또는 이 머신에 설치되지 않은 하네스."""
+
+
+class UnsupportedFormat(OmhcAdapterError):
+    """읽을 수는 있었으나 형식을 알아볼 수 없었다. 조용히 넘기지 않는다."""
+
+
+class NoInjectionChannel(OmhcAdapterError):
+    """쓰기 능력이 없거나 모든 주입 경로가 막혔다. 호출자가 보편 바닥으로 보낸다."""
+
+
+@dataclass(frozen=True)
+class HarnessPresence:
+    present: bool
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class SessionRef:
+    """한 세션 파일을 가리키는 포인터.
+
+    cwd 가 None 일 수 있다 — 작업 디렉터리 개념이 없는 하네스가 존재하며,
+    지금 필드 하나를 허용하는 비용이 나중에 Protocol 을 바꾸는 비용보다 싸다.
+    """
+
+    adapter_id: str
+    session_id: str
+    source_path: str
+    cwd: Optional[str]
+    epoch: float
+    size: int
+
+
+@dataclass(frozen=True)
+class SessionRead:
+    """한 세션을 중립 Event 로 읽은 결과.
+
+    unparsed/dropped 는 조용한 열화를 관측 가능하게 만든다. 모르는 레코드에서
+    예외를 던지면 훅 경로가 죽고, 조용히 버리면 유실을 아무도 모른다.
+    """
+
+    ref: SessionRef
+    events: Tuple[Event, ...]
+    unparsed: int = 0
+    dropped: Dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class HandoffBundle:
+    body_md: str
+    repo_root: str
+    to_adapter_id: str
+
+
+@dataclass(frozen=True)
+class InstallReceipt:
+    """모든 주입 경로는 receipt 로 끝난다. 조용한 실패를 만들지 않는다."""
+
+    channel: str
+    paths_written: Tuple[str, ...] = ()
+    consumed_on_read: bool = False
+    cleanup_hint: str = ""
+
+
+class HarnessAdapter:
+    """하네스 하나(정확히는 하나의 표면)에 대한 어댑터. 메서드 5개가 전부다.
+
+    부수 규칙:
+    - `__init__` 에서 I/O 를 하지 않는다. `home=` 과 `now=` 를 키워드로 받는다.
+    - `detect()` 는 싸야 하고 **예외를 던지지 않는다**.
+    - 모르는 레코드 타입은 기본 DROP 이며 `SessionRead.dropped` 에 보고된다.
+    - `author == "human"` 은 **최상위 세션 파일에서만** 나온다.
+    - 글롭은 깊이 1만. 중첩 `<session>/subagents/**` 는 읽지 않는다.
+
+    typing.Protocol 을 쓰지 않는 이유: 3.9 에서 런타임 검사가 제한적이고,
+    적합성 스위트가 실제 인스턴스로 계약을 검증하므로 명목 기반 클래스가 더
+    솔직하다.
+    """
+
+    adapter_id: str = ""
+    capabilities: frozenset = frozenset()
+
+    def __init__(self, *, home: Optional[str] = None, now=None) -> None:
+        raise NotImplementedError
+
+    def detect(self) -> HarnessPresence:
+        raise NotImplementedError
+
+    def list_sessions(self, repo_root: Optional[str]):
+        raise NotImplementedError
+
+    def read_session(self, ref: SessionRef) -> SessionRead:
+        raise NotImplementedError
+
+    def native_resume_hint(self, ref: SessionRef) -> Optional[str]:
+        raise NotImplementedError
+
+    def install_handoff(self, bundle: HandoffBundle) -> InstallReceipt:
+        raise NotImplementedError
