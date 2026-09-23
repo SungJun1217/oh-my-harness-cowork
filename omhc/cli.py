@@ -7,7 +7,7 @@ import sys
 import time
 from typing import List, Optional
 
-from . import adapters, agents_md, brief, due, gate, index, ledger, locate, pin
+from . import adapters, agents_md, brief, due, gate, index, ledger, locate, pin, watch
 from .adapter import AdapterUnavailable
 
 PROG = "omhc"
@@ -216,10 +216,11 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         out.write(json.dumps({
             "repo_root": root, "repo_key": key, "state_dir": state,
             "adapters": installed, "ledger_rows": len(rows),
-            "lag": [{"session": s, "watermark": w, "size": z, "lag_bytes": l}
-                    for s, w, z, l in lag_lines],
+            "archive": [{"session": s, "indexed_through": w, "size": z,
+                         "tail_bytes_after_last_event": l}
+                        for s, w, z, l in lag_lines],
             "injections": injections, "pulls": pulls,
-            "off": due.is_off(state),
+            "off": due.is_off(state), "watcher_pid": watch.read_lock(state),
         }, ensure_ascii=False, indent=2) + "\n")
         return 0
 
@@ -229,12 +230,17 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     ok &= _check(out, "ledger", bool(rows),
                  "{} rows for this repo".format(len(rows)))
     ok &= _check(out, "archive", bool(lag_lines),
-                 "; ".join("{} lag={}B".format(s[:8], l) for s, _w, _z, l in lag_lines)
+                 "; ".join("{} tail={}B".format(s[:8], l)
+                           for s, _w, _z, l in lag_lines)
                  or "nothing pinned yet")
     ok &= _check(out, "off switch", not due.is_off(state),
                  "off" if due.is_off(state) else "on")
     ok &= _check(out, "pull rate", True,
                  "pulled {} of {} injections".format(pulls, injections))
+    watcher = watch.read_lock(state)
+    _check(out, "watcher (optional)", True,
+           "running pid {}".format(watcher) if watcher
+           else "not running — brief falls back to inline parsing")
     out.write("\nartifact {}\n".format(
         "{}B".format(os.path.getsize(artifact)) if os.path.exists(artifact)
         else "none"))
@@ -270,6 +276,39 @@ def cmd_clear(args, *, home=None, out=sys.stdout) -> int:
         removed.append(artifact)
     out.write("cleared {}\n".format(", ".join(removed) if removed else "nothing"))
     return 0
+
+
+# --- watch ------------------------------------------------------------------
+
+
+def cmd_watch(args, *, home=None, out=sys.stdout) -> int:
+    """가속기 데몬. 정확성을 담당하지 않으므로 죽어도 결과가 바뀌지 않는다."""
+    root, _key, state = _state_for(home)
+    if args.stop:
+        pid = watch.read_lock(state)
+        if pid is None:
+            out.write("no watcher running\n")
+            return 0
+        import signal as _signal
+
+        try:
+            os.kill(pid, _signal.SIGTERM)
+        except OSError as exc:
+            out.write("could not stop {}: {}\n".format(pid, exc))
+            return 1
+        out.write("stopped {}\n".format(pid))
+        return 0
+    if args.once:
+        written = watch.sweep(root, state, home=home)
+        out.write("indexed {} new events\n".format(written))
+        return 0
+    try:
+        return watch.run(root, home=home, poll=args.poll,
+                         idle_exit=args.idle_exit)
+    except watch.LockBusy:
+        out.write("watcher already running (pid {})\n".format(
+            watch.read_lock(state)))
+        return 1
 
 
 # --- parser -----------------------------------------------------------------
@@ -316,6 +355,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("status", help="유일한 사람용 대시보드")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("watch", help="가속기 데몬 (선택. 없어도 결과는 같다)")
+    p.add_argument("--stop", action="store_true")
+    p.add_argument("--once", action="store_true", help="한 번만 훑고 끝낸다")
+    p.add_argument("--poll", type=float, default=watch.POLL_SECONDS)
+    p.add_argument("--idle-exit", type=float, default=watch.IDLE_EXIT_SECONDS,
+                   dest="idle_exit")
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("clear", help="설치된 표식을 제거")
     p.set_defaults(func=cmd_clear)
