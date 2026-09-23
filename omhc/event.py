@@ -3,7 +3,9 @@ from __future__ import annotations
 import collections
 from typing import Dict, Iterable, Tuple
 
-IR_VERSION = 1
+# Event.arg 의 폭. 색인 TSV 의 속성이 아니라 IR 의 속성이므로 여기 둔다 —
+# 어댑터와 색인이 각자 120 을 들고 있으면 한쪽만 올려도 아무 일이 일어나지 않는다.
+ARG_LIMIT = 120
 
 # 닫힌 중립 동사. 툴 어휘 교집합이 공집합이므로(Claude Code: Read/Edit/Bash/Task,
 # Codex: shell/apply_patch/update_plan) 벤더 이름을 담을 자리를 아예 두지 않는다.

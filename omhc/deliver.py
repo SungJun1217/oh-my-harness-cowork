@@ -16,15 +16,6 @@ from .adapter import (
 OUTBOX_DIR = os.path.join(".omhc", "outbox")
 
 
-def resume_instead(source_adapter_id: str, to_adapter_id: str) -> bool:
-    """같은 벤더면 파이프라인을 단축한다.
-
-    `claude --resume` 은 무손실이고 thinking 블록까지 보존한다. 우리 요약은 그보다
-    **열등하다**. 같은 벤더 안에서 이 도구를 쓰는 것은 손해다.
-    """
-    return source_adapter_id == to_adapter_id
-
-
 def _iso(epoch: float) -> str:
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(epoch))
 

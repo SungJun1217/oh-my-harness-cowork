@@ -17,8 +17,8 @@ from ..adapter import (
     SessionRead,
     SessionRef,
 )
-from ..event import Event
-from . import _register, install_state_artifact
+from ..event import ARG_LIMIT, Event
+from . import _register, install_state_artifact, iso_epoch
 
 ARTIFACT_NAME = "omhc.txt"
 
@@ -62,8 +62,6 @@ _DEFAULT_VERB = "ran"
 _PATH_KEYS = ("file_path", "path", "notebook_path")
 _ARG_KEYS = ("command", "file_path", "pattern", "query", "prompt", "description", "path")
 
-_ISO = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})")
-
 
 def claude_slug(path: str) -> str:
     """cwd → ~/.claude/projects/<slug>. 이 변환은 파일 어디에도 기록되지 않으므로
@@ -81,22 +79,6 @@ def claude_slug(path: str) -> str:
             tail = "0123456789abcdefghijklmnopqrstuvwxyz"[rem] + tail
         slug = slug[:200] + "-" + tail
     return slug
-
-
-def _epoch(value) -> float:
-    """ISO 타임스탬프 → epoch. 순서의 근거로는 쓰지 않는다(역행이 실측됐다)."""
-    if not isinstance(value, str):
-        return 0.0
-    m = _ISO.match(value)
-    if not m:
-        return 0.0
-    try:
-        import calendar
-
-        parts = [int(x) for x in m.groups()]
-        return float(calendar.timegm(tuple(parts) + (0, 0, 0)))
-    except (ValueError, OverflowError):
-        return 0.0
 
 
 # 비대화형 entrypoint. 차단목록이며 허용목록이 아니다 — 허용목록이면 새 대화형
@@ -137,11 +119,6 @@ def head_of(path: str, limit: int = 200) -> Dict[str, object]:
     except OSError:
         return info
     return info
-
-
-def cwd_of(path: str, limit: int = 200) -> Optional[str]:
-    value = head_of(path, limit).get("cwd")
-    return value if isinstance(value, str) else None
 
 
 def _text_of(content) -> Optional[str]:
@@ -289,7 +266,7 @@ class ClaudeCodeAdapter:
                     bump("compact_summary")
                     continue
 
-                epoch = _epoch(row.get("timestamp"))
+                epoch = iso_epoch(row.get("timestamp"))
                 message = row.get("message") or {}
                 content = message.get("content")
 
@@ -357,7 +334,7 @@ class ClaudeCodeAdapter:
                             verb = _DEFAULT_VERB
                             bump("unmapped_tool")
                         tool_input = block.get("input")
-                        arg = guard.redact_b64(_arg_of(tool_input))[:120]
+                        arg = guard.redact_b64(_arg_of(tool_input))[:ARG_LIMIT]
                         seq += 1
                         events.append(Event(
                             seq=seq, epoch=epoch, author="agent", verb=verb, ok=True,
@@ -414,7 +391,7 @@ class ClaudeCodeAdapter:
             adapter_id=self.adapter_id,
             session_id=session_id or os.path.basename(source_path)[: -len(".jsonl")],
             source_path=source_path,
-            cwd=cwd_of(source_path) or cwd,
+            cwd=head_of(source_path).get("cwd") or cwd,
             epoch=stat.st_mtime,
             size=stat.st_size,
         )

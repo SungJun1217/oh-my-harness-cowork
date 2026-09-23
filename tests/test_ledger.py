@@ -74,7 +74,6 @@ class TestLedger(unittest.TestCase):
                           home=self.home)
         rows = ledger.read(limit=10, home=self.home, repo_key="mine")
         self.assertEqual([r["session"] for r in rows], ["m1"])
-        self.assertIsNotNone(ledger.newest("mine", home=self.home))
 
     def test_concurrent_appends_produce_no_partial_records(self):
         pids = []
@@ -109,22 +108,6 @@ class TestLedger(unittest.TestCase):
             )
         rows = ledger.read(home=self.home)
         self.assertEqual([r["repo"] for r in rows], ["a", "c"])
-
-    def test_newest_filters_by_repo_and_excludes_harness(self):
-        ledger.append({"repo": "r", "harness": "claude", "event": "start", "epoch": 1}, home=self.home)
-        ledger.append({"repo": "r", "harness": "codex", "event": "start", "epoch": 2}, home=self.home)
-        ledger.append({"repo": "other", "harness": "codex", "event": "start", "epoch": 3}, home=self.home)
-        row = ledger.newest("r", exclude_harness="claude", home=self.home)
-        self.assertIsNotNone(row)
-        self.assertEqual(row["harness"], "codex")
-        self.assertEqual(row["epoch"], 2)
-
-    def test_newest_returns_none_when_ledger_missing(self):
-        self.assertIsNone(ledger.newest("r", home=self.home))
-
-    def test_newest_ignores_non_start_events(self):
-        ledger.append({"repo": "r", "harness": "codex", "event": "pull", "epoch": 9}, home=self.home)
-        self.assertIsNone(ledger.newest("r", home=self.home))
 
 
 if __name__ == "__main__":

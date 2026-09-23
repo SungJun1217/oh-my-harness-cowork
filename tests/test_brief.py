@@ -150,9 +150,10 @@ class TestRunHostileInputs(unittest.TestCase):
     def tearDown(self):
         self.h.close()
 
-    def _run(self, stdin_text, argv=("--harness", "claude-code")):
+    def _run(self, stdin_text, harness="claude-code"):
         out = io.StringIO()
-        code = brief.run(list(argv), stdin_text, home=self.h.home, now=NOW, out=out)
+        code = brief.emit(harness=harness, stdin_text=stdin_text,
+                          home=self.h.home, now=NOW, out=out)
         return code, out.getvalue()
 
     def test_missing_ledger(self):
@@ -199,15 +200,16 @@ class TestRunHostileInputs(unittest.TestCase):
 
     def test_missing_harness_argument_is_a_noop(self):
         self.h.plant_codex_session()
-        code, text = self._run(json.dumps({"cwd": self.h.repo_root}), argv=())
+        code, text = self._run(json.dumps({"cwd": self.h.repo_root}), harness="")
         self.assertEqual((code, text), (0, ""))
 
     def test_unwritable_home_does_not_raise(self):
         self.h.plant_codex_session()
         out = io.StringIO()
-        code = brief.run(["--harness", "claude-code"],
-                         json.dumps({"cwd": self.h.repo_root, "session_id": "me1"}),
-                         home="/proc/omhc-nonexistent", now=NOW, out=out)
+        code = brief.emit(
+            harness="claude-code",
+            stdin_text=json.dumps({"cwd": self.h.repo_root, "session_id": "me1"}),
+            home="/proc/omhc-nonexistent", now=NOW, out=out)
         self.assertEqual(code, 0)
 
 
@@ -221,9 +223,10 @@ class TestRunWireShape(unittest.TestCase):
     def test_stdout_is_the_hook_wire_json(self):
         self.h.plant_codex_session()
         out = io.StringIO()
-        code = brief.run(["--harness", "claude-code"],
-                         json.dumps({"cwd": self.h.repo_root, "session_id": "me1"}),
-                         home=self.h.home, now=NOW, out=out)
+        code = brief.emit(
+            harness="claude-code",
+            stdin_text=json.dumps({"cwd": self.h.repo_root, "session_id": "me1"}),
+            home=self.h.home, now=NOW, out=out)
         self.assertEqual(code, 0)
         payload = json.loads(out.getvalue())
         self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
@@ -232,27 +235,29 @@ class TestRunWireShape(unittest.TestCase):
     def test_text_mode_prints_the_body_only(self):
         self.h.plant_codex_session()
         out = io.StringIO()
-        brief.run(["--harness", "claude-code", "--text"],
-                  json.dumps({"cwd": self.h.repo_root, "session_id": "me1"}),
-                  home=self.h.home, now=NOW, out=out)
+        brief.emit(
+            harness="claude-code", as_text=True,
+            stdin_text=json.dumps({"cwd": self.h.repo_root, "session_id": "me1"}),
+            home=self.h.home, now=NOW, out=out)
         self.assertTrue(out.getvalue().startswith("[omhc]"))
 
     def test_budget_flag_is_respected(self):
         self.h.plant_codex_session()
         out = io.StringIO()
-        brief.run(["--harness", "claude-code", "--text", "--budget", "400"],
-                  json.dumps({"cwd": self.h.repo_root, "session_id": "me1"}),
-                  home=self.h.home, now=NOW, out=out)
+        brief.emit(
+            harness="claude-code", as_text=True, budget=400,
+            stdin_text=json.dumps({"cwd": self.h.repo_root, "session_id": "me1"}),
+            home=self.h.home, now=NOW, out=out)
         self.assertLessEqual(len(out.getvalue().encode("utf-8")), 400)
 
     def test_second_run_in_the_same_session_prints_nothing(self):
         self.h.plant_codex_session()
         payload = json.dumps({"cwd": self.h.repo_root, "session_id": "me1"})
         first, second = io.StringIO(), io.StringIO()
-        brief.run(["--harness", "claude-code"], payload, home=self.h.home,
-                  now=NOW, out=first)
-        brief.run(["--harness", "claude-code"], payload, home=self.h.home,
-                  now=NOW, out=second)
+        brief.emit(harness="claude-code", stdin_text=payload, home=self.h.home,
+                   now=NOW, out=first)
+        brief.emit(harness="claude-code", stdin_text=payload, home=self.h.home,
+                   now=NOW, out=second)
         self.assertTrue(first.getvalue())
         self.assertEqual(second.getvalue(), "")
 
@@ -268,9 +273,13 @@ class TestDeliver(unittest.TestCase):
         return HandoffBundle(body_md="[omhc] hi\n", repo_root=self.h.repo_root,
                              to_adapter_id=to)
 
-    def test_same_vendor_is_short_circuited(self):
-        self.assertTrue(deliver.resume_instead("claude-code", "claude-code"))
-        self.assertFalse(deliver.resume_instead("codex-cli", "claude-code"))
+    def test_same_vendor_produces_no_handoff(self):
+        """F5 는 mint 가 한 곳에서 처리한다 — 같은 규칙을 두 모듈에 두면
+        한쪽만 바뀐다. deliver 에 중복 선언이 있었고 테스트만 그것을 썼다."""
+        self.h.plant_codex_session()
+        body = brief.compute(my_harness="codex-cli", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertEqual(body, "")
 
     def test_claude_delivery_writes_the_state_artifact(self):
         receipt = deliver.deliver(self.bundle(), home=self.h.home, now=NOW)

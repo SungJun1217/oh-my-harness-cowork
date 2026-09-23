@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import calendar
+import re
 import time
 from typing import Dict, List, Optional
 
@@ -13,6 +15,30 @@ from ..adapter import AdapterUnavailable, InstallReceipt
 # 되는 날 그때 만든다 — 지금 만들면 두 개를 보고 그린 추상이 되고, 세 번째에서
 # 깨진다.
 REGISTRY: Dict[str, type] = {}
+
+
+_ISO = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})")
+
+
+def iso_epoch(value) -> float:
+    """ISO 타임스탬프 → epoch. 알아볼 수 없으면 0.0.
+
+    **순서의 근거로 쓰지 않는다** — 이 머신의 최대 트랜스크립트에 타임스탬프
+    역행이 254건(최대 52ms) 있다. 순서는 원장 epoch 와 바이트 오프셋이다.
+
+    두 어댑터가 이것을 각자 구현하고 있었다(한쪽은 정규식, 한쪽은 고정 폭 슬라이싱).
+    받아들이는 입력이 달라서, 한쪽이 파싱하는 형식을 다른 쪽은 0.0 으로 돌려주고
+    mint 의 헤더가 하네스에 따라 다르게 나왔다.
+    """
+    if not isinstance(value, str):
+        return 0.0
+    m = _ISO.match(value)
+    if not m:
+        return 0.0
+    try:
+        return float(calendar.timegm(tuple(int(x) for x in m.groups()) + (0, 0, 0)))
+    except (ValueError, OverflowError):
+        return 0.0
 
 
 def install_state_artifact(bundle, *, home: Optional[str] = None) -> InstallReceipt:

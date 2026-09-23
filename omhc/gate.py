@@ -28,18 +28,27 @@ def claim(state_dir: str, adapter_id: str, session_id: str) -> bool:
     return fsio.claim_exclusive(path)
 
 
-def session_id_from_hook_payload(raw: str) -> Optional[str]:
-    """훅 stdin JSON 에서 세션 id 를 최선으로 꺼낸다.
+def hook_payload(raw: str) -> dict:
+    """훅 stdin 을 한 번만 파싱한다. 무엇이든 실패하면 빈 dict.
+
+    이 try/except/isinstance 춤이 세 곳에 복제돼 있었고, 그래서 "잘못된 stdin 에서
+    무슨 일이 일어나는가" 의 답이 세 곳에 있었다.
+    """
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def session_id_from_payload(payload: dict) -> Optional[str]:
+    """세션 id 를 최선으로 꺼낸다.
 
     하네스마다 키가 다르고 없을 수도 있다. 없으면 transcript_path 의 파일명에서
     끌어낸다 — Claude Code 는 파일명이 세션 uuid 다.
     """
-    if not raw:
-        return None
-    try:
-        payload = json.loads(raw)
-    except ValueError:
-        return None
     if not isinstance(payload, dict):
         return None
     for key in ("session_id", "sessionId", "thread_id", "threadId", "id"):
@@ -53,3 +62,8 @@ def session_id_from_hook_payload(raw: str) -> Optional[str]:
             name = name[: -len(".jsonl")]
         return name or None
     return None
+
+
+def session_id_from_hook_payload(raw: str) -> Optional[str]:
+    """원시 stdin 에서 바로 세션 id. 한 번만 쓰는 호출자용 편의."""
+    return session_id_from_payload(hook_payload(raw))

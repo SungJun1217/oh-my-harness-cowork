@@ -112,8 +112,10 @@ class TestRegistry(unittest.TestCase):
 
 
 class TestExceptions(unittest.TestCase):
-    def test_three_exception_types_exist_and_share_a_base(self):
-        for exc in (A.AdapterUnavailable, A.UnsupportedFormat, A.NoInjectionChannel):
+    def test_declared_exceptions_share_a_base(self):
+        """선언된 예외만 둔다. 어느 어댑터도 던지지 않는 예외는 계약이 아니라
+        희망이다 — 모르는 모양은 unparsed 로 계상하는 것이 문서화된 설계다."""
+        for exc in (A.AdapterUnavailable, A.NoInjectionChannel):
             self.assertTrue(issubclass(exc, A.OmhcAdapterError))
 
 

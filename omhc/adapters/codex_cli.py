@@ -16,8 +16,8 @@ from ..adapter import (
     SessionRead,
     SessionRef,
 )
-from ..event import Event
-from . import _register, install_state_artifact
+from ..event import ARG_LIMIT, Event
+from . import _register, install_state_artifact, iso_epoch
 
 ARTIFACT_NAME = "omhc.txt"
 
@@ -78,21 +78,6 @@ def human_kinds(payload: dict):
     return [str(k) for k in kinds]
 
 
-def _epoch_of(value) -> float:
-    if not isinstance(value, str) or len(value) < 19:
-        return 0.0
-    try:
-        import calendar
-
-        parts = (
-            int(value[0:4]), int(value[5:7]), int(value[8:10]),
-            int(value[11:13]), int(value[14:16]), int(value[17:19]),
-        )
-        return float(calendar.timegm(parts + (0, 0, 0)))
-    except (ValueError, OverflowError):
-        return 0.0
-
-
 def session_meta(path: str) -> Optional[dict]:
     """첫 줄만 읽는다. 나머지를 파싱하면 훅 경로에서 비용이 튄다."""
     try:
@@ -146,7 +131,7 @@ def _arg_and_paths(payload: dict) -> Tuple[str, Tuple[str, ...]]:
         try:
             parsed = json.loads(raw)
         except ValueError:
-            return raw.strip()[:120], ()
+            return raw.strip()[:ARG_LIMIT], ()
     elif isinstance(raw, dict):
         parsed = raw
     if parsed is None:
@@ -171,7 +156,7 @@ def _arg_and_paths(payload: dict) -> Tuple[str, Tuple[str, ...]]:
     paths = tuple(
         str(parsed[key]) for key in _PATH_HINT_KEYS if isinstance(parsed.get(key), str)
     )
-    return guard.redact_b64(arg)[:120], paths
+    return guard.redact_b64(arg)[:ARG_LIMIT], paths
 
 
 def _output_failed(payload: dict) -> bool:
@@ -286,7 +271,7 @@ class CodexCliAdapter:
                     unparsed += 1
                     continue
 
-                epoch = _epoch_of(row.get("timestamp"))
+                epoch = iso_epoch(row.get("timestamp"))
                 kind = str(payload.get("type"))
 
                 if kind == "message":

@@ -25,12 +25,10 @@ import sys
 sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__))))
 from _repo import REPO  # noqa: E402
 
-REQUIRED_METHODS = (
-    "detect",
-    "list_sessions",
-    "read_session",
-    "native_resume_hint",
-    "install_handoff",
+# 계약 클래스에서 유도한다. 손으로 적으면 계약과 검증 대상이 조용히 갈라진다.
+REQUIRED_METHODS = tuple(
+    name for name, value in vars(A.HarnessAdapter).items()
+    if not name.startswith("_") and callable(value)
 )
 
 

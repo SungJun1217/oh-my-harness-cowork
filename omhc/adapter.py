@@ -25,10 +25,6 @@ class AdapterUnavailable(OmhcAdapterError):
     """모르는 adapter_id, 또는 이 머신에 설치되지 않은 하네스."""
 
 
-class UnsupportedFormat(OmhcAdapterError):
-    """읽을 수는 있었으나 형식을 알아볼 수 없었다. 조용히 넘기지 않는다."""
-
-
 class NoInjectionChannel(OmhcAdapterError):
     """쓰기 능력이 없거나 모든 주입 경로가 막혔다. 호출자가 보편 바닥으로 보낸다."""
 

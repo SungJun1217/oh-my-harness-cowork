@@ -105,33 +105,5 @@ class TestPin(unittest.TestCase):
             os.unlink(home_src)
 
 
-class TestRescue(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.state = os.path.join(self.tmp.name, "state")
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def test_rescue_makes_a_real_copy(self):
-        src = os.path.join(self.tmp.name, "task.output")
-        with open(src, "w", encoding="utf-8") as fh:
-            fh.write("workflow result")
-        copied = pin.rescue(self.state, "sess1", src)
-        self.assertNotEqual(os.stat(src).st_ino, os.stat(copied).st_ino)
-        with open(copied, encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), "workflow result")
-
-    def test_rescue_respects_the_size_cap(self):
-        src = os.path.join(self.tmp.name, "big.output")
-        with open(src, "wb") as fh:
-            fh.write(b"x" * (pin.RESCUE_MAX_BYTES + 10))
-        copied = pin.rescue(self.state, "sess1", src)
-        self.assertIsNone(copied)
-
-    def test_rescue_of_missing_file_returns_none(self):
-        self.assertIsNone(pin.rescue(self.state, "sess1", "/nope/nothing"))
-
-
 if __name__ == "__main__":
     unittest.main()

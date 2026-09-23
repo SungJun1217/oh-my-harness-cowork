@@ -4,11 +4,10 @@ import os
 from typing import Iterable, List, NamedTuple, Optional, Tuple
 
 from . import fsio
+from .event import ARG_LIMIT
 
 # 열 순서. 행당 60~90바이트를 목표로 한다.
 COLUMNS = ("seq", "epoch", "author", "verb", "ok", "offset", "length", "paths", "arg")
-
-ARG_LIMIT = 120
 
 
 class Row(NamedTuple):
@@ -148,3 +147,36 @@ def find(path: str, seq: int) -> Optional[Row]:
         if row.seq == seq:
             return row
     return None
+
+
+REFS_NAME = "refs.tsv"
+
+
+def write_refs(state_dir: str, ref, tags) -> None:
+    """태그 → (세션, 소스 경로, 오프셋, 길이). 900바이트 안에 세션 id 가 없어도
+    `omhc show E1` 이 풀리는 근거다. 매 표식마다 다시 쓴다."""
+    lines = [
+        "\t".join((tag, ref.session_id, ref.source_path, str(ev.offset),
+                   str(ev.length), str(ev.seq)))
+        for tag, ev in tags
+    ]
+    fsio.write_atomic(os.path.join(state_dir, REFS_NAME),
+                      "\n".join(lines) + "\n" if lines else "")
+
+
+def read_refs(state_dir: str) -> dict:
+    out = {}
+    try:
+        with open(os.path.join(state_dir, REFS_NAME), encoding="utf-8",
+                  errors="replace") as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 5:
+                    out[parts[0]] = {
+                        "session_id": parts[1], "source_path": parts[2],
+                        "offset": int(parts[3]), "length": int(parts[4]),
+                        "seq": int(parts[5]) if len(parts) > 5 else 0,
+                    }
+    except (OSError, ValueError):
+        return out
+    return out

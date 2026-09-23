@@ -235,7 +235,7 @@ class TestReadSessionForgedRecords(unittest.TestCase):
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
             path = fh.name
         try:
-            self.assertEqual(CC.cwd_of(path), REPO)
+            self.assertEqual(CC.head_of(path).get("cwd"), REPO)
         finally:
             os.unlink(path)
 

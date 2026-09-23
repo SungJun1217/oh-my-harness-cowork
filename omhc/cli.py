@@ -158,7 +158,7 @@ def _pinned_path(state: str, session_id: str, fallback: str) -> str:
 def cmd_show(args, *, home=None, out=sys.stdout) -> int:
     _root, _key, state = _state_for(home)
     target = args.target.strip()
-    refs = brief.read_refs(state)
+    refs = index.read_refs(state)
 
     entry = refs.get(target) or refs.get(target.upper())
     if entry is None and target.startswith("#"):
@@ -238,8 +238,10 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
                  or "nothing pinned yet")
     ok &= _check(out, "off switch", not due.is_off(state),
                  "off" if due.is_off(state) else "on")
-    ok &= _check(out, "pull rate", True,
-                 "pulled {} of {} injections".format(pulls, injections))
+    # 항상 참인 항목을 ok 에 접으면 독자가 리터럴 True 를 추적해야 안다.
+    # watcher 줄처럼 정보로만 출력한다.
+    _check(out, "pull rate", True,
+           "pulled {} of {} injections".format(pulls, injections))
     watcher = watch.read_lock(state)
     _check(out, "watcher (optional)", True,
            "running pid {}".format(watcher) if watcher
@@ -254,15 +256,16 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
 
 
 def cmd_brief(args, *, home=None, out=sys.stdout) -> int:
-    argv = ["--harness", args.harness, "--budget", str(args.budget)]
-    if args.wire:
-        argv += ["--wire", args.wire]
-    if args.force:
-        argv.append("--force")
-    if args.text or args.dry_run:
-        argv.append("--text")
-    raw = args.stdin if args.stdin is not None else _stdin_text()
-    return brief.run(argv, raw, home=home, out=out)
+    return brief.emit(
+        harness=args.harness,
+        stdin_text=args.stdin if args.stdin is not None else _stdin_text(),
+        budget=args.budget,
+        wire=args.wire,
+        force=args.force,
+        as_text=args.text or args.dry_run,
+        home=home,
+        out=out,
+    )
 
 
 # --- clear ------------------------------------------------------------------
@@ -323,7 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("brief", help="훅 경로: 전달할 표식을 stdout 으로")
     p.add_argument("--harness", required=True)
-    p.add_argument("--budget", type=int, default=900)
+    p.add_argument("--budget", type=int, default=brief.mint.BUDGET)
     p.add_argument("--wire", default="", choices=("", "claude", "cursor", "sdk"),
                    help="주입 JSON 형식. 기본값은 --harness 에서 유도한다")
     p.add_argument("--force", action="store_true")

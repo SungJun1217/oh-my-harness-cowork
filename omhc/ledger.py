@@ -77,26 +77,3 @@ def read(limit: int = 2000, home: Optional[str] = None,
             continue
         rows.append(row)
     return rows[-limit:] if limit else rows
-
-
-def newest(
-    repo_key: str,
-    harness: Optional[str] = None,
-    exclude_harness: Optional[str] = None,
-    event: Optional[str] = "start",
-    home: Optional[str] = None,
-) -> Optional[dict]:
-    """조건에 맞는 가장 최근 줄.
-
-    순서는 파일 내 위치이며 트랜스크립트 타임스탬프가 아니다 — 이 머신의 최대
-    트랜스크립트에는 타임스탬프 역행 지점이 254개(최대 52ms) 있다.
-    """
-    for row in reversed(read(home=home, repo_key=repo_key)):
-        if event and row.get("event") != event:
-            continue
-        if harness and row.get("harness") != harness:
-            continue
-        if exclude_harness and row.get("harness") == exclude_harness:
-            continue
-        return row
-    return None

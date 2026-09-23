@@ -36,42 +36,6 @@ def _notes(state_dir: str, limit: int = 2) -> list:
     return lines[-limit:]
 
 
-REFS_NAME = "refs.tsv"
-
-
-def _write_refs(state_dir: str, ref, tags) -> None:
-    """태그 → (세션, 소스 경로, 오프셋, 길이). 900바이트 안에 세션 id 가 없어도
-    `omhc show E1` 이 풀리는 근거다. 매 표식마다 다시 쓴다."""
-    os.makedirs(state_dir, exist_ok=True)
-    lines = [
-        "\t".join((tag, ref.session_id, ref.source_path, str(ev.offset),
-                   str(ev.length), str(ev.seq)))
-        for tag, ev in tags
-    ]
-    fsio.write_atomic(
-        os.path.join(state_dir, REFS_NAME),
-        "\n".join(lines) + "\n" if lines else "",
-    )
-
-
-def read_refs(state_dir: str) -> dict:
-    out = {}
-    try:
-        with open(os.path.join(state_dir, REFS_NAME), encoding="utf-8",
-                  errors="replace") as fh:
-            for line in fh:
-                parts = line.rstrip("\n").split("\t")
-                if len(parts) >= 5:
-                    out[parts[0]] = {
-                        "session_id": parts[1], "source_path": parts[2],
-                        "offset": int(parts[3]), "length": int(parts[4]),
-                        "seq": int(parts[5]) if len(parts) > 5 else 0,
-                    }
-    except (OSError, ValueError):
-        return out
-    return out
-
-
 # 세 형식을 동시에 내보내면 안 된다. Claude Code 는 additional_context 와
 # hookSpecificOutput 을 중복 제거 없이 둘 다 읽으므로(설치된 superpowers 훅의
 # 주석에서 확인) 핸드오프가 두 번 주입된다 — 게이트로 막은 중복을 와이어 레벨에서
@@ -172,7 +136,7 @@ def compute(
         idx = os.path.join(state, "index", ref.session_id + ".idx")
         seen = index.last_seq(idx)
         index.append_rows(idx, [e for e in read.events if e.seq > seen])
-        _write_refs(state, ref, mint.failure_tags(read))
+        index.write_refs(state, ref, mint.failure_tags(read))
     except OSError as exc:
         _log_failure(home, "archive failed: {}".format(exc))
 
@@ -194,49 +158,35 @@ def compute(
     return body
 
 
-def run(argv, stdin_text: str = "", *, home: Optional[str] = None,
-        now: Optional[float] = None, out=None) -> int:
+def emit(
+    *,
+    harness: str,
+    stdin_text: str = "",
+    budget: int = mint.BUDGET,
+    wire: str = "",
+    force: bool = False,
+    as_text: bool = False,
+    home: Optional[str] = None,
+    now: Optional[float] = None,
+    out=None,
+) -> int:
     """훅 진입점. **절대 예외를 던지지 않고, 실패하면 빈 stdout + exit 0.**
 
     세션 시작을 깨뜨리는 것이 이 도구의 최악 결과다. 아무것도 주입하지 못하는 것은
     그에 비해 아무 일도 아니다.
+
+    argv 를 다시 파싱하지 않는다. 이전에는 cli 가 argparse 결과를 문자열 목록으로
+    되직렬화하고 여기서 손으로 만든 파서가 다시 읽었다 — 명령 표면이 두 깊이에
+    정의돼 두 파서의 기본값을 손으로 맞춰야 했고, 손 파서는 모르는 토큰을 조용히
+    무시했다.
     """
-    harness = ""
-    budget = mint.BUDGET
-    force = False
-    as_text = False
-    wire = ""
-    args = list(argv)
-    while args:
-        token = args.pop(0)
-        if token == "--harness" and args:
-            harness = args.pop(0)
-        elif token == "--wire" and args:
-            wire = args.pop(0)
-        elif token == "--budget" and args:
-            try:
-                budget = int(args.pop(0))
-            except ValueError:
-                budget = mint.BUDGET
-        elif token == "--force":
-            force = True
-        elif token in ("--text", "--dry-run"):
-            as_text = True
     if not harness:
         return 0
-
     stream = sys.stdout if out is None else out
     try:
-        session_id = gate.session_id_from_hook_payload(stdin_text) or ""
-        payload_cwd = ""
-        if stdin_text:
-            try:
-                payload = json.loads(stdin_text)
-                if isinstance(payload, dict):
-                    payload_cwd = str(payload.get("cwd") or "")
-            except ValueError:
-                payload_cwd = ""
-        repo_root = locate.resolve_repo_root(payload_cwd or None)
+        payload = gate.hook_payload(stdin_text)
+        session_id = gate.session_id_from_payload(payload) or ""
+        repo_root = locate.resolve_repo_root(str(payload.get("cwd") or "") or None)
         body = compute(
             my_harness=harness,
             my_session_id=session_id,
@@ -258,14 +208,3 @@ def run(argv, stdin_text: str = "", *, home: Optional[str] = None,
     except Exception:
         _log_failure(home, traceback.format_exc())
         return 0
-
-
-def main(argv=None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    stdin_text = ""
-    if not sys.stdin.isatty():
-        try:
-            stdin_text = sys.stdin.read()
-        except Exception:
-            stdin_text = ""
-    return run(argv, stdin_text)
