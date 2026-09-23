@@ -32,20 +32,32 @@ def _iso(epoch: float) -> str:
 def file_drop(bundle: HandoffBundle, why: str, *, now: float) -> InstallReceipt:
     """보편 바닥. 주입 경로가 전부 막혀도 사람이 읽을 파일은 남는다.
 
-    모든 경로가 receipt 로 끝나며 조용히 사라지지 않는다.
+    **이 함수도 예외를 던지지 않는다.** 레포 루트가 읽기 전용(CI 체크아웃,
+    root 소유 마운트, 디스크 꽉 찬 경우)이면 바닥마저 무너지는데, deliver() 의
+    '절대 던지지 않는다' 계약은 정확히 그 지점에서 깨져선 안 된다. 쓸 수 없으면
+    그 사실을 receipt 에 담아 돌려준다.
     """
-    directory = os.path.join(bundle.repo_root, OUTBOX_DIR)
-    os.makedirs(directory, exist_ok=True)
-    path = os.path.join(
-        directory, "{}-to-{}.md".format(_iso(now), bundle.to_adapter_id)
-    )
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write("<!-- omhc file drop: {} -->\n".format(why))
-        fh.write(bundle.body_md)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    path = ""
+    try:
+        directory = os.path.join(bundle.repo_root, OUTBOX_DIR)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(
+            directory, "{}-to-{}.md".format(_iso(now), bundle.to_adapter_id)
+        )
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write("<!-- omhc file drop: {} -->\n".format(why))
+            fh.write(bundle.body_md)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        return InstallReceipt(
+            channel="nowhere",
+            paths_written=(),
+            consumed_on_read=False,
+            cleanup_hint="{}; file drop also failed: {}".format(why, exc),
+        )
     return InstallReceipt(
         channel="file-drop",
         paths_written=(path,),

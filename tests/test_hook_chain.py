@@ -197,10 +197,25 @@ class TestF7ZeroCase(unittest.TestCase):
             outputs.append(got.stdout)
         return outputs
 
+    def _ledger_lines(self):
+        path = os.path.join(self.home, ".omhc", "ledger.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as fh:
+            return [line for line in fh if line.strip()]
+
     def test_ten_claude_only_session_starts_inject_nothing(self):
+        """주입은 0회, **그러나 원장은 10줄이어야 한다.**
+
+        부재만 단정하면 바이너리가 아무 일도 안 했을 때도 통과한다 — 잘못된 HOME
+        해석이나 조기 종료로 무력화된 경우와 구분이 안 된다. 원장 10줄이
+        '체인이 실제로 돌았다' 는 적극적 증거다.
+        """
         for i in range(10):
             outputs = self._chain("claude-session-{}".format(i))
             self.assertEqual(outputs[1], "", "{}번째 세션에서 주입이 일어났다".format(i))
+        self.assertEqual(len(self._ledger_lines()), 10,
+                         "체인이 실제로 돌지 않았다 — 부재 단정이 무의미해진다")
 
     def test_ten_session_starts_leave_no_delivered_rows(self):
         """주입이 없으면 delivered.tsv 도 없어야 한다.

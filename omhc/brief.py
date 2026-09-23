@@ -8,6 +8,7 @@ import traceback
 from typing import Optional
 
 from . import adapters, due, gate, index, locate, mint, pin
+from .adapters import claude_code
 from .adapter import SessionRef
 
 GUARD_LOG = "guard.log"
@@ -96,6 +97,27 @@ WIRE_BY_HARNESS = {
 DEFAULT_WIRE = "sdk"
 
 
+def _fallback_ref(watermark, repo_root: str):
+    """list_sessions 가 그 세션을 못 찾았을 때의 최후 수단.
+
+    원장 경로를 그냥 신뢰하지 않고 트랜스크립트 머리를 다시 읽어 비대화형·
+    서브체인 세션을 걸러낸다 — 필터를 우회하는 경로를 만들면 필터가 무의미해진다.
+    """
+    path = watermark.path
+    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+        return []
+    head = claude_code.head_of(path)
+    if str(head.get("entrypoint") or "") in due.NON_INTERACTIVE:
+        return []
+    if head.get("sidechain") or head.get("agentId"):
+        return []
+    return [SessionRef(
+        adapter_id=watermark.harness, session_id=watermark.session_id,
+        source_path=path, cwd=repo_root, epoch=watermark.epoch,
+        size=os.path.getsize(path),
+    )]
+
+
 def hook_wire(text: str, wire: str = "claude") -> str:
     """지정된 하나의 형식으로만 내보낸다."""
     if wire == "cursor":
@@ -135,19 +157,14 @@ def compute(
     if watermark is None:
         return ""
 
-    if not force and not gate.claim(state, my_harness, my_session_id):
-        # 실측: SessionStart 훅이 한 세션에서 6회 발동했다.
-        return ""
-
     adapter = adapters.get(watermark.harness, home=home)
     refs = [r for r in adapter.list_sessions(repo_root)
             if r.session_id == watermark.session_id]
-    if not refs and watermark.path and os.path.exists(watermark.path):
-        refs = [SessionRef(
-            adapter_id=watermark.harness, session_id=watermark.session_id,
-            source_path=watermark.path, cwd=repo_root, epoch=watermark.epoch,
-            size=os.path.getsize(watermark.path),
-        )]
+    if not refs:
+        # **폴백에 필터를 다시 적용해야 한다.** list_sessions 는 비대화형·서브체인
+        # 세션을 걸러내는데, 원장 경로로 곧장 SessionRef 를 만들면 그 필터를
+        # 우회해 남의 도구가 남긴 자동 세션을 사람의 작업으로 주입한다.
+        refs = _fallback_ref(watermark, repo_root)
     if not refs:
         return ""
 
@@ -156,13 +173,23 @@ def compute(
     body = mint.mint(read, to_adapter_id=my_harness, budget=budget, now=stamp,
                      notes=_notes(state))
     if not body:
+        # 보낼 것이 없으면 게이트를 쓰지 않는다. 첫 발동이 빈손으로 슬롯을
+        # 태우면 밀리초 뒤에 데이터가 도착해도 그 세션은 영구히 못 받는다.
+        return ""
+
+    if not force and not gate.claim(state, my_harness, my_session_id):
+        # 실측: SessionStart 훅이 한 세션에서 6회 발동했다.
         return ""
 
     # 아카이브는 표식을 만든 뒤에 만든다 — 실패해도 표식은 나가야 한다.
     try:
         pin.pin_session(state, ref)
-        index.append_rows(os.path.join(state, "index", ref.session_id + ".idx"),
-                          read.events)
+        # watch.sweep 과 같은 증분 규칙을 쓴다. 전부 다시 덧붙이면 데몬이 돌고
+        # 있을 때 같은 이벤트가 두 번 색인되어 `omhc log` 가 중복을 보이고
+        # `omhc show #N` 이 낡은 행을 가리킬 수 있다.
+        idx = os.path.join(state, "index", ref.session_id + ".idx")
+        seen = index.last_seq(idx)
+        index.append_rows(idx, [e for e in read.events if e.seq > seen])
         _write_refs(state, ref, mint.failure_tags(read))
     except OSError as exc:
         _log_failure(home, "archive failed: {}".format(exc))

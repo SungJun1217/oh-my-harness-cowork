@@ -6,11 +6,25 @@ import unittest
 
 from omhc import locate
 
-REPO = "/home/ec2-user/capstone/oh-my-harness-cowork"
+from ._repo import REPO
+
 
 
 class TestLocate(unittest.TestCase):
     def test_repo_key_is_basename_plus_sha1_prefix(self):
+        """공식을 단정한다. 리터럴을 박으면 다른 체크아웃에서 깨진다."""
+        import hashlib
+
+        expected = "{}-{}".format(
+            os.path.basename(REPO),
+            hashlib.sha1(REPO.encode("utf-8")).hexdigest()[:8],
+        )
+        self.assertEqual(locate.repo_key(REPO), expected)
+
+    def test_known_value_for_this_machine(self):
+        """이 머신의 실측 값. 다른 경로에서는 건너뛴다."""
+        if REPO != "/home/ec2-user/capstone/oh-my-harness-cowork":
+            self.skipTest("다른 체크아웃 경로: {}".format(REPO))
         self.assertEqual(locate.repo_key(REPO), "oh-my-harness-cowork-25358bbb")
 
     def test_repo_key_is_stable_and_8_hex_chars(self):

@@ -17,13 +17,14 @@ from omhc import guard, mint
 from omhc.adapters import claude_code as CC
 from omhc.adapters import codex_cli as CX
 
+from ._repo import REPO
+
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 CLAUDE_LIVE = os.path.join(FIX, "claude", "live.jsonl")
 CODEX_EXEC = os.path.join(FIX, "codex", "exec.jsonl")
 have_fixtures = os.path.exists(CLAUDE_LIVE) and os.path.exists(CODEX_EXEC)
 MISSING = "픽스처가 없다. `python3 tests/harvest.py` 를 먼저 실행하라."
 
-REPO = "/home/ec2-user/capstone/oh-my-harness-cowork"
 NOW = 1758500000.0
 
 SENTINEL = "OMHC-SENTINEL-8f3a2b1c-MUST-NEVER-BE-RELAYED"

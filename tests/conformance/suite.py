@@ -21,6 +21,10 @@ from omhc import adapter as A
 from omhc import adapters, guard
 from omhc.event import AUTHORS, VERBS
 
+import sys
+sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__))))
+from _repo import REPO  # noqa: E402
+
 REQUIRED_METHODS = (
     "detect",
     "list_sessions",
@@ -29,11 +33,26 @@ REQUIRED_METHODS = (
     "install_handoff",
 )
 
-REPO = "/home/ec2-user/capstone/oh-my-harness-cowork"
 
 
 def adapter_ids():
     return sorted(adapters.REGISTRY)
+
+
+def sessions_or_skip(case, adapter_id):
+    """세션을 하나도 못 찾으면 **건너뛴다**. 조용히 통과시키지 않는다.
+
+    0건 순회는 단정을 하나도 실행하지 않은 채 PASS 가 된다 — "외래 물질이 새지
+    않는다" 는 보장이 검증됐다고 보고되면서 실제로는 아무것도 검사되지 않는,
+    가장 위험한 종류의 통과다.
+    """
+    refs = adapters.get(adapter_id).list_sessions(REPO)
+    if not refs:
+        case.skipTest(
+            "{}: {} 에 세션이 없다 — 이 머신에서 그 하네스를 쓴 적이 없거나 "
+            "다른 체크아웃이다. 순회 불변식은 검증되지 않았다.".format(adapter_id, REPO)
+        )
+    return refs
 
 
 class AdapterContract(unittest.TestCase):
@@ -126,7 +145,7 @@ class AdapterContract(unittest.TestCase):
             if A.Capability.READ not in adapters.REGISTRY[adapter_id].capabilities:
                 continue
             with self.subTest(adapter=adapter_id):
-                for ref in adapters.get(adapter_id).list_sessions(REPO):
+                for ref in sessions_or_skip(self, adapter_id):
                     self.assertEqual(ref.adapter_id, adapter_id)
                     self.assertTrue(ref.source_path)
                     self.assertTrue(os.path.exists(ref.source_path))
@@ -137,7 +156,7 @@ class AdapterContract(unittest.TestCase):
             if A.Capability.READ not in adapters.REGISTRY[adapter_id].capabilities:
                 continue
             with self.subTest(adapter=adapter_id):
-                for ref in adapters.get(adapter_id).list_sessions(REPO):
+                for ref in sessions_or_skip(self, adapter_id):
                     self.assertIsNotNone(ref.cwd)
 
     def test_14_read_session_never_raises_on_a_missing_file(self):
@@ -177,7 +196,7 @@ class AdapterContract(unittest.TestCase):
                 continue
             with self.subTest(adapter=adapter_id):
                 adapter = adapters.get(adapter_id)
-                for ref in adapter.list_sessions(REPO)[:1]:
+                for ref in sessions_or_skip(self, adapter_id)[:1]:
                     for ev in adapter.read_session(ref).events:
                         self.assertIn(ev.verb, VERBS)
                         self.assertIn(ev.author, AUTHORS)
@@ -189,7 +208,7 @@ class AdapterContract(unittest.TestCase):
                 continue
             with self.subTest(adapter=adapter_id):
                 adapter = adapters.get(adapter_id)
-                for ref in adapter.list_sessions(REPO)[:1]:
+                for ref in sessions_or_skip(self, adapter_id)[:1]:
                     for ev in adapter.read_session(ref).events:
                         if ev.author == "human":
                             # 사람의 문장은 그 사람의 권위다(사용자 결정 (a)).
@@ -203,7 +222,7 @@ class AdapterContract(unittest.TestCase):
                 continue
             with self.subTest(adapter=adapter_id):
                 adapter = adapters.get(adapter_id)
-                for ref in adapter.list_sessions(REPO)[:1]:
+                for ref in sessions_or_skip(self, adapter_id)[:1]:
                     size = os.path.getsize(ref.source_path)
                     for ev in adapter.read_session(ref).events:
                         self.assertGreaterEqual(ev.offset, 0)
@@ -215,7 +234,7 @@ class AdapterContract(unittest.TestCase):
                 continue
             with self.subTest(adapter=adapter_id):
                 adapter = adapters.get(adapter_id)
-                for ref in adapter.list_sessions(REPO)[:1]:
+                for ref in sessions_or_skip(self, adapter_id)[:1]:
                     seqs = [e.seq for e in adapter.read_session(ref).events]
                     self.assertEqual(seqs, sorted(seqs))
 
@@ -225,7 +244,7 @@ class AdapterContract(unittest.TestCase):
                 continue
             with self.subTest(adapter=adapter_id):
                 adapter = adapters.get(adapter_id)
-                for ref in adapter.list_sessions(REPO)[:1]:
+                for ref in sessions_or_skip(self, adapter_id)[:1]:
                     read = adapter.read_session(ref)
                     self.assertIsInstance(read.dropped, dict)
                     self.assertIsInstance(read.unparsed, int)
@@ -246,9 +265,11 @@ class AdapterContract(unittest.TestCase):
                                          to_adapter_id=adapter_id)
                 if A.Capability.WRITE not in caps:
                     # 읽기 전용은 쓰기 절반을 가짜로 채우지 않는다.
+                    # continue 여야 한다 — return 이면 첫 읽기 전용 어댑터에서
+                    # 테스트가 끝나고 나머지 어댑터는 검증되지 않은 채 PASS 가 된다.
                     with self.assertRaises((A.NoInjectionChannel, NotImplementedError)):
                         adapters.get(adapter_id).install_handoff(bundle)
-                    return
+                    continue
                 with tempfile.TemporaryDirectory() as home:
                     receipt = adapters.get(adapter_id, home=home).install_handoff(bundle)
                 self.assertIsInstance(receipt, A.InstallReceipt)

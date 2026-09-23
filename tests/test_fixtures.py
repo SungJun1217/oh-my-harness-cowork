@@ -4,6 +4,8 @@ import json
 import os
 import unittest
 
+from ._repo import REPO
+
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 EXPECTED = os.path.join(FIX, "expected.json")
 CLAUDE_LIVE = os.path.join(FIX, "claude", "live.jsonl")
@@ -68,7 +70,7 @@ class TestFixtureGolden(unittest.TestCase):
 
     def test_codex_fixture_is_for_this_repo(self):
         self.assertEqual(
-            self.exp["codex"]["cwd"], "/home/ec2-user/capstone/oh-my-harness-cowork"
+            self.exp["codex"]["cwd"], REPO
         )
 
 
@@ -133,8 +135,9 @@ class TestFixtureStructure(unittest.TestCase):
     def test_codex_relays_its_environment_prompt_as_a_user_role_record(self):
         """role 기반 필터만으로는 Codex 환경 프롬프트가 사람의 말로 중계된다.
 
-        판별자는 필드명이 아니라 봉투 구조다 — content_item_kinds 같은 필드는
-        실물에 존재하지 않는다(정찰 보고가 틀렸고 실물 확인으로 정정했다).
+        판별자는 둘이다 — 봉투 구조와 메타데이터 kind. content_item_kinds 는
+        실재하지만 payload.internal_chat_message_metadata_passthrough 안에
+        중첩돼 있다.
         """
         texts = self._codex_user_texts()
         self.assertGreaterEqual(len(texts), 2)

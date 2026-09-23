@@ -110,12 +110,21 @@ def session_meta(path: str) -> Optional[dict]:
 
 
 def _recent_date_dirs(root: str, days: int, now) -> List[str]:
-    seen = []
+    """최근 N일의 날짜 디렉터리. **UTC 와 로컬 날짜를 모두 넣는다.**
+
+    Codex 가 디렉터리를 어느 시간대로 이름 붙이는지 이 머신(TZ=UTC)에서는
+    구분할 수 없다. UTC 만 쓰면 KST(UTC+9) 같은 환경에서 매일 로컬 00:00~09:00
+    동안 오늘 디렉터리가 스캔 목록에 없어 핸드오프가 조용히 실패한다. 양쪽을
+    넣는 비용은 glob 몇 번이고, 중복은 dict 로 제거한다.
+    """
+    seen = {}
     stamp = now()
     for offset in range(days + 1):
-        parts = time.gmtime(stamp - offset * 86400)
-        seen.append(os.path.join(root, time.strftime("%Y/%m/%d", parts)))
-    return seen
+        moment = stamp - offset * 86400
+        for parts in (time.gmtime(moment), time.localtime(moment)):
+            path = os.path.join(root, time.strftime("%Y/%m/%d", parts))
+            seen[path] = True
+    return list(seen)
 
 
 def _text_of(blocks) -> str:

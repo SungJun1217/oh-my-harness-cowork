@@ -78,7 +78,11 @@ def sweep(repo_root: str, state_dir: str, *, home: Optional[str] = None) -> int:
     않는다"는 지연시간뿐이다.
     """
     written = 0
-    for adapter_id in adapters.present(now=time.time):
+    # detect 와 read 가 같은 home 을 봐야 한다. present() 에 home 을 넘기지 않으면
+    # 탐지는 실제 $HOME 을, 읽기는 지정된 home 을 보게 되어 대체 home 을 가리킨
+    # 데몬이 아무것도 못 찾거나 엉뚱한 곳을 색인한다.
+    homes = {aid: home for aid in adapters.REGISTRY} if home else None
+    for adapter_id in adapters.present(homes=homes, now=time.time):
         try:
             adapter = adapters.get(adapter_id, home=home)
             refs = adapter.list_sessions(repo_root)

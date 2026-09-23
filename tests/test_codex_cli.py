@@ -9,12 +9,13 @@ import unittest
 from omhc import adapter as A
 from omhc.adapters import codex_cli as CX
 
+from ._repo import REPO
+
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 EXEC = os.path.join(FIX, "codex", "exec.jsonl")
 have_fixtures = os.path.exists(EXEC)
 MISSING = "픽스처가 없다. `python3 tests/harvest.py` 를 먼저 실행하라."
 
-REPO = "/home/ec2-user/capstone/oh-my-harness-cowork"
 
 
 def ref_for(path: str) -> A.SessionRef:

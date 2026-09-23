@@ -19,6 +19,10 @@ OFF_ENV = "OMHC_OFF"
 # 실측: 이 레포의 최상위 Claude 세션 31개 중 30개가 sdk-py 였다.
 NON_INTERACTIVE = frozenset({"sdk-cli", "sdk", "sdk-py"})
 
+# 이보다 오래된 외래 세션은 이어갈 작업으로 보지 않는다. 일주일 전 세션을
+# "방금 일어난 일"처럼 주입하면 다음 에이전트가 끝난 일을 다시 한다.
+MAX_AGE_SECONDS = 7 * 24 * 3600
+
 
 def is_off(state_dir: str) -> bool:
     """끄기 스위치. 환경변수 또는 마커 파일."""
@@ -82,8 +86,8 @@ def due(
     if is_off(state):
         return None
 
-    for row in reversed(ledger.read(home=home)):
-        if row.get("repo") != repo_key or row.get("event") != "start":
+    for row in reversed(ledger.read(repo_key=repo_key, home=home)):
+        if row.get("event") != "start":
             continue
         harness = row.get("harness")
         session = row.get("session")
@@ -97,14 +101,26 @@ def due(
             continue
         if row.get("sidechain"):
             continue
+
+        # **가장 최근 외래 세션에서 멈춘다.** 이미 전달했다면 None 이다.
+        #
+        # 계속 거슬러 올라가면 어제 세션을 "방금 일어난 일"처럼 주입한다 —
+        # cx3(수) 전달 후 다음 세션이 cx2(화)를, 그 다음이 cx1(월)을 받는
+        # 식으로 점점 낡은 핸드오프가 나간다. 낡은 표식은 없는 표식보다 나쁘다.
         if already_delivered(state, str(session), my_harness):
-            continue
+            return None
+
+        epoch = float(row.get("epoch") or 0.0)
+        if epoch and now and (now - epoch) > MAX_AGE_SECONDS:
+            # 너무 오래된 것은 이어갈 작업이 아니다.
+            return None
+
         return Watermark(
             repo_key=repo_key,
             harness=str(harness),
             session_id=str(session),
             path=str(row.get("path") or ""),
             event="start",
-            epoch=float(row.get("epoch") or 0.0),
+            epoch=epoch,
         )
     return None

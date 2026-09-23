@@ -19,7 +19,7 @@ import shutil
 import sys
 
 HOME = os.path.expanduser("~")
-REPO = "/home/ec2-user/capstone/oh-my-harness-cowork"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 SLUG = re.sub(r"[^a-zA-Z0-9]", "-", REPO)
 CLAUDE_DIR = os.path.join(HOME, ".claude", "projects", SLUG)

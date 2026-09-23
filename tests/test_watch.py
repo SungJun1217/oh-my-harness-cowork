@@ -176,14 +176,26 @@ class TestRunLoop(Base):
 
 
 class TestCorrectnessIndependence(unittest.TestCase):
-    def test_brief_does_not_import_or_require_watch(self):
-        """데몬이 정확성을 담당하지 않는다는 것을 구조로 확인한다."""
+    def test_brief_does_not_import_watch(self):
+        """데몬이 정확성을 담당하지 않는다는 것을 import 그래프로 확인한다.
+
+        문자열 검사로는 안 된다 — 주석에 watch 를 언급하는 것은 정당하다.
+        """
+        import ast
         import inspect
 
         from omhc import brief
 
-        source = inspect.getsource(brief)
-        self.assertNotIn("watch", source)
+        tree = ast.parse(inspect.getsource(brief))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add(node.module or "")
+                imported.update(a.name for a in node.names)
+        self.assertNotIn("watch", imported)
+        self.assertNotIn("omhc.watch", imported)
 
 
 if __name__ == "__main__":

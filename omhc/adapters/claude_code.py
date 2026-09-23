@@ -126,9 +126,12 @@ def head_of(path: str, limit: int = 200) -> Dict[str, object]:
                     continue
                 if not isinstance(row, dict):
                     continue
-                for key in ("cwd", "entrypoint", "version", "sessionId", "gitBranch"):
+                for key in ("cwd", "entrypoint", "version", "sessionId",
+                            "gitBranch", "agentId"):
                     if key not in info and row.get(key):
                         info[key] = row[key]
+                if row.get("isSidechain"):
+                    info["sidechain"] = True
                 if "cwd" in info and "entrypoint" in info:
                     break
     except OSError:

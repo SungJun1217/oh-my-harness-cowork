@@ -8,6 +8,7 @@ import time
 from typing import List, Optional
 
 from . import adapters, agents_md, brief, due, gate, index, ledger, locate, pin, watch
+from .adapters import claude_code
 from .adapter import AdapterUnavailable
 
 PROG = "omhc"
@@ -56,7 +57,16 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
         "path": str(payload.get("transcript_path") or ""),
         "cwd": root,
     }
+    # entrypoint / sidechain 을 **여기서** 기록해야 한다. 훅 stdin 페이로드에는
+    # 없으므로 트랜스크립트 머리에서 읽는다. 기록하지 않으면 due() 의 비대화형·
+    # 서브체인 차단이 프로덕션에서 죽은 코드가 된다 — 테스트만 그 필드를 손으로
+    # 넣어서 통과하고, 실제로는 남의 도구가 남긴 sdk 세션이 핸드오프된다.
     entrypoint = payload.get("entrypoint")
+    if not (isinstance(entrypoint, str) and entrypoint) and row["path"]:
+        head = claude_code.head_of(row["path"])
+        entrypoint = head.get("entrypoint")
+        if head.get("sidechain") or head.get("agentId"):
+            row["sidechain"] = True
     if isinstance(entrypoint, str) and entrypoint:
         row["entrypoint"] = entrypoint
     ledger.append(row, home=home)
@@ -117,8 +127,10 @@ def cmd_log(args, *, home=None, out=sys.stdout) -> int:
         rows = [r for r in rows if needle in r[1].arg.lower()]
     if args.file:
         rows = [r for r in rows if any(args.file in p for p in r[1].paths)]
-    if args.last:
-        rows = rows[-args.last :]
+    # falsy-zero 검사를 쓰면 `--last 0` 이 전부를 쏟는다 — F7 이 막으려던 바로 그
+    # 무한 출력이다. 음수도 앞에서 자르는 엉뚱한 동작이 된다.
+    if args.last is not None and args.last >= 0:
+        rows = rows[len(rows) - args.last :] if args.last else []
 
     for session, row in rows:
         out.write(

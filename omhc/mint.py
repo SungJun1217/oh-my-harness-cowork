@@ -4,7 +4,7 @@ import os
 import re
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from . import guard
+from . import guard, locate
 
 # 주입 예산. 하드 캡이며 이 함수의 마지막 문장이 단정이다.
 BUDGET = 900
@@ -102,16 +102,17 @@ def _duration(events) -> str:
 
 
 def _relativize(path: str, repo_root: Optional[str]) -> Optional[str]:
-    """레포 상대 경로. 레포 밖이면 None.
+    """레포 상대 경로. 레포 밖이면 None. locate.relativize 의 단일 정의를 쓴다.
 
-    basename 으로 떨어뜨리면 안 된다 — 레포 밖 파일(예: 홈 디렉터리의 메모)이
-    레포 파일처럼 보여서 DID 슬롯이 거짓말을 한다.
+    basename 으로 떨어뜨리면 안 된다 — 레포 밖 파일(홈 디렉터리의 메모 등)이
+    레포 파일처럼 보여 DID 슬롯이 거짓말을 한다.
     """
-    if repo_root and path.startswith(repo_root.rstrip("/") + "/"):
-        return path[len(repo_root.rstrip("/")) + 1 :]
-    if path.startswith("/"):
-        return None
-    return path
+    if not repo_root:
+        return None if path.startswith("/") else path
+    rel = locate.relativize(repo_root, path)
+    if rel is not None:
+        return rel
+    return None if path.startswith("/") else path
 
 
 def _unresolved_failures(events) -> Tuple[List, int]:
@@ -172,6 +173,11 @@ def mint(
         )
 
     ref = read.ref
+    # DID 는 **레포 루트** 기준으로 상대화한다. ref.cwd 는 세션이 시작된
+    # 작업 디렉터리이고 서브디렉터리일 수 있다(어댑터가 equal-or-descendant 로
+    # 매칭하는 이유가 그것이다) — 그걸 기준으로 삼으면 그 밖에서 고친 파일이
+    # "레포 밖"으로 판정되어 DID 에서 사라진다.
+    repo_root = locate.resolve_repo_root(ref.cwd) if ref.cwd else None
     # F5: 같은 벤더끼리는 native resume 이 무손실이며 이 요약보다 우월하다.
     if ref.adapter_id == to_adapter_id:
         return ""
@@ -221,7 +227,7 @@ def mint(
         if e.verb != "modified":
             continue
         for p in (e.paths or ((e.arg,) if e.arg.startswith("/") else ())):
-            rel = _relativize(p, ref.cwd)
+            rel = _relativize(p, repo_root)
             if rel and rel not in modified_paths:
                 modified_paths.append(rel)
     did_value = " ".join(modified_paths[:_DID_MAX_PATHS])
