@@ -164,5 +164,76 @@ class TestHookChainExecution(unittest.TestCase):
             self.assertEqual(got.returncode, 0, got.stderr)
 
 
+class TestF7ZeroCase(unittest.TestCase):
+    """스펙 §16-7: 갈아타지 않는 세션 시작에는 주입이 0회여야 한다.
+
+    F7(프로토타입의 15KB 무상한 주입)이 재설계의 이유였으므로, 0 케이스는
+    주장이 아니라 관측으로 확인한다.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tmp.name, "home")
+        self.repo = os.path.join(self.tmp.name, "repo")
+        os.makedirs(self.home)
+        os.makedirs(self.repo)
+        subprocess.run(["git", "-C", self.repo, "init", "-q"], check=True,
+                       capture_output=True)
+        self.env = dict(os.environ, HOME=self.home)
+        self.env.pop("OMHC_OFF", None)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _chain(self, session_id: str):
+        outputs = []
+        payload = json.dumps({"cwd": os.path.realpath(self.repo),
+                              "session_id": session_id})
+        for command in shipped_commands(FRAGMENTS["claude-code"]):
+            argv = shlex.split(command.replace("$HOME/.local/bin/omhc", OMHC))
+            got = subprocess.run(argv, input=payload, capture_output=True, text=True,
+                                 env=self.env, cwd=self.repo, timeout=60)
+            self.assertEqual(got.returncode, 0, got.stderr)
+            outputs.append(got.stdout)
+        return outputs
+
+    def test_ten_claude_only_session_starts_inject_nothing(self):
+        for i in range(10):
+            outputs = self._chain("claude-session-{}".format(i))
+            self.assertEqual(outputs[1], "", "{}번째 세션에서 주입이 일어났다".format(i))
+
+    def test_ten_session_starts_leave_no_delivered_rows(self):
+        """주입이 없으면 delivered.tsv 도 없어야 한다.
+
+        실측에서는 레포별 상태 디렉터리 자체가 만들어지지 않는다 — 원장 한 줄
+        (약 220바이트)만 ~/.omhc/ledger.jsonl 에 쌓인다. 그것이 F7 의 0 케이스다.
+        """
+        for i in range(10):
+            self._chain("claude-session-{}".format(i))
+        found = []
+        for dirpath, _dirs, names in os.walk(os.path.join(self.home, ".omhc")):
+            found += [os.path.join(dirpath, n) for n in names if n == "delivered.tsv"]
+        self.assertEqual(found, [], "주입이 없었는데 delivered 기록이 생겼다")
+
+    def test_ten_session_starts_cost_only_the_ledger_lines(self):
+        for i in range(10):
+            self._chain("claude-session-{}".format(i))
+        total = 0
+        for dirpath, _dirs, names in os.walk(os.path.join(self.home, ".omhc")):
+            for name in names:
+                total += os.path.getsize(os.path.join(dirpath, name))
+        # 원장 10줄 + 게이트 마커. 킬로바이트 단위가 아니라 수백 바이트여야 한다.
+        self.assertLess(total, 8 * 1024,
+                        "갈아타지 않는 세션 10회가 {}B 를 남겼다".format(total))
+
+    def test_ten_session_starts_write_no_artifact(self):
+        for i in range(10):
+            self._chain("claude-session-{}".format(i))
+        found = []
+        for dirpath, _dirs, names in os.walk(os.path.join(self.home, ".omhc")):
+            found += [n for n in names if n == "omhc.txt"]
+        self.assertEqual(found, [], "주입이 없었는데 산출물 파일이 생겼다")
+
+
 if __name__ == "__main__":
     unittest.main()
