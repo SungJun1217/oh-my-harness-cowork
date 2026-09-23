@@ -55,6 +55,27 @@ _DEFAULT_VERB = "ran"
 
 _PATH_HINT_KEYS = ("path", "file_path", "filename")
 
+# 사람이 타이핑한 내용의 kind 접두. 실측된 값:
+#   ['user.text']                        ← 진짜 사람의 프롬프트
+#   ['environments.environment_context'] ← 환경 프롬프트 (role=user 인데 기계장치)
+#   ['host_skills.instructions', 'multi_agent.role_instructions', …] ← developer
+#
+# 접두 허용(deny-by-default 아님)이라 새로운 user.* kind 가 생겨도 사람의 말을
+# 잃지 않는다. 봉투 판정과 함께 2중으로 쓴다 — 메타데이터는 정확하지만
+# 하네스별이고, 봉투는 덜 정확하지만 모든 하네스에서 동작한다.
+_HUMAN_KIND_PREFIX = "user."
+
+
+def human_kinds(payload: dict):
+    """content_item_kinds. payload 최상위가 아니라 메타데이터 안에 중첩돼 있다."""
+    meta = payload.get("internal_chat_message_metadata_passthrough")
+    if not isinstance(meta, dict):
+        return None
+    kinds = meta.get("content_item_kinds")
+    if not isinstance(kinds, list) or not kinds:
+        return None
+    return [str(k) for k in kinds]
+
 
 def _epoch_of(value) -> float:
     if not isinstance(value, str) or len(value) < 19:
@@ -264,6 +285,15 @@ class CodexCliAdapter:
                         continue
                     text = guard.redact_b64(_text_of(payload.get("content")).strip())
                     author = "human" if role == "user" else "agent"
+                    if author == "human":
+                        kinds = human_kinds(payload)
+                        if kinds is not None and not any(
+                            k.startswith(_HUMAN_KIND_PREFIX) for k in kinds
+                        ):
+                            # role=user 로 위장한 기계장치. 실측:
+                            # ['environments.environment_context']
+                            bump("kind:" + kinds[0])
+                            continue
                     if not guard.safe(text, author):
                         bump("guarded_" + author)
                         continue

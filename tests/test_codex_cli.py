@@ -116,7 +116,11 @@ class TestReadRealFixture(unittest.TestCase):
         self.read = CX.CodexCliAdapter().read_session(ref_for(EXEC))
 
     def test_environment_context_envelope_is_not_a_human_turn(self):
-        """판별자는 봉투 구조다. content_item_kinds 같은 필드는 실물에 없다."""
+        """판별자는 둘이다 — 메타데이터 kind 와 봉투 구조.
+
+        content_item_kinds 는 실재하지만 payload 최상위가 아니라
+        payload.internal_chat_message_metadata_passthrough 안에 중첩돼 있다.
+        """
         for ev in self.read.events:
             if ev.author == "human":
                 self.assertNotIn("<environment_context>", ev.text)
@@ -278,3 +282,62 @@ class TestRegistryV1(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMetadataKindDiscriminator(unittest.TestCase):
+    """content_item_kinds 는 payload 최상위가 아니라 메타데이터 안에 중첩돼 있다."""
+
+    def _read(self, rows):
+        path = write_rollout(rows)
+        try:
+            return CX.CodexCliAdapter().read_session(ref_for(path))
+        finally:
+            os.unlink(path)
+
+    def _msg(self, role, text, kinds):
+        return {"type": "response_item", "payload": {
+            "type": "message", "role": role, "id": "m",
+            "content": [{"type": "input_text", "text": text}],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": kinds}}}
+
+    def test_environment_context_kind_is_dropped_even_without_an_envelope(self):
+        read = self._read([
+            {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
+            self._msg("user", "봉투 없이 온 환경 설명",
+                      ["environments.environment_context"]),
+        ])
+        self.assertEqual([e for e in read.events if e.author == "human"], [])
+        self.assertIn("kind:environments.environment_context", read.dropped)
+
+    def test_user_text_kind_is_kept(self):
+        read = self._read([
+            {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
+            self._msg("user", "진짜 사람의 말", ["user.text"]),
+        ])
+        humans = [e for e in read.events if e.author == "human"]
+        self.assertEqual(len(humans), 1)
+
+    def test_a_new_user_prefixed_kind_is_not_lost(self):
+        """접두 허용이라 새 user.* kind 가 생겨도 사람의 말을 잃지 않는다."""
+        read = self._read([
+            {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
+            self._msg("user", "미래의 사람 입력", ["user.voice_2099"]),
+        ])
+        self.assertEqual(len([e for e in read.events if e.author == "human"]), 1)
+
+    def test_missing_metadata_falls_back_to_the_envelope_test(self):
+        read = self._read([
+            {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
+            {"type": "response_item", "payload": {
+                "type": "message", "role": "user", "id": "m",
+                "content": [{"type": "input_text",
+                             "text": "<environment_context>\n  <cwd>/x</cwd>\n</environment_context>"}]}},
+        ])
+        self.assertEqual([e for e in read.events if e.author == "human"], [])
+
+    def test_human_kinds_reads_the_nested_location(self):
+        payload = {"internal_chat_message_metadata_passthrough": {
+            "content_item_kinds": ["user.text"]}}
+        self.assertEqual(CX.human_kinds(payload), ["user.text"])
+        self.assertIsNone(CX.human_kinds({"content_item_kinds": ["user.text"]}))

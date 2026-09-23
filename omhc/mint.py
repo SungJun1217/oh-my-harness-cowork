@@ -139,6 +139,18 @@ def _unresolved_failures(events) -> Tuple[List, int]:
     return unresolved, fixed
 
 
+def failure_tags(read) -> List[Tuple[str, object]]:
+    """[E1], [E2] … 태그와 그 원본 Event 의 짝.
+
+    mint 와 refs.tsv 기록이 같은 계산을 쓰도록 여기 한 곳에 둔다 — 두 곳에서
+    따로 세면 `omhc show E1` 이 다른 것을 가리킨다.
+    """
+    unresolved, _fixed = _unresolved_failures(list(read.events))
+    return [
+        ("E{}".format(i + 1), ev) for i, ev in enumerate(unresolved[:_FAIL_MAX])
+    ]
+
+
 def mint(
     read,
     *,

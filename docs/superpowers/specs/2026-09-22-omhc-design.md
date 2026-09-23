@@ -53,7 +53,11 @@ v1 대상은 **Claude Code ↔ Codex CLI 양방향**, 같은 머신·같은 레�
 - Codex: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`이 source of truth이고 sqlite들(`thread_history_1`, `state_5`, `memories_1`, `goals_1`, `queue_1`, `logs_2`)은 그 투영이다. `~/.codex/history.jsonl`은 이 머신에 없다.
 - 이 머신의 유일한 Codex rollout에는 **어시스턴트 메시지 0개, 툴 호출 0개**다 → Codex 동사 매핑은 아직 실물로 검증되지 않았다. **최대 미지**.
 - Codex `role=="user"` 레코드가 2개이고 **하나가 `<environment_context>…</environment_context>` 봉투**, 하나가 진짜 사람의 프롬프트다 → 역할 기반 필터만으로는 Codex 환경 프롬프트를 중계한다.
-  - **정정(2026-09-23, 실물 확인):** 정찰은 `content_item_kinds: ["environments.environment_context"]` 라는 메타데이터 필드로 판정해야 한다고 보고했으나, **그 필드는 두 rollout 어디에도 존재하지 않는다.** 실제 페이로드는 `{content: [{type: "input_text", text}], id, internal_chat_message_metadata_passthrough, role, type: "message"}` 다. 따라서 판별자는 메타데이터가 아니라 **봉투 구조**이고, Claude Code에 쓰는 봉투 판정 하나가 두 하네스를 동시에 처리한다 — 하네스별 특수 케이스가 하나 사라진다.
+  - **확정(2026-09-23, 실물 확인 2회):** 정찰이 보고한 `content_item_kinds` 는 **실재한다.** 단 `payload` 최상위가 아니라 `payload.internal_chat_message_metadata_passthrough.content_item_kinds` 에 중첩돼 있다. (중간에 "그 필드는 존재하지 않는다"고 적었던 것은 최상위 키만 확인한 오판이었고 여기서 정정한다.) 실측값:
+    - `['user.text']` — 진짜 사람의 프롬프트
+    - `['environments.environment_context']` — `role=user` 인데 환경 프롬프트
+    - `['host_skills.instructions', 'permissions.instructions', 'collaboration_mode.instructions']`, `['multi_agent.role_instructions']`, `['multi_agent.mode_instructions']` — `role=developer`
+  - 따라서 **판별자를 둘 다 쓴다.** 메타데이터 kind 는 정확하지만 하네스별이므로 `user.` 접두 **허용**으로 판정한다(새 `user.*` kind 가 생겨도 사람의 말을 잃지 않는다). 봉투 구조는 덜 정확하지만 하네스와 무관하게 동작하며 Claude Code와 같은 코드를 쓴다. 하나가 실패해도 다른 하나가 받는다.
   - `role=="developer"` 레코드는 `<skills_instructions>`(2484자) · `<permissions instructions>`(341) · `<collaboration_mode>`(1328) · `<multi_agent_role>`(2429) · `<multi_agent_mode>`(271) 로 순수 기계장치다. 역할 화이트리스트에서 제외한다.
 - Codex 샌드박스가 `{"type":"read-only"}`로 관측된 사례가 있다 → 레포 안으로 쓰는 경로를 전제하면 안 된다.
 - `~/.claude`와 `~/` 는 **같은 장치**다 → 하드링크 가능.

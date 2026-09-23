@@ -12,6 +12,7 @@ from .adapter import SessionRef
 
 GUARD_LOG = "guard.log"
 NOTES_NAME = "notes.txt"
+ARTIFACT_NAME = "omhc.txt"
 
 
 def _log_failure(home: Optional[str], detail: str) -> None:
@@ -33,6 +34,44 @@ def _notes(state_dir: str, limit: int = 2) -> list:
     except OSError:
         return []
     return lines[-limit:]
+
+
+REFS_NAME = "refs.tsv"
+
+
+def _write_refs(state_dir: str, ref, tags) -> None:
+    """태그 → (세션, 소스 경로, 오프셋, 길이). 900바이트 안에 세션 id 가 없어도
+    `omhc show E1` 이 풀리는 근거다. 매 표식마다 다시 쓴다."""
+    os.makedirs(state_dir, exist_ok=True)
+    lines = [
+        "\t".join((tag, ref.session_id, ref.source_path, str(ev.offset),
+                   str(ev.length), str(ev.seq)))
+        for tag, ev in tags
+    ]
+    path = os.path.join(state_dir, REFS_NAME)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        if lines:
+            fh.write("\n".join(lines) + "\n")
+    os.replace(tmp, path)
+
+
+def read_refs(state_dir: str) -> dict:
+    out = {}
+    try:
+        with open(os.path.join(state_dir, REFS_NAME), encoding="utf-8",
+                  errors="replace") as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 5:
+                    out[parts[0]] = {
+                        "session_id": parts[1], "source_path": parts[2],
+                        "offset": int(parts[3]), "length": int(parts[4]),
+                        "seq": int(parts[5]) if len(parts) > 5 else 0,
+                    }
+    except (OSError, ValueError):
+        return out
+    return out
 
 
 def hook_wire(text: str) -> str:
@@ -99,8 +138,20 @@ def compute(
         pin.pin_session(state, ref)
         index.append_rows(os.path.join(state, "index", ref.session_id + ".idx"),
                           read.events)
+        _write_refs(state, ref, mint.failure_tags(read))
     except OSError as exc:
         _log_failure(home, "archive failed: {}".format(exc))
+
+    # 주입한 본문을 파일로도 남긴다. `cat ~/.omhc/<key>/omhc.txt` 로 무엇이
+    # 들어갔는지 사람이 직접 확인하고 편집기로 고칠 수 있어야 한다.
+    try:
+        artifact = os.path.join(state, ARTIFACT_NAME)
+        tmp = artifact + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        os.replace(tmp, artifact)
+    except OSError as exc:
+        _log_failure(home, "artifact write failed: {}".format(exc))
 
     due.mark_delivered(state, watermark, to_harness=my_harness, epoch=stamp)
     return body
