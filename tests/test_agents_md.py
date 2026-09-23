@@ -8,8 +8,7 @@ import unittest
 from omhc import adapter as A
 from omhc import agents_md, managed_block
 
-
-from ._repo import git  # noqa: E402  (공유 정의)
+from ._repo import git
 
 
 class TestAgentsMd(unittest.TestCase):

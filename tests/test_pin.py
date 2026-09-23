@@ -4,15 +4,14 @@ import os
 import tempfile
 import unittest
 
-from omhc import adapter as A
 from omhc import pin
 
+from . import _repo
 
-def ref_for(path: str, session_id: str = "sess1") -> A.SessionRef:
-    return A.SessionRef(
-        adapter_id="claude-code", session_id=session_id, source_path=path,
-        cwd="/repo", epoch=0.0, size=os.path.getsize(path),
-    )
+
+def ref_for(path: str):
+    # 사이드카 디렉터리 이름이 session_id 에서 나온다 — 테스트가 "sess1" 을 심는다.
+    return _repo.ref_for("claude-code", path, session_id="sess1", cwd="/repo")
 
 
 class TestPin(unittest.TestCase):

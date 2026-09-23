@@ -8,10 +8,9 @@ from omhc import guard
 
 from . import _repo
 
-CLAUDE_LIVE = _repo.CLAUDE_LIVE
-CODEX_EXEC = _repo.CODEX_EXEC
-have_fixtures = os.path.exists(CLAUDE_LIVE) and os.path.exists(CODEX_EXEC)
-MISSING = "픽스처가 없다. `python3 tests/harvest.py` 를 먼저 실행하라."
+from ._repo import CLAUDE_LIVE, CODEX_EXEC, MISSING
+
+have_fixtures = _repo.have_fixtures(CLAUDE_LIVE, CODEX_EXEC)
 
 
 def raw_bytes() -> bytes:
