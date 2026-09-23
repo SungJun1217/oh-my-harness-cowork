@@ -46,3 +46,14 @@ def present(*, homes: Optional[Dict[str, str]] = None, now=time.time) -> List[st
         except Exception:
             continue
     return found
+
+
+# v1 어댑터를 등재한다. 모듈 맨 아래에서 import 하는 이유는 각 어댑터가
+# `from . import _register` 로 이 모듈을 되참조하기 때문이다 — _register 가
+# 이미 정의된 뒤라야 순환 import 가 성립한다.
+#
+# 자동 스캐닝을 두지 않는 것은 의도적이다. 어댑터가 세 개가 되는 날 그때
+# 만든다. 지금은 이 두 줄이 레지스트리의 전부이고, 새 어댑터를 붙이는 비용도
+# 여기에 한 줄 추가하는 것이다.
+from . import claude_code  # noqa: E402,F401  (등록 부작용)
+from . import codex_cli  # noqa: E402,F401  (등록 부작용)
