@@ -7,7 +7,8 @@ import time
 import traceback
 from typing import Optional
 
-from . import adapters, due, fsio, gate, index, locate, mint, pin
+from . import adapters, deliver, due, fsio, gate, index, locate, mint, pin
+from .adapter import HandoffBundle
 
 GUARD_LOG = "guard.log"
 NOTES_NAME = "notes.txt"
@@ -17,7 +18,7 @@ ARTIFACT_NAME = "omhc.txt"
 def _log_failure(home: Optional[str], detail: str) -> None:
     """실패를 남기되 절대 던지지 않는다. 훅 경로에서 죽으면 세션 시작이 깨진다."""
     try:
-        root = os.path.join(home or os.path.expanduser("~"), ".omhc")
+        root = locate.omhc_root(home)
         os.makedirs(root, exist_ok=True)
         with open(os.path.join(root, GUARD_LOG), "a", encoding="utf-8") as fh:
             fh.write("--- {}\n{}\n".format(time.strftime("%Y-%m-%dT%H:%M:%SZ"), detail))
@@ -71,25 +72,10 @@ def read_refs(state_dir: str) -> dict:
     return out
 
 
-# 와이어 형식은 하네스마다 다르다. 실측된 세 가지:
-#   claude : {"hookSpecificOutput": {"hookEventName": "SessionStart",
-#                                    "additionalContext": …}}
-#   cursor : {"additional_context": …}            (snake_case)
-#   sdk    : {"additionalContext": …}             (최상위, SDK 표준 / Copilot CLI)
-#
-# **세 형식을 동시에 내보내면 안 된다.** Claude Code 는 additional_context 와
-# hookSpecificOutput 을 **중복 제거 없이 둘 다 읽으므로**(설치된 superpowers 훅의
+# 세 형식을 동시에 내보내면 안 된다. Claude Code 는 additional_context 와
+# hookSpecificOutput 을 중복 제거 없이 둘 다 읽으므로(설치된 superpowers 훅의
 # 주석에서 확인) 핸드오프가 두 번 주입된다 — 게이트로 막은 중복을 와이어 레벨에서
-# 되살리는 셈이다.
-#
-# 환경변수로 플랫폼을 추측하지도 않는다. 우리가 하네스별 훅 설정을 직접 쓰므로
-# 대상을 이미 알고 있고, 추측은 틀릴 수 있다(우리는 플러그인이 아니라 설정 훅이라
-# CLAUDE_PLUGIN_ROOT 가 설정되지 않는다).
-WIRE_BY_HARNESS = {
-    "claude-code": "claude",
-    "codex-cli": "sdk",
-    "cursor-ide": "cursor",
-}
+# 되살리는 셈이다. 어느 형식을 쓰는지는 **어댑터가 선언한다**(adapter.wire).
 DEFAULT_WIRE = "sdk"
 
 
@@ -110,6 +96,14 @@ def _ref_for(adapter, watermark, repo_root: str):
     # 원장에 경로가 없거나 그 파일이 사라졌을 때만 전체 스캔으로 떨어진다.
     return [r for r in adapter.list_sessions(repo_root)
             if r.session_id == watermark.session_id]
+
+
+def _wire_for(harness: str, home: Optional[str]) -> str:
+    """이 하네스의 주입 형식. 어댑터가 선언한 것을 그대로 쓴다."""
+    try:
+        return getattr(adapters.get(harness, home=home), "wire", DEFAULT_WIRE)
+    except Exception:
+        return DEFAULT_WIRE
 
 
 def hook_wire(text: str, wire: str = "claude") -> str:
@@ -182,12 +176,19 @@ def compute(
     except OSError as exc:
         _log_failure(home, "archive failed: {}".format(exc))
 
-    # 주입한 본문을 파일로도 남긴다. `cat ~/.omhc/<key>/omhc.txt` 로 무엇이
-    # 들어갔는지 사람이 직접 확인하고 편집기로 고칠 수 있어야 한다.
+    # 전달은 deliver 가 라우팅한다. 여기서 파일을 직접 쓰면 채널 추상이 프로덕션
+    # 경로를 우회해, receipt·Path B·보편 바닥이 단위 테스트에서만 동작한다.
+    # 본문을 파일로도 남기는 것은 그 첫 채널의 일이다 —
+    # `cat ~/.omhc/<key>/omhc.txt` 로 무엇이 들어갔는지 확인할 수 있어야 한다.
     try:
-        fsio.write_atomic(os.path.join(state, ARTIFACT_NAME), body)
-    except OSError as exc:
-        _log_failure(home, "artifact write failed: {}".format(exc))
+        receipt = deliver.deliver(
+            HandoffBundle(body_md=body, repo_root=repo_root, to_adapter_id=my_harness),
+            home=home, now=stamp,
+        )
+        if receipt.channel == "nowhere":
+            _log_failure(home, "delivery found no channel: " + receipt.cleanup_hint)
+    except Exception as exc:  # deliver 는 던지지 않아야 하지만 훅을 깨뜨릴 수는 없다
+        _log_failure(home, "delivery failed: {}".format(exc))
 
     due.mark_delivered(state, watermark, to_harness=my_harness, epoch=stamp)
     return body
@@ -251,7 +252,7 @@ def run(argv, stdin_text: str = "", *, home: Optional[str] = None,
             # 출력 직전 재검사. 버그가 과대 페이로드를 주입하지 못하게 한다.
             _log_failure(home, "body exceeded budget at print time; suppressed")
             return 0
-        chosen = wire or WIRE_BY_HARNESS.get(harness, DEFAULT_WIRE)
+        chosen = wire or _wire_for(harness, home)
         stream.write(body if as_text else hook_wire(body, chosen) + "\n")
         return 0
     except Exception:

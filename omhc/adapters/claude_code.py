@@ -18,7 +18,7 @@ from ..adapter import (
     SessionRef,
 )
 from ..event import Event
-from . import _register
+from . import _register, install_state_artifact
 
 ARTIFACT_NAME = "omhc.txt"
 
@@ -187,6 +187,7 @@ def _paths_of(tool_input) -> Tuple[str, ...]:
 class ClaudeCodeAdapter:
     adapter_id = "claude-code"
     capabilities = frozenset({Capability.READ, Capability.WRITE})
+    wire = "claude"
 
     def __init__(self, *, home: Optional[str] = None, now=time.time) -> None:
         # __init__ 에서 I/O 를 하지 않는다.
@@ -418,15 +419,12 @@ class ClaudeCodeAdapter:
         return "claude --resume {}".format(ref.session_id)
 
     def install_handoff(self, bundle: HandoffBundle) -> InstallReceipt:
-        """SessionStart 훅이 읽어갈 자리에 산출물을 둔다(push 가 아니라 pull)."""
-        key = locate.repo_key(bundle.repo_root)
-        state = locate.state_dir(key, home=self._home)
-        os.makedirs(state, exist_ok=True)
-        path = os.path.join(state, ARTIFACT_NAME)
-        fsio.write_atomic(path, bundle.body_md)
-        return InstallReceipt(
-            channel="sessionstart-hook",
-            paths_written=(path,),
-            consumed_on_read=True,
-            cleanup_hint="omhc clear",
-        )
+        return install_state_artifact(bundle, home=self._home)
+
+    def fallback_channels(self):
+        """Claude Code 는 SessionStart 훅이 신뢰 문제 없이 동작하므로 폴백이 없다.
+
+        비어 있음을 명시한다 — 기반 클래스를 아무도 상속하지 않으므로 기본값이
+        상속으로 얻어지지 않는다.
+        """
+        return ()

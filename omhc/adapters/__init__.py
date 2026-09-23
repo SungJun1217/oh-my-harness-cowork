@@ -3,7 +3,8 @@ from __future__ import annotations
 import time
 from typing import Dict, List, Optional
 
-from ..adapter import AdapterUnavailable
+from .. import fsio, locate
+from ..adapter import AdapterUnavailable, InstallReceipt
 
 # 클래스의 리터럴 dict. 인스턴스가 아니라 클래스인 이유는 레포별 하네스 home 을
 # 나중에 CLI 에서 한 줄로 꽂을 수 있게 하기 위함이다.
@@ -12,6 +13,23 @@ from ..adapter import AdapterUnavailable
 # 되는 날 그때 만든다 — 지금 만들면 두 개를 보고 그린 추상이 되고, 세 번째에서
 # 깨진다.
 REGISTRY: Dict[str, type] = {}
+
+
+def install_state_artifact(bundle, *, home: Optional[str] = None) -> InstallReceipt:
+    """훅이 읽어갈 자리에 산출물을 둔다. push 가 아니라 pull 이다.
+
+    두 어댑터의 install_handoff 본문이 바이트 단위로 같았다 — 범용 코드를 어댑터가
+    들고 있으면 계층이 뒤집힌다. 여기 한 곳에 두고 어댑터는 한 줄로 위임한다.
+    """
+    state = locate.state_dir(locate.repo_key(bundle.repo_root), home=home)
+    path = locate.artifact_path(state)
+    fsio.write_atomic(path, bundle.body_md)
+    return InstallReceipt(
+        channel="sessionstart-hook",
+        paths_written=(path,),
+        consumed_on_read=True,
+        cleanup_hint="omhc clear",
+    )
 
 
 def _register(cls: type) -> type:

@@ -344,6 +344,16 @@ class TestWireFormat(unittest.TestCase):
             payload = json.loads(brief.hook_wire("x", wire))
             self.assertEqual(len(payload), 1, wire)
 
-    def test_wire_defaults_are_derived_from_the_harness(self):
-        self.assertEqual(brief.WIRE_BY_HARNESS["claude-code"], "claude")
-        self.assertEqual(brief.WIRE_BY_HARNESS["codex-cli"], "sdk")
+    def test_every_adapter_declares_its_own_wire(self):
+        """와이어 형식은 코어의 조회표가 아니라 어댑터의 속성이다.
+
+        코어가 표를 들고 있으면 새 어댑터가 코어를 고쳐야 하고, 고치지 않으면
+        자기 하네스가 무시하는 필드를 조용히 내보낸다 — receipt 도 남지 않는다.
+        """
+        from omhc import adapters
+
+        for adapter_id in adapters.REGISTRY:
+            wire = getattr(adapters.get(adapter_id), "wire", None)
+            self.assertIn(wire, ("claude", "cursor", "sdk"), adapter_id)
+            payload = json.loads(brief.hook_wire("x", wire))
+            self.assertEqual(len(payload), 1, adapter_id)

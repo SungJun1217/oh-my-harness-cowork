@@ -257,6 +257,30 @@ class AdapterContract(unittest.TestCase):
                 hint = adapters.get(adapter_id).native_resume_hint(ref)
                 self.assertTrue(hint is None or isinstance(hint, str))
 
+    def test_23_every_adapter_declares_exactly_one_wire_field(self):
+        """주입 페이로드에 컨텍스트 필드가 둘이면 Claude Code 가 둘 다 읽어
+        핸드오프가 두 번 주입된다. 어댑터가 추가되면 이 불변식이 자동으로 적용된다."""
+        from omhc import brief
+
+        for adapter_id in adapter_ids():
+            with self.subTest(adapter=adapter_id):
+                wire = getattr(adapters.REGISTRY[adapter_id], "wire", None)
+                self.assertIn(wire, ("claude", "cursor", "sdk"))
+                import json as _json
+
+                self.assertEqual(len(_json.loads(brief.hook_wire("x", wire))), 1)
+
+    def test_24_fallback_channels_are_callables(self):
+        """폴백 채널은 어댑터의 속성이다 — 라우터에 벤더 문자열이 있으면
+        어댑터 추가가 코어 수정을 요구한다."""
+        for adapter_id in adapter_ids():
+            with self.subTest(adapter=adapter_id):
+                with tempfile.TemporaryDirectory() as home:
+                    channels = adapters.get(adapter_id, home=home).fallback_channels()
+                self.assertIsInstance(tuple(channels), tuple)
+                for channel in channels:
+                    self.assertTrue(callable(channel))
+
     def test_22_write_capable_adapters_return_a_receipt(self):
         for adapter_id in adapter_ids():
             caps = adapters.REGISTRY[adapter_id].capabilities
@@ -270,11 +294,32 @@ class AdapterContract(unittest.TestCase):
                     with self.assertRaises((A.NoInjectionChannel, NotImplementedError)):
                         adapters.get(adapter_id).install_handoff(bundle)
                     continue
+                # WRITE 어댑터는 receipt 를 주거나, 그 채널이 지금 성립하지 않는다면
+                # NoInjectionChannel 을 던진다 — 둘 다 선언된 정상 결과다. 전달이
+                # 아닌 것을 성공으로 보고하면 폴백이 영원히 발동하지 않는다.
                 with tempfile.TemporaryDirectory() as home:
-                    receipt = adapters.get(adapter_id, home=home).install_handoff(bundle)
+                    try:
+                        receipt = adapters.get(
+                            adapter_id, home=home).install_handoff(bundle)
+                    except A.NoInjectionChannel:
+                        continue
                 self.assertIsInstance(receipt, A.InstallReceipt)
                 self.assertTrue(receipt.channel)
                 self.assertTrue(receipt.paths_written)
+
+    def test_25_deliver_always_produces_a_receipt(self):
+        """어떤 어댑터로 보내도 라우터는 receipt 로 끝난다 — 조용히 사라지지 않는다."""
+        from omhc import deliver
+
+        for adapter_id in adapter_ids() + ["definitely-not-an-adapter"]:
+            with self.subTest(adapter=adapter_id):
+                with tempfile.TemporaryDirectory() as home, \
+                        tempfile.TemporaryDirectory() as repo:
+                    bundle = A.HandoffBundle(body_md="[omhc] x\n", repo_root=repo,
+                                             to_adapter_id=adapter_id)
+                    receipt = deliver.deliver(bundle, home=home, now=1758500000.0)
+                self.assertIsInstance(receipt, A.InstallReceipt)
+                self.assertTrue(receipt.channel)
 
 
 if __name__ == "__main__":

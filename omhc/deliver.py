@@ -4,7 +4,7 @@ import os
 import time
 from typing import Optional
 
-from . import adapters, agents_md, fsio
+from . import adapters, fsio
 from .adapter import (
     AdapterUnavailable,
     Capability,
@@ -67,7 +67,7 @@ def deliver(
     *,
     home: Optional[str] = None,
     now: Optional[float] = None,
-    allow_agents_md: bool = True,
+    allow_fallbacks: bool = True,
 ) -> InstallReceipt:
     """핸드오프를 라우팅한다. **절대 예외를 던지지 않는다.**
 
@@ -82,17 +82,22 @@ def deliver(
     if Capability.WRITE not in getattr(adapter, "capabilities", frozenset()):
         return file_drop(bundle, "adapter is read-only", now=stamp)
 
-    try:
-        return adapter.install_handoff(bundle)
-    except NoInjectionChannel as exc:
-        reason = "no injection channel: {}".format(exc)
-    except Exception as exc:  # 어댑터의 나쁜 하루가 세션 시작을 깨뜨리면 안 된다
-        reason = "adapter raised {}: {}".format(type(exc).__name__, exc)
-
-    if allow_agents_md and bundle.to_adapter_id == "codex-cli":
+    # 채널 목록은 어댑터의 속성이다. 라우터에 벤더 문자열이 하나라도 있으면
+    # "어댑터 추가는 파일 하나 + 픽스처 하나" 가 거짓이 된다.
+    channels = [adapter.install_handoff]
+    if allow_fallbacks:
         try:
-            return agents_md.install(bundle, now=stamp)
-        except Exception as exc:
-            reason += "; agents-md failed: {}".format(exc)
+            channels.extend(getattr(adapter, "fallback_channels", tuple)() or ())
+        except Exception:
+            pass
 
-    return file_drop(bundle, reason, now=stamp)
+    reasons = []
+    for channel in channels:
+        try:
+            return channel(bundle)
+        except NoInjectionChannel as exc:
+            reasons.append("no channel: {}".format(exc))
+        except Exception as exc:  # 어댑터의 나쁜 하루가 세션 시작을 깨뜨리면 안 된다
+            reasons.append("{}: {}".format(type(exc).__name__, exc))
+
+    return file_drop(bundle, "; ".join(reasons) or "no channels declared", now=stamp)

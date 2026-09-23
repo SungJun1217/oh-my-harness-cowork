@@ -127,7 +127,7 @@ python3 -m unittest discover -s tests -t . -q   # 1초 이내, 하네스를 띄�
 bash tests/smoke.sh                             # 적대적 입력 7종
 ```
 
-적합성 스위트(`tests/conformance/suite.py`)의 불변식 22개는 `REGISTRY` 위에
+적합성 스위트(`tests/conformance/test_suite.py`)의 불변식 22개는 `REGISTRY` 위에
 파라미터화됩니다 — **어댑터를 추가하면 테스트가 저절로 늘어납니다.**
 
 ## 새 하네스 붙이기

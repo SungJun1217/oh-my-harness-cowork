@@ -101,6 +101,14 @@ class HarnessAdapter:
     adapter_id: str = ""
     capabilities: frozenset = frozenset()
 
+    # 주입 JSON 형식. 하네스별 사실 중 가장 하네스별인 것이므로 어댑터가 소유한다.
+    #   "claude" : {"hookSpecificOutput": {"hookEventName": …, "additionalContext": …}}
+    #   "cursor" : {"additional_context": …}
+    #   "sdk"    : {"additionalContext": …}   (SDK 표준 / Copilot CLI)
+    # 코어에 harness→wire 표를 두면 새 어댑터가 코어를 고쳐야 하고, 고치지 않으면
+    # 자기 하네스가 무시하는 필드를 조용히 내보낸다(receipt 도 남지 않는다).
+    wire: str = "sdk"
+
     def __init__(self, *, home: Optional[str] = None, now=None) -> None:
         raise NotImplementedError
 
@@ -127,6 +135,17 @@ class HarnessAdapter:
         Codex rollout 에서 찾으면 아무것도 없어 필터가 조용히 no-op 가 된다.
         """
         raise NotImplementedError
+
+    def fallback_channels(self):
+        """install_handoff 가 실패했을 때 순서대로 시도할 채널들.
+
+        각 항목은 HandoffBundle 을 받아 InstallReceipt 를 돌려주거나
+        NoInjectionChannel 을 던진다. 라우터가 벤더 문자열을 들고 있으면
+        "어댑터 추가는 파일 하나" 라는 계약이 문자 그대로 깨진다 — 세 번째
+        WRITE 어댑터가 자기 파일 기반 폴백(Cursor 의 rules, kimi-code 의 메모리)을
+        선언할 방법이 없어진다.
+        """
+        return ()
 
     def ref_for_path(self, source_path: str, session_id: str,
                      cwd: Optional[str] = None) -> Optional[SessionRef]:

@@ -12,11 +12,12 @@ from ..adapter import (
     HandoffBundle,
     HarnessPresence,
     InstallReceipt,
+    NoInjectionChannel,
     SessionRead,
     SessionRef,
 )
 from ..event import Event
-from . import _register
+from . import _register, install_state_artifact
 
 ARTIFACT_NAME = "omhc.txt"
 
@@ -193,6 +194,7 @@ def _output_failed(payload: dict) -> bool:
 class CodexCliAdapter:
     adapter_id = "codex-cli"
     capabilities = frozenset({Capability.READ, Capability.WRITE})
+    wire = "sdk"
 
     def __init__(self, *, home: Optional[str] = None, now=time.time) -> None:
         self._home = home
@@ -384,20 +386,33 @@ class CodexCliAdapter:
             return None
         return "codex resume {}".format(ref.session_id)
 
-    def install_handoff(self, bundle: HandoffBundle) -> InstallReceipt:
-        """Path A: 훅이 읽어갈 자리에 산출물을 둔다.
+    def hooks_path(self) -> str:
+        return os.path.join(self.home, ".codex", "hooks.json")
 
-        Codex 훅 신뢰(HookStateToml)가 손으로 떨어뜨린 파일을 거부할 수 있으므로
-        Path B(AGENTS.md 관리 구간)는 별도 모듈이 담당한다.
+    def hook_is_installed(self) -> bool:
+        """omhc 를 부르는 SessionStart 훅이 설치돼 있는가.
+
+        pull 채널(state 산출물)은 훅이 그것을 읽어갈 때만 전달이 성립한다.
+        훅이 없으면 산출물을 써도 아무도 보지 않으므로 전달이 아니다 — 그것을
+        성공으로 보고하면 Path B 가 영원히 발동하지 않는다.
         """
-        key = locate.repo_key(bundle.repo_root)
-        state = locate.state_dir(key, home=self._home)
-        os.makedirs(state, exist_ok=True)
-        path = os.path.join(state, ARTIFACT_NAME)
-        fsio.write_atomic(path, bundle.body_md)
-        return InstallReceipt(
-            channel="sessionstart-hook",
-            paths_written=(path,),
-            consumed_on_read=True,
-            cleanup_hint="omhc clear",
-        )
+        try:
+            with open(self.hooks_path(), encoding="utf-8", errors="replace") as fh:
+                return "omhc" in fh.read()
+        except OSError:
+            return False
+
+    def install_handoff(self, bundle: HandoffBundle) -> InstallReceipt:
+        if not self.hook_is_installed():
+            raise NoInjectionChannel(
+                "no omhc SessionStart hook at {}; the artifact would be written but "
+                "never read".format(self.hooks_path())
+            )
+        return install_state_artifact(bundle, home=self._home)
+
+    def fallback_channels(self):
+        """Path B: 훅 신뢰(HookStateToml)가 손으로 떨어뜨린 hooks.json 을 거부할 수
+        있으므로, 훅 신뢰도 모델 협조도 필요 없는 AGENTS.md 관리 구간을 둔다."""
+        from .. import agents_md
+
+        return (agents_md.install,)

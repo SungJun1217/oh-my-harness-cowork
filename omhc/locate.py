@@ -50,6 +50,28 @@ def relativize(repo_root: str, path: str) -> Optional[str]:
     return rel or "."
 
 
+# 상태 파일 이름의 단일 정의. 네 모듈에 재선언돼 있었고, 하나가 어긋나면
+# brief 가 쓰는 파일과 status/clear 가 보는 파일이 갈라져 핸드오프가 조용히
+# 보이지 않게 된다.
+ROOT_NAME = ".omhc"
+ARTIFACT_NAME = "omhc.txt"
+NOTES_NAME = "notes.txt"
+
+
+def omhc_root(home: Optional[str] = None) -> str:
+    """모든 omhc 상태의 루트. home=None 이면 실제 홈.
+
+    이 폴백을 세 모듈이 각자 결정하고 있었다 — 루트가 옮겨지면 guard.log 와
+    ledger.jsonl 이 레포별 상태 디렉터리와 다른 곳에 남아, 훅 경로의 유일한
+    실패 로그를 찾을 수 없게 된다.
+    """
+    return os.path.join(home or os.path.expanduser("~"), ROOT_NAME)
+
+
 def state_dir(key: str, home: Optional[str] = None) -> str:
     """이 레포의 상태 루트. 작업 트리를 오염시키지 않도록 홈 아래에 둔다."""
-    return os.path.join(home or os.path.expanduser("~"), ".omhc", key)
+    return os.path.join(omhc_root(home), key)
+
+
+def artifact_path(state_dir_path: str) -> str:
+    return os.path.join(state_dir_path, ARTIFACT_NAME)

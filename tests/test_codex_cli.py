@@ -263,14 +263,37 @@ class TestWriteSide(unittest.TestCase):
                                                        else ref_for(__file__))
         self.assertIn("codex resume", hint)
 
-    def test_install_handoff_writes_the_artifact(self):
+    def _bundle(self):
+        return A.HandoffBundle(body_md="[omhc] hi\n", repo_root=REPO,
+                               to_adapter_id="codex-cli")
+
+    def _install_hook(self, home):
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "hooks.json"), "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+
+    def test_install_handoff_writes_the_artifact_when_the_hook_exists(self):
         with tempfile.TemporaryDirectory() as home:
-            bundle = A.HandoffBundle(body_md="[omhc] hi\n", repo_root=REPO,
-                                     to_adapter_id="codex-cli")
-            receipt = CX.CodexCliAdapter(home=home).install_handoff(bundle)
+            self._install_hook(home)
+            receipt = CX.CodexCliAdapter(home=home).install_handoff(self._bundle())
             self.assertTrue(receipt.paths_written)
             with open(receipt.paths_written[0], encoding="utf-8") as fh:
                 self.assertEqual(fh.read(), "[omhc] hi\n")
+
+    def test_no_hook_means_no_pull_channel(self):
+        """훅이 없으면 산출물을 써도 아무도 읽지 않는다 — 그것을 성공으로 보고하면
+        AGENTS.md 폴백이 영원히 발동하지 않는다."""
+        with tempfile.TemporaryDirectory() as home:
+            with self.assertRaises(A.NoInjectionChannel):
+                CX.CodexCliAdapter(home=home).install_handoff(self._bundle())
+
+    def test_fallback_channel_is_declared(self):
+        with tempfile.TemporaryDirectory() as home:
+            channels = CX.CodexCliAdapter(home=home).fallback_channels()
+            self.assertEqual(len(channels), 1)
+            self.assertTrue(callable(channels[0]))
 
 
 class TestRegistryV1(unittest.TestCase):

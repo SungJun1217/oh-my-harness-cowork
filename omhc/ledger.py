@@ -4,7 +4,7 @@ import json
 import os
 from typing import List, Optional
 
-from . import fsio
+from . import fsio, locate
 
 LEDGER_NAME = "ledger.jsonl"
 
@@ -21,7 +21,7 @@ _TRIMMABLE = ("cwd",)
 
 
 def _path(home: Optional[str]) -> str:
-    return os.path.join(home or os.path.expanduser("~"), ".omhc", LEDGER_NAME)
+    return os.path.join(locate.omhc_root(home), LEDGER_NAME)
 
 
 def _encode(record: dict) -> str:

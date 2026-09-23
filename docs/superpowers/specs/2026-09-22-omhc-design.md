@@ -284,7 +284,7 @@ hooks/
   claude-settings.fragment.json
   codex-hooks.json
 tests/
-  conformance/suite.py        # 불변식 22개, REGISTRY 위에 파라미터화
+  conformance/test_suite.py        # 불변식 22개, REGISTRY 위에 파라미터화
   conformance/denylist.py     # 항목마다 목격 증거 필요, 백슬래시 금지
   fixtures/                   # 실물 10개 + 위조 compaction 2개 + 위조 Codex 툴호출 3개
   golden/*.omhc               # 바이트 일치 골든
