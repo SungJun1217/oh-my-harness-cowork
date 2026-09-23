@@ -122,3 +122,22 @@ class HarnessAdapter:
 
     def install_handoff(self, bundle: HandoffBundle) -> InstallReceipt:
         raise NotImplementedError
+
+    def classify(self, source_path: str) -> bool:
+        """이 트랜스크립트가 **사람이 대화한 세션**인가.
+
+        하네스별 지식이므로 어댑터가 소유한다. 코어가 한 어댑터의 파서로 다른
+        하네스의 세션을 판정하면 안 된다 — Claude 의 entrypoint/isSidechain 을
+        Codex rollout 에서 찾으면 아무것도 없어 필터가 조용히 no-op 가 된다.
+        """
+        raise NotImplementedError
+
+    def ref_for_path(self, source_path: str, session_id: str,
+                     cwd: Optional[str] = None) -> Optional[SessionRef]:
+        """알려진 경로 하나를 SessionRef 로 만든다. 부적격이면 None.
+
+        원장이 경로를 기록해 두므로, 세션 목록을 전부 스캔하지 않고 바로 그 파일을
+        열 수 있다 — 실측에서 list_sessions 는 130개 파일 34MB 를 읽어 1건을
+        남겼고 그것이 훅 예산 150ms 의 1.7배였다.
+        """
+        raise NotImplementedError

@@ -64,15 +64,39 @@ class TestDue(unittest.TestCase):
         self.assertIsNotNone(again)
 
     def test_non_interactive_sessions_are_ignored(self):
-        """omhc 가 자기 요약 호출이나 남의 도구 세션을 핸드오프하면 안 된다."""
-        self.start("claude-code", "sdk1", 50.0, entrypoint="sdk-py")
+        """판정은 mark 시점에 어댑터가 내려 원장에 기록한다.
+
+        due 가 entrypoint 어휘를 들고 있으면 같은 규칙이 두 모듈에 살면서 한쪽만
+        갱신되는 반쪽 필터가 된다 — 어휘는 그것을 아는 어댑터에만 있어야 한다.
+        """
+        self.start("claude-code", "sdk1", 50.0, interactive=False)
         self.start("codex-cli", "cx1", 10.0)
         got = due.due(REPO_KEY, "gajae-code", "g1", 100.0, home=self.home)
         self.assertEqual(got.session_id, "cx1")
 
-    def test_sidechain_sessions_are_ignored(self):
-        self.start("claude-code", "sub1", 50.0, sidechain=True)
-        self.assertIsNone(due.due(REPO_KEY, "codex-cli", "cx9", 100.0, home=self.home))
+    def test_a_row_without_a_verdict_is_treated_as_interactive(self):
+        """기록이 없으면 사람의 세션으로 본다 — 조용히 잃는 것보다 낫다."""
+        self.start("claude-code", "old-row", 50.0)
+        got = due.due(REPO_KEY, "codex-cli", "cx9", 100.0, home=self.home)
+        self.assertEqual(got.session_id, "old-row")
+
+    def test_due_holds_no_harness_vocabulary(self):
+        """하네스별 **어휘 값**이 코어에 있으면 안 된다.
+
+        주석이 그 어휘를 언급하는 것은 정당하다 — 왜 여기 없는지를 설명하는
+        문장이 걸리면 가드에서 겪은 것과 같은 거짓 양성이다. 그래서 값만 본다.
+        """
+        import ast
+        import inspect
+
+        tree = ast.parse(inspect.getsource(due))
+        literals = {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        for vocabulary in ("sdk-py", "sdk-cli", "sdk", "isSidechain"):
+            self.assertNotIn(vocabulary, literals, vocabulary)
 
     def test_newest_foreign_session_wins(self):
         self.start("codex-cli", "old", 10.0)

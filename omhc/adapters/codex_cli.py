@@ -354,6 +354,36 @@ class CodexCliAdapter:
         return SessionRead(ref=ref, events=tuple(events), unparsed=unparsed,
                            dropped=dropped)
 
+    def classify(self, source_path: str) -> bool:
+        """Codex rollout 에는 비대화형 표식이 없다.
+
+        session_meta 를 읽을 수 있으면 사람이 시작한 세션으로 본다. Claude 의
+        entrypoint 어휘를 여기서 찾는 것은 무의미하고(필드가 없다) 실제로 그렇게
+        하면 필터가 조용히 no-op 가 된다.
+        """
+        return session_meta(source_path) is not None
+
+    def ref_for_path(self, source_path: str, session_id: str,
+                     cwd: Optional[str] = None) -> Optional[SessionRef]:
+        meta = session_meta(source_path)
+        if meta is None:
+            return None
+        try:
+            stat = os.stat(source_path)
+        except OSError:
+            return None
+        if not stat.st_size:
+            return None
+        meta_cwd = meta.get("cwd")
+        return SessionRef(
+            adapter_id=self.adapter_id,
+            session_id=session_id or str(meta.get("session_id") or ""),
+            source_path=source_path,
+            cwd=meta_cwd if isinstance(meta_cwd, str) else cwd,
+            epoch=stat.st_mtime,
+            size=stat.st_size,
+        )
+
     def native_resume_hint(self, ref: SessionRef) -> Optional[str]:
         if not ref.session_id:
             return None

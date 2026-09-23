@@ -8,7 +8,6 @@ import time
 from typing import List, Optional
 
 from . import adapters, agents_md, brief, due, gate, index, ledger, locate, pin, watch
-from .adapters import claude_code
 from .adapter import AdapterUnavailable
 
 PROG = "omhc"
@@ -57,18 +56,19 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
         "path": str(payload.get("transcript_path") or ""),
         "cwd": root,
     }
-    # entrypoint / sidechain 을 **여기서** 기록해야 한다. 훅 stdin 페이로드에는
-    # 없으므로 트랜스크립트 머리에서 읽는다. 기록하지 않으면 due() 의 비대화형·
-    # 서브체인 차단이 프로덕션에서 죽은 코드가 된다 — 테스트만 그 필드를 손으로
-    # 넣어서 통과하고, 실제로는 남의 도구가 남긴 sdk 세션이 핸드오프된다.
-    entrypoint = payload.get("entrypoint")
-    if not (isinstance(entrypoint, str) and entrypoint) and row["path"]:
-        head = claude_code.head_of(row["path"])
-        entrypoint = head.get("entrypoint")
-        if head.get("sidechain") or head.get("agentId"):
-            row["sidechain"] = True
-    if isinstance(entrypoint, str) and entrypoint:
-        row["entrypoint"] = entrypoint
+    # 사람이 대화한 세션인지 **여기서** 판정해 기록한다. 훅 stdin 페이로드에는
+    # 그 정보가 없으므로 어댑터가 트랜스크립트를 보고 판단한다. 기록하지 않으면
+    # due() 의 비대화형 차단이 프로덕션에서 죽은 코드가 된다 — 테스트만 그 필드를
+    # 손으로 넣어 통과하고, 실제로는 남의 도구가 남긴 sdk 세션이 핸드오프된다.
+    #
+    # 판정은 하네스별 지식이므로 어댑터가 소유한다. 코어가 어휘를 들고 있으면
+    # 새 하네스를 붙일 때 코어를 고쳐야 한다.
+    if row["path"]:
+        try:
+            if not adapters.get(args.harness, home=home).classify(row["path"]):
+                row["interactive"] = False
+        except Exception:
+            pass
     ledger.append(row, home=home)
     # 어떤 omhc 호출에서든 오래된 AGENTS.md 구간을 붕괴시킨다.
     try:

@@ -8,8 +8,6 @@ import traceback
 from typing import Optional
 
 from . import adapters, due, fsio, gate, index, locate, mint, pin
-from .adapters import claude_code
-from .adapter import SessionRef
 
 GUARD_LOG = "guard.log"
 NOTES_NAME = "notes.txt"
@@ -95,25 +93,23 @@ WIRE_BY_HARNESS = {
 DEFAULT_WIRE = "sdk"
 
 
-def _fallback_ref(watermark, repo_root: str):
-    """list_sessions 가 그 세션을 못 찾았을 때의 최후 수단.
+def _ref_for(adapter, watermark, repo_root: str):
+    """핸드오프할 세션 하나를 고른다. 원장이 기록한 경로를 **먼저** 쓴다.
 
-    원장 경로를 그냥 신뢰하지 않고 트랜스크립트 머리를 다시 읽어 비대화형·
-    서브체인 세션을 걸러낸다 — 필터를 우회하는 경로를 만들면 필터가 무의미해진다.
+    실측: list_sessions 는 이 머신에서 130개 파일 34.3MB 를 읽어 1건을 남겼고,
+    그것만 249ms — 훅 예산 150ms 의 1.7배다. 원장 행에 그 파일의 경로가 이미
+    적혀 있으므로 스캔 없이 바로 열면 된다.
+
+    적격성 판정은 **어댑터가 소유한다**. 코어가 Claude 의 파서로 Codex rollout 을
+    판정하면 찾는 필드가 없어 필터가 조용히 no-op 가 된다.
     """
-    path = watermark.path
-    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
-        return []
-    head = claude_code.head_of(path)
-    if str(head.get("entrypoint") or "") in due.NON_INTERACTIVE:
-        return []
-    if head.get("sidechain") or head.get("agentId"):
-        return []
-    return [SessionRef(
-        adapter_id=watermark.harness, session_id=watermark.session_id,
-        source_path=path, cwd=repo_root, epoch=watermark.epoch,
-        size=os.path.getsize(path),
-    )]
+    if watermark.path:
+        ref = adapter.ref_for_path(watermark.path, watermark.session_id, repo_root)
+        if ref is not None:
+            return [ref]
+    # 원장에 경로가 없거나 그 파일이 사라졌을 때만 전체 스캔으로 떨어진다.
+    return [r for r in adapter.list_sessions(repo_root)
+            if r.session_id == watermark.session_id]
 
 
 def hook_wire(text: str, wire: str = "claude") -> str:
@@ -156,13 +152,7 @@ def compute(
         return ""
 
     adapter = adapters.get(watermark.harness, home=home)
-    refs = [r for r in adapter.list_sessions(repo_root)
-            if r.session_id == watermark.session_id]
-    if not refs:
-        # **폴백에 필터를 다시 적용해야 한다.** list_sessions 는 비대화형·서브체인
-        # 세션을 걸러내는데, 원장 경로로 곧장 SessionRef 를 만들면 그 필터를
-        # 우회해 남의 도구가 남긴 자동 세션을 사람의 작업으로 주입한다.
-        refs = _fallback_ref(watermark, repo_root)
+    refs = _ref_for(adapter, watermark, repo_root)
     if not refs:
         return ""
 

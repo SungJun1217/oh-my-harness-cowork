@@ -15,10 +15,6 @@ DELIVERED_NAME = "delivered.tsv"
 OFF_MARKER = "off"
 OFF_ENV = "OMHC_OFF"
 
-# 비대화형 entrypoint. 차단목록이며 허용목록이 아니다.
-# 실측: 이 레포의 최상위 Claude 세션 31개 중 30개가 sdk-py 였다.
-NON_INTERACTIVE = frozenset({"sdk-cli", "sdk", "sdk-py"})
-
 # 이보다 오래된 외래 세션은 이어갈 작업으로 보지 않는다. 일주일 전 세션을
 # "방금 일어난 일"처럼 주입하면 다음 에이전트가 끝난 일을 다시 한다.
 MAX_AGE_SECONDS = 7 * 24 * 3600
@@ -92,9 +88,10 @@ def due(
             continue
         if session == my_session_id:
             continue
-        if str(row.get("entrypoint") or "") in NON_INTERACTIVE:
-            continue
-        if row.get("sidechain"):
+        # 비대화형 판정은 mark 시점에 어댑터가 내려 기록한다. 여기서 entrypoint
+        # 어휘를 다시 들고 있으면 같은 규칙이 두 모듈에 살면서 한쪽만 갱신되는
+        # 반쪽 필터가 된다 — 어휘는 그것을 아는 어댑터에만 있어야 한다.
+        if row.get("interactive") is False:
             continue
 
         # **가장 최근 외래 세션에서 멈춘다.** 이미 전달했다면 None 이다.

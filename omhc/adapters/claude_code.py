@@ -225,6 +225,8 @@ class ClaudeCodeAdapter:
             head = head_of(path)
             if str(head.get("entrypoint") or "") in NON_INTERACTIVE_ENTRYPOINTS:
                 continue
+            if head.get("sidechain") or head.get("agentId"):
+                continue
             cwd = head.get("cwd")
             refs.append(
                 SessionRef(
@@ -387,6 +389,34 @@ class ClaudeCodeAdapter:
                 ok=False, text=old.text, arg=old.arg, paths=old.paths,
                 offset=old.offset, length=old.length,
             )
+
+    def classify(self, source_path: str) -> bool:
+        """사람이 대화한 세션인가. entrypoint 와 서브체인 표식으로 판정한다.
+
+        실측: 이 레포의 최상위 세션 31개 중 1개만 entrypoint=cli 이고 30개가
+        sdk-py(보안 리뷰 훅 등이 남긴 것)였다.
+        """
+        head = head_of(source_path)
+        if str(head.get("entrypoint") or "") in NON_INTERACTIVE_ENTRYPOINTS:
+            return False
+        return not (head.get("sidechain") or head.get("agentId"))
+
+    def ref_for_path(self, source_path: str, session_id: str,
+                     cwd: Optional[str] = None) -> Optional[SessionRef]:
+        try:
+            stat = os.stat(source_path)
+        except OSError:
+            return None
+        if not stat.st_size or not self.classify(source_path):
+            return None
+        return SessionRef(
+            adapter_id=self.adapter_id,
+            session_id=session_id or os.path.basename(source_path)[: -len(".jsonl")],
+            source_path=source_path,
+            cwd=cwd_of(source_path) or cwd,
+            epoch=stat.st_mtime,
+            size=stat.st_size,
+        )
 
     def native_resume_hint(self, ref: SessionRef) -> Optional[str]:
         """같은 벤더끼리는 이것이 무손실이며 우월하다. 우리 요약은 열등하다."""
