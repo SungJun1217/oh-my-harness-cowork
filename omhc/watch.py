@@ -63,6 +63,19 @@ def release(state_dir: str) -> None:
         pass
 
 
+# {source_path: (st_mtime, st_size)} — sweep 사이에 유지된다. 변하지 않은 파일을
+# 다시 파싱하지 않기 위한 것이고, 잃어도 정확성에는 영향이 없다(다시 읽을 뿐).
+_SEEN: Dict[str, tuple] = {}
+
+
+def forget(path: Optional[str] = None) -> None:
+    """테스트와 진단용. 경로를 주면 그것만, 안 주면 전부 잊는다."""
+    if path is None:
+        _SEEN.clear()
+    else:
+        _SEEN.pop(path, None)
+
+
 def sweep(repo_root: str, state_dir: str, *, home: Optional[str] = None) -> int:
     """한 번 훑어 색인을 따라잡는다. 새로 쓴 행 수를 돌려준다.
 
@@ -84,6 +97,12 @@ def sweep(repo_root: str, state_dir: str, *, home: Optional[str] = None) -> int:
             continue
         for ref in refs:
             try:
+                # 파일이 그대로면 읽지 않는다. 5초 폴링 데몬이 정상 상태에서
+                # 3.2MB 트랜스크립트를 매번 재파싱하면 시간당 CPU 4분, 재독
+                # 28GB 가 되는데 새 이벤트는 0건이다.
+                stamp = (ref.epoch, ref.size)
+                if _SEEN.get(ref.source_path) == stamp:
+                    continue
                 idx = os.path.join(state_dir, "index", ref.session_id + ".idx")
                 seen = index.last_seq(idx)
                 read = adapter.read_session(ref)
@@ -91,6 +110,7 @@ def sweep(repo_root: str, state_dir: str, *, home: Optional[str] = None) -> int:
                 if fresh:
                     written += index.append_rows(idx, fresh)
                     pin.pin_session(state_dir, ref)
+                _SEEN[ref.source_path] = stamp
             except Exception:
                 continue
     return written

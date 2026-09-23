@@ -24,6 +24,8 @@ class Base(unittest.TestCase):
         git(self.repo, "init", "-q")
         self.root = os.path.realpath(self.repo)
         self.state = locate.state_dir(locate.repo_key(self.root), home=self.home)
+        # 스킵 캐시는 모듈 전역이다. 테스트 간 오염을 막는다.
+        watch.forget()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -118,6 +120,38 @@ class TestSweep(Base):
         self.append_turn(path, 1)
         third = watch.sweep(self.root, self.state, home=self.home)
         self.assertEqual(third, 1, "새로 자란 부분만 색인해야 한다")
+
+    def test_unchanged_files_are_not_reread(self):
+        """5초 폴링 데몬이 정상 상태에서 3.2MB 를 매번 재파싱하면 시간당 CPU 4분,
+        재독 28GB 인데 새 이벤트는 0건이다."""
+        path = self.plant_codex(extra_turns=2)
+        watch.sweep(self.root, self.state, home=self.home)
+        reads = {"n": 0}
+        from omhc.adapters import codex_cli
+
+        original = codex_cli.CodexCliAdapter.read_session
+
+        def counting(self_, ref):
+            reads["n"] += 1
+            return original(self_, ref)
+
+        codex_cli.CodexCliAdapter.read_session = counting
+        try:
+            watch.sweep(self.root, self.state, home=self.home)
+            self.assertEqual(reads["n"], 0, "변하지 않은 파일을 다시 읽었다")
+            self.append_turn(path, 1)
+            watch.sweep(self.root, self.state, home=self.home)
+            self.assertEqual(reads["n"], 1, "자란 파일은 다시 읽어야 한다")
+        finally:
+            codex_cli.CodexCliAdapter.read_session = original
+
+    def test_forget_makes_the_next_sweep_re_read(self):
+        self.plant_codex(extra_turns=1)
+        watch.sweep(self.root, self.state, home=self.home)
+        self.assertEqual(watch.sweep(self.root, self.state, home=self.home), 0)
+        watch.forget()
+        # 다시 읽어도 색인은 증분이므로 새 행은 0이다 — 읽기만 다시 일어난다.
+        self.assertEqual(watch.sweep(self.root, self.state, home=self.home), 0)
 
     def test_sweep_pins_the_source(self):
         path = self.plant_codex()

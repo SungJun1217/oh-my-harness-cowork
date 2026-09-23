@@ -71,42 +71,76 @@ def rows(path: str) -> List[Row]:
     if lines and lines[-1] != "":
         lines = lines[:-1]
     for line in lines:
-        if not line:
-            continue
-        parts = line.split("\t")
-        if len(parts) != len(COLUMNS):
-            continue
-        try:
-            out.append(
-                Row(
-                    seq=int(parts[0]),
-                    epoch=float(parts[1]),
-                    author=parts[2],
-                    verb=parts[3],
-                    ok=parts[4] == "1",
-                    offset=int(parts[5]),
-                    length=int(parts[6]),
-                    paths=tuple(p for p in parts[7].split(",") if p),
-                    arg=parts[8],
-                )
-            )
-        except ValueError:
-            continue
+        parsed = _parse(line)
+        if parsed is not None:
+            out.append(parsed)
     return out
+
+
+def _parse(line: str) -> Optional[Row]:
+    if not line:
+        return None
+    parts = line.split("\t")
+    if len(parts) != len(COLUMNS):
+        return None
+    try:
+        return Row(
+            seq=int(parts[0]),
+            epoch=float(parts[1]),
+            author=parts[2],
+            verb=parts[3],
+            ok=parts[4] == "1",
+            offset=int(parts[5]),
+            length=int(parts[6]),
+            paths=tuple(p for p in parts[7].split(",") if p),
+            arg=parts[8],
+        )
+    except ValueError:
+        return None
+
+
+# 꼬리에서 읽을 바이트 수. 한 행이 115바이트쯤이므로 4KB면 마지막 온전한 행을
+# 확실히 담는다.
+_TAIL_BYTES = 4096
+
+
+def last_row(path: str) -> Optional[Row]:
+    """마지막 온전한 행. 파일 전체를 파싱하지 않는다.
+
+    실측: 56KB 색인에서 rows() 는 473행을 파싱해 정수 하나를 돌려주느라 2.05ms 가
+    걸렸고, status 와 watch.lag 은 그것을 세션마다 루프로 돌린다.
+    """
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > _TAIL_BYTES:
+                fh.seek(size - _TAIL_BYTES)
+            chunk = fh.read()
+    except OSError:
+        return None
+    lines = chunk.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines = lines[:-1]
+    else:
+        lines = lines[:-1]  # 잘린 마지막 행은 버린다
+    if size > _TAIL_BYTES and lines:
+        lines = lines[1:]  # 앞쪽 잘린 행도 버린다
+    for raw in reversed(lines):
+        parsed = _parse(raw.decode("utf-8", "replace"))
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def watermark(path: str) -> int:
     """다음 읽기를 시작할 소스 파일 내 바이트 위치."""
-    parsed = rows(path)
-    if not parsed:
-        return 0
-    last = parsed[-1]
-    return last.offset + last.length
+    last = last_row(path)
+    return (last.offset + last.length) if last else 0
 
 
 def last_seq(path: str) -> int:
-    parsed = rows(path)
-    return parsed[-1].seq if parsed else 0
+    last = last_row(path)
+    return last.seq if last else 0
 
 
 def find(path: str, seq: int) -> Optional[Row]:

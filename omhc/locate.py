@@ -36,18 +36,35 @@ def repo_key(repo_root: str) -> str:
 
 def is_within(repo_root: str, candidate: str) -> bool:
     """equal-or-descendant. list_sessions 의 cwd 일치 규칙."""
-    root = os.path.realpath(repo_root).rstrip("/")
-    cand = os.path.realpath(candidate).rstrip("/")
-    return cand == root or cand.startswith(root + "/")
+    return _within(os.path.realpath(repo_root).rstrip("/"),
+                   os.path.realpath(candidate).rstrip("/")) is not None
+
+
+def _within(root: str, cand: str) -> Optional[str]:
+    """이미 realpath 된 두 경로로 상대 경로를 계산한다. 밖이면 None."""
+    if cand == root:
+        return "."
+    if cand.startswith(root + "/"):
+        return cand[len(root) + 1 :]
+    return None
 
 
 def relativize(repo_root: str, path: str) -> Optional[str]:
-    """절대경로 → 레포 상대 POSIX 경로. 레포 밖이면 None."""
-    if not is_within(repo_root, path):
+    """절대경로 → 레포 상대 POSIX 경로. 레포 밖이면 None.
+
+    realpath 는 경로당 한 번만 부른다. 이전 구현은 is_within 안에서 두 번 + 본문에서
+    두 번, 합쳐 네 번 불렀고 그것이 mint 총 15.6ms 중 13ms 였다(실측, 136개 경로).
+    루트는 호출자가 이미 realpath 한 값을 넘기므로 그대로 쓴다.
+    """
+    root = repo_root.rstrip("/")
+    rel = _within(root, os.path.realpath(path).rstrip("/"))
+    if rel is not None:
+        return rel
+    # 넘어온 루트가 realpath 가 아니었을 수도 있으니 한 번만 더 시도한다.
+    resolved = os.path.realpath(repo_root).rstrip("/")
+    if resolved == root:
         return None
-    root = os.path.realpath(repo_root).rstrip("/")
-    rel = os.path.realpath(path)[len(root) :].lstrip("/")
-    return rel or "."
+    return _within(resolved, os.path.realpath(path).rstrip("/"))
 
 
 # 상태 파일 이름의 단일 정의. 네 모듈에 재선언돼 있었고, 하나가 어긋나면

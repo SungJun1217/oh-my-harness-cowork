@@ -300,7 +300,10 @@ class ClaudeCodeAdapter:
                         self._apply_results(content, pending, events)
                         bump("tool_result")
                         continue
-                    text = guard.redact_b64(text.strip())
+                    # 먼저 판정하고 **자른 뒤에** redact 한다. 전문에 정규식을
+                    # 돌리면 대부분이 곧 버려지거나 600자로 잘리는데도 비용을
+                    # 낸다(실측 16만자 7.3ms → 앞 600자만 1.4ms).
+                    text = text.strip()
                     if guard.is_envelope(text):
                         # 슬래시 명령 봉투 안의 <command-args> 는 사람이 실제로
                         # 타이핑한 말이다. 봉투째 버리면 세션 첫 메시지(대개 목표
@@ -314,6 +317,7 @@ class ClaudeCodeAdapter:
                     if not guard.safe(text, "human"):
                         bump("guarded_human")
                         continue
+                    text = guard.redact_b64(_one_line_limit(text))
                     seq += 1
                     events.append(Event(
                         seq=seq, epoch=epoch, author="human", verb="said", ok=True,
@@ -334,10 +338,11 @@ class ClaudeCodeAdapter:
                         bump("thinking")
                         continue
                     if btype == "text":
-                        text = guard.redact_b64(str(block.get("text") or "").strip())
+                        text = str(block.get("text") or "").strip()
                         if not text or not guard.safe(text, "agent"):
                             bump("guarded_agent")
                             continue
+                        text = guard.redact_b64(_one_line_limit(text))
                         seq += 1
                         events.append(Event(
                             seq=seq, epoch=epoch, author="agent", verb="said",

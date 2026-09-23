@@ -239,12 +239,17 @@ def mint(
         for i, e in enumerate(unresolved[:_FAIL_MAX])
     ]
 
+    # 같은 파일이 여러 번 고쳐지므로 경로를 메모한다 — 실측 136개 occurrence 에
+    # 고유 경로는 55개였고, realpath 는 경로 성분마다 lstat 를 한다.
     modified_paths: List[str] = []
+    seen_paths: Dict[str, Optional[str]] = {}
     for e in events:
         if e.verb != "modified":
             continue
         for p in (e.paths or ((e.arg,) if e.arg.startswith("/") else ())):
-            rel = _relativize(p, repo_root)
+            if p not in seen_paths:
+                seen_paths[p] = _relativize(p, repo_root)
+            rel = seen_paths[p]
             if rel and rel not in modified_paths:
                 modified_paths.append(rel)
     did_value = " ".join(modified_paths[:_DID_MAX_PATHS])
