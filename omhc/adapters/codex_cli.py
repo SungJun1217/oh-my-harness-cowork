@@ -16,6 +16,7 @@ from ..adapter import (
     NoInjectionChannel,
     SessionRead,
     SessionRef,
+    SessionSince,
 )
 from ..event import ARG_LIMIT, Event
 from . import _register, allow_headless, install_state_artifact, iso_epoch
@@ -478,9 +479,19 @@ class CodexCliAdapter:
             if not started:
                 continue
             try:
-                size = os.path.getsize(path)
+                raw_size = os.path.getsize(path)
             except OSError:
                 continue
+            # 줄 경계로 스냅한다(리뷰) — 이 값이 그대로
+            # `_reactivate_grown_sessions` 의 첫 baseline 이 되므로, stat 이
+            # 레코드 중간을 잡으면 그 레코드가 마저 쓰인 뒤 영영 못 읽는다.
+            # 첫 관측이라 이전 baseline 이 없으므로 fallback 을 주지 않는다 —
+            # 64KB 안에 개행을 못 찾으면(64KB 넘는 단일 레코드를 쓰는 중)
+            # size 를 그대로 쓴다. 0 으로 과소평가하면 다음 판정이 파일
+            # 처음부터 읽어 **원래의** 사람 턴을 새 턴으로 착각하고 옛 내용을
+            # 다시 넘긴다(리뷰에서 재현). 과대평가는 그 긴 레코드 하나를
+            # 놓칠 수 있을 뿐이고, 그게 사람 턴일 때만 손해다 — 알려진 한계.
+            size = fsio.line_aligned_size(path, raw_size)
             refs.append(
                 SessionRef(
                     adapter_id=self.adapter_id,
@@ -494,6 +505,60 @@ class CodexCliAdapter:
         return refs
 
     def read_session(self, ref: SessionRef) -> SessionRead:
+        events, unparsed, dropped, _end_offset = self._read(ref.source_path, 0)
+        return SessionRead(ref=ref, events=tuple(events), unparsed=unparsed,
+                           dropped=dropped)
+
+    def read_session_since(self, ref: SessionRef, offset: int, *,
+                           max_bytes: Optional[int] = None,
+                           stop_at_human_turn: bool = False) -> Optional[SessionSince]:
+        """`offset` 바이트 뒤만 읽는다 — 실측(이 머신, 13.8MB rollout):
+        전체 read_session 593ms, 이 경로가 훅 예산(150ms)에서 유일하게 쓸 수
+        있다. `_read` 가 줄 경계로 스냅하므로 `offset` 은 레코드 경계일 필요가
+        없다(#22, `codex exec resume` 이 이어붙인 파일).
+
+        `max_bytes`(리뷰: 늘어난 꼬리 크기에 비례해 비용이 늘어 훅 예산을
+        넘길 수 있다 — 17.7MB 꼬리 실측 396.6ms)와 `stop_at_human_turn`(사람의
+        새 턴이 있는지만 알면 되는 호출자는 첫 매치에서 멈춰 나머지를 안
+        읽는다)은 `cli._reactivate_grown_sessions` 전용 선택 인자다 — 기본값은
+        오늘의(무제한) 동작과 같아 conformance 의 "offset 이후 read_session 과
+        같은 이벤트" 계약을 그대로 지킨다."""
+        try:
+            start = max(0, int(offset))
+        except (TypeError, ValueError):
+            start = 0
+        events, unparsed, dropped, end_offset = self._read(
+            ref.source_path, start, max_bytes=max_bytes,
+            stop_at_human_turn=stop_at_human_turn)
+        # _read 가 이미 줄 경계로 스냅해 start 이후의 레코드만 만들지만, 필터를
+        # 한 번 더 걸어 둔다 — 계약(read_session 을 offset>=start 로 제한한 것과
+        # 같아야 한다)을 코드로도 증명한다.
+        events = tuple(e for e in events if e.offset >= start)
+        return SessionSince(events=events, unparsed=unparsed, dropped=dropped,
+                            end_offset=end_offset)
+
+    def _read(self, path: str, start: int, *, max_bytes: Optional[int] = None,
+             stop_at_human_turn: bool = False):
+        """read_session/read_session_since 가 공유하는 파서(화이트리스트·guard
+        로직을 두 벌로 두지 않는다, invariant 4). `start` 뒤부터 읽는다 —
+        0 이면 처음부터. `start` 가 레코드 중간이면(직전 바이트가 개행이
+        아니면) 그 줄의 나머지를 건너뛰고 다음 개행부터 시작한다. 절대
+        던지지 않는다 — 파일이 없거나 깨졌으면 빈 이벤트로 열화한다.
+
+        반환값 네 번째 자리는 `end_offset` — **마지막으로 완전히 읽은 줄
+        바로 뒤**의 바이트 오프셋이다(리뷰: os.stat 의 크기를 그대로 baseline
+        으로 쓰면 그 크기가 레코드 중간일 수 있어, 나중에 그 레코드가 마저
+        쓰인 뒤 거기서부터 읽으면 skip-to-newline 로직이 그 레코드 전체를
+        건너뛴다 — 호출자는 이 값을 다음 baseline 으로 써야 한다). 개행으로
+        끝나지 않는 **마지막** 줄(`for raw in fh` 가 EOF 에서 미완성 레코드를
+        그대로 넘길 수 있다 — 마침 그 순간 stat 해 읽은 경우)은 여전히
+        파싱은 하지만(read_session 의 events/unparsed 출력은 그대로 유지한다)
+        `end_offset` 에는 포함하지 않는다 — 그 레코드가 마저 쓰인 뒤에도
+        다음 읽기가 그 줄 전체를 다시 볼 수 있어야 한다.
+        `max_bytes` 를 넘기면 그 캡을 넘는 줄은 아예 읽지 않고 멈춘다(캡
+        직전의 완전한 줄에서 자연히 정렬된다). `stop_at_human_turn` 이면
+        사람의 said 이벤트를 만든 즉시 멈춘다.
+        """
         events: List[Event] = []
         dropped: Dict[str, int] = {}
         unparsed = 0
@@ -504,21 +569,40 @@ class CodexCliAdapter:
         # 그 call_id 를 pending 에도 같은 인덱스로 얹는다(아래 참고).
         pending_by_session: Dict[str, int] = {}
         seq = 0
-        offset = 0
+        offset = start
 
         def bump(key: str) -> None:
             dropped[key] = dropped.get(key, 0) + 1
 
         try:
-            fh = open(ref.source_path, "rb")
+            fh = open(path, "rb")
         except OSError as exc:
-            return SessionRead(ref=ref, events=(), unparsed=0,
-                               dropped={"open_failed": 1, str(exc.errno): 1})
+            return events, 0, {"open_failed": 1, str(exc.errno): 1}, start
 
         with fh:
+            if start > 0:
+                try:
+                    fh.seek(start - 1)
+                    prev = fh.read(1)
+                    if prev != b"\n":
+                        # start 가 레코드 중간이다 — 그 줄의 나머지를 버린다.
+                        skipped = fh.readline()
+                        offset = start + len(skipped)
+                except OSError:
+                    return events, 0, {"seek_failed": 1}, start
+            since_start = offset
+            end_offset = offset
             for raw in fh:
+                if max_bytes is not None and (offset - since_start) >= max_bytes:
+                    # 캡을 넘는 줄은 아예 안 읽는다 — offset 은 그 직전 완전한
+                    # 줄 끝에 멈춰 있으므로 end_offset 이 저절로 줄 경계다.
+                    bump("max_bytes_cap")
+                    break
                 start = offset
                 offset += len(raw)
+                if raw.endswith(b"\n"):
+                    # 개행으로 끝난 줄만 "안전하게 다 읽었다" — 위 docstring.
+                    end_offset = offset
                 try:
                     row = json.loads(raw.decode("utf-8", "replace"))
                 except ValueError:
@@ -587,11 +671,25 @@ class CodexCliAdapter:
                     if not guard.safe(text, author):
                         bump("guarded_" + author)
                         continue
+                    if stop_at_human_turn and author == "human" and not raw.endswith(b"\n"):
+                        # 리뷰(3차) #2: 사람 턴인데 아직 개행이 안 붙었다(쓰는
+                        # 도중 stat 했을 수 있다) — 이 레코드를 트리거로 세지
+                        # 않는다(이벤트조차 만들지 않는다). 세면 개행이 마저
+                        # 붙은 뒤 다음 라운드가 baseline 을 이 레코드 앞에 둔
+                        # 채로 같은 턴을 또 찾아 재전달을 두 번 하게 된다 —
+                        # `stop_at_human_turn` 이 아닌 호출(read_session 포함)
+                        # 은 이 분기를 타지 않으므로 출력이 그대로다.
+                        continue
                     seq += 1
                     events.append(Event(
                         seq=seq, epoch=epoch, author=author, verb="said", ok=True,
                         text=text, arg="", paths=(), offset=start, length=len(raw),
                     ))
+                    if stop_at_human_turn and author == "human":
+                        # 호출자는 "사람의 새 턴이 있는가"만 물었다 — 찾은
+                        # 즉시 멈춘다 — end_offset 은 이미 이 줄이 개행으로
+                        # 끝났으면 그 뒤로 넘어가 있다(위에서 갱신).
+                        return events, unparsed, dropped, end_offset
                     continue
 
                 if kind == "custom_tool_call" and payload.get("name") == _JS_WRAPPER_TOOL:
@@ -674,8 +772,7 @@ class CodexCliAdapter:
                 # response_item 인데 모양을 모른다 → 조용히 버리지 않는다.
                 unparsed += 1
 
-        return SessionRead(ref=ref, events=tuple(events), unparsed=unparsed,
-                           dropped=dropped)
+        return events, unparsed, dropped, end_offset
 
     def classify(self, source_path: str) -> bool:
         """Codex rollout 에 사람이 시작한 세션인가.

@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import time
 import unittest
 from unittest import mock
 
@@ -180,6 +181,23 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(payload["recent_injections"], 2)
         self.assertEqual(payload["pull_rate_window"], cli.PULL_RATE_WINDOW)
 
+    def test_a_reopen_line_does_not_count_as_an_injection(self):
+        """resume 이 남긴 reopen 줄(#22)은 전달이 아니다 — injections/pull rate
+        분모에 끼면 안 된다."""
+        os.makedirs(self.t.state, exist_ok=True)
+        with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",
+                  encoding="utf-8") as fh:
+            fh.write("s1\tclaude-code\tcodex-cli\t1700000000\n")
+            fh.write("s1\treopen\tcodex-cli\t1700000005\n")
+
+        code, text = self.run_status()
+        word, detail = _find_row(text, "pull rate")
+        self.assertEqual(word, "----")
+        self.assertIn("pulled 0 of 1 recent injections", detail)
+
+        code_json, payload = self.run_status_json()
+        self.assertEqual(payload["injections"], 1)
+
     def test_pull_rate_windows_the_denominator_to_the_most_recent_injections(self):
         """#25: 분모를 delivered.tsv 전체로 두면 한 레포를 오래 쓸수록 옛
         전달이 영원히 분모에 남아 인출률이 서서히 낮아 보인다. 최근
@@ -256,6 +274,112 @@ class TestStatusRows(unittest.TestCase):
         self.assertIn("{} rows for this repo".format(len(expected)), detail)
         self.assertEqual(payload["ledger_rows"], len(expected))
         self.assertEqual([r["session"] for r in expected], ["m1", "m2"])
+
+    def test_ledger_rejects_row_is_uninformative_with_no_refusals(self):
+        code, text = self.run_status()
+        self.assertEqual(code, 0)
+        word, detail = _find_row(text, "ledger rejects")
+        self.assertEqual(word, "----")
+
+        code_json, payload = self.run_status_json()
+        self.assertEqual(payload["ledger_rejects"], 0)
+
+    def test_ledger_rejects_row_fails_and_gates_after_a_refusal(self):
+        """#22: append() 가 반환한 False 를 호출자가 버려도, 거부 자체는
+        status 에 보여야 한다."""
+        from omhc import ledger
+
+        ok = ledger.append(
+            {"repo": self.t.key, "harness": "codex-cli", "session": "s" * 36,
+             "event": "start", "path": "/p" * 400},
+            home=self.t.home,
+        )
+        self.assertFalse(ok)
+
+        code, text = self.run_status()
+        self.assertEqual(code, 1)
+        word, detail = _find_row(text, "ledger rejects")
+        self.assertEqual(word, "FAIL")
+        self.assertIn("1 session(s) dropped", detail)
+        self.assertIn("omhc clear", detail)
+
+        code_json, payload = self.run_status_json()
+        self.assertEqual(payload["ledger_rejects"], 1)
+        row = next(r for r in payload["rows"] if r["label"] == "ledger rejects")
+        self.assertEqual(row["verdict"], "fail")
+
+    def test_ledger_rejects_row_counts_distinct_sessions_not_raw_rows(self):
+        """레거시 중복 줄(디듀프가 생기기 전에 이미 쌓인 것)이 있어도 한 세션을
+        여러 번 버려진 것처럼 부풀리면 안 된다."""
+        from omhc import ledger, fsio
+
+        path = ledger._rejected_path(self.t.home)
+        for _ in range(3):
+            fsio.append_line(path, ledger._encode(
+                {"repo": self.t.key, "harness": "codex-cli", "session": "s" * 36,
+                 "event": "start", "epoch": time.time(), "bytes": 900}))
+
+        code, text = self.run_status()
+        self.assertEqual(code, 1)
+        word, detail = _find_row(text, "ledger rejects")
+        self.assertEqual(word, "FAIL")
+        self.assertIn("1 session(s) dropped", detail)
+
+        code_json, payload = self.run_status_json()
+        self.assertEqual(payload["ledger_rejects"], 1)
+
+    def test_ledger_rejects_row_ignores_rows_that_now_fit_under_a_raised_cap(self):
+        """#22 리뷰: MAX_LINE 을 올려 고친 뒤에도 옛 거부 기록이 영원히 FAIL 로
+        남으면 안 된다 — `bytes` 가 지금 상한 밑이면 이미 고쳐진 것으로 본다."""
+        from omhc import ledger, fsio
+
+        path = ledger._rejected_path(self.t.home)
+        fsio.append_line(path, ledger._encode(
+            {"repo": self.t.key, "harness": "codex-cli", "session": "s" * 36,
+             "event": "start", "epoch": time.time(), "bytes": ledger.MAX_LINE - 1}))
+
+        code, text = self.run_status()
+        self.assertEqual(code, 0)
+        word, _detail = _find_row(text, "ledger rejects")
+        self.assertEqual(word, "----")
+
+        code_json, payload = self.run_status_json()
+        self.assertEqual(payload["ledger_rejects"], 0)
+
+    def test_clear_removes_only_this_repos_rejects(self):
+        from omhc import ledger
+
+        ledger.append({"repo": self.t.key, "harness": "codex-cli", "session": "s" * 36,
+                       "event": "start", "path": "/p" * 400}, home=self.t.home)
+        ledger.append({"repo": "some-other-repo", "harness": "codex-cli",
+                       "session": "t" * 36, "event": "start", "path": "/p" * 400},
+                      home=self.t.home)
+
+        out = io.StringIO()
+        code = cli.cmd_clear(cli.build_parser().parse_args(["clear"]),
+                             home=self.t.home, out=out)
+        self.assertEqual(code, 0)
+        self.assertIn("ledger reject row(s)", out.getvalue())
+        self.assertEqual(ledger.read_rejected(home=self.t.home, repo_key=self.t.key), [])
+        self.assertEqual(
+            len(ledger.read_rejected(home=self.t.home, repo_key="some-other-repo")), 1)
+
+        code, text = self.run_status()
+        word, _detail = _find_row(text, "ledger rejects")
+        self.assertEqual(word, "----")
+
+    def test_ledger_rejects_row_ignores_other_repos(self):
+        from omhc import ledger
+
+        ledger.append(
+            {"repo": "some-other-repo", "harness": "codex-cli", "session": "s" * 36,
+             "event": "start", "path": "/p" * 400},
+            home=self.t.home,
+        )
+        code, text = self.run_status()
+        self.assertEqual(code, 0)
+        word, _detail = _find_row(text, "ledger rejects")
+        self.assertEqual(word, "----")
 
     def test_hooks_row_passes_when_the_shipped_fragment_is_installed(self):
         """setUp 이 이미 claude-code 훅을 심어 둔다 — 여기서는 그 행이 실제로

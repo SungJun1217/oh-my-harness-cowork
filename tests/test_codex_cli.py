@@ -1275,3 +1275,206 @@ class TestSubagentRolloutWithTwoMetaLines(unittest.TestCase):
             self.assertFalse(adapter.classify(path))
             self.assertIsNone(adapter.ref_for_path(path, "parent"))
             self.assertEqual(adapter.list_sessions(REPO), [])
+
+
+class TestReadSessionSince(unittest.TestCase):
+    """#22: `codex exec resume` 은 같은 파일에 이어 쓰고 session_meta 를 다시
+    안 쓴다 — offset 부터만 읽는 이 경로가 훅 예산에서 그 재개를 잡는 유일한
+    길이다(전체 read_session 은 13.8MB 에서 593ms 실측)."""
+
+    def _rollout(self):
+        rows = [
+            {"type": "session_meta", "payload": {"session_id": "cx1", "cwd": REPO,
+                                                  "timestamp": "2026-09-22T16:30:00Z"}},
+            msg("user", "첫 턴"),
+            msg("assistant", "첫 응답"),
+            msg("user", "두 번째 턴"),
+        ]
+        return write_rollout(rows)
+
+    def test_matches_read_session_restricted_to_a_line_aligned_offset(self):
+        path = self._rollout()
+        try:
+            adapter = CX.CodexCliAdapter()
+            ref = ref_for(path)
+            full = adapter.read_session(ref)
+            self.assertGreaterEqual(len(full.events), 3)
+            mid = full.events[1]  # 첫 응답
+            since = adapter.read_session_since(ref, mid.offset)
+            self.assertIsNotNone(since)
+            # seq 는 이 부분 읽기가 처음부터 다시 매긴다(색인은 이 경로를
+            # 쓰지 않으므로 구현 자유) — 나머지 필드만 비교한다.
+            expected = tuple(e._replace(seq=0) for e in full.events
+                             if e.offset >= mid.offset)
+            got = tuple(e._replace(seq=0) for e in since.events)
+            self.assertEqual(got, expected)
+            self.assertIn("두 번째 턴", [e.text for e in since.events])
+            self.assertNotIn("첫 턴", [e.text for e in since.events])
+        finally:
+            os.unlink(path)
+
+    def test_mid_line_offset_skips_the_truncated_record(self):
+        """줄 중간에서 시작하면 그 레코드는 버리고 다음 개행부터 읽는다."""
+        path = self._rollout()
+        try:
+            adapter = CX.CodexCliAdapter()
+            ref = ref_for(path)
+            full = adapter.read_session(ref)
+            second_user = next(e for e in full.events if e.text == "두 번째 턴")
+            # 그 레코드 줄 중간(오프셋+5)에서 시작한다 — 그 레코드는 나오면 안 된다.
+            since = adapter.read_session_since(ref, second_user.offset + 5)
+            self.assertIsNotNone(since)
+            self.assertNotIn("두 번째 턴", [e.text for e in since.events])
+            self.assertEqual(since.events, ())
+        finally:
+            os.unlink(path)
+
+    def test_offset_at_eof_returns_no_events(self):
+        path = self._rollout()
+        try:
+            adapter = CX.CodexCliAdapter()
+            ref = ref_for(path)
+            size = os.path.getsize(path)
+            since = adapter.read_session_since(ref, size)
+            self.assertIsNotNone(since)
+            self.assertEqual(since.events, ())
+            self.assertEqual(since.end_offset, size)
+        finally:
+            os.unlink(path)
+
+    def test_end_offset_reaches_eof_by_default(self):
+        path = self._rollout()
+        try:
+            adapter = CX.CodexCliAdapter()
+            ref = ref_for(path)
+            since = adapter.read_session_since(ref, 0)
+            self.assertEqual(since.end_offset, os.path.getsize(path))
+        finally:
+            os.unlink(path)
+
+    def test_missing_file_never_raises(self):
+        adapter = CX.CodexCliAdapter()
+        ref = A.SessionRef(adapter_id="codex-cli", session_id="gone",
+                           source_path="/nope/missing.jsonl", cwd=REPO,
+                           epoch=0.0, size=0)
+        since = adapter.read_session_since(ref, 10)
+        self.assertIsNotNone(since)
+        self.assertEqual(since.events, ())
+
+    def test_garbage_offset_never_raises(self):
+        path = self._rollout()
+        try:
+            adapter = CX.CodexCliAdapter()
+            ref = ref_for(path)
+            since = adapter.read_session_since(ref, "not-an-int")
+            self.assertIsNotNone(since)
+        finally:
+            os.unlink(path)
+
+    def test_stop_at_human_turn_returns_immediately_after_the_first_match(self):
+        """리뷰 #3: 존재 여부만 필요한 호출자는 첫 사람 턴에서 멈춰야 한다 —
+        그 뒤에 남은 레코드는 읽지 않는다."""
+        rows = [
+            {"type": "session_meta", "payload": {"session_id": "cx1", "cwd": REPO,
+                                                  "timestamp": "2026-09-22T16:30:00Z"}},
+            msg("user", "첫 사람 턴"),
+            msg("assistant", "그 뒤에 오는 응답 — 안 읽혀야 한다"),
+            msg("user", "그 뒤에 오는 두 번째 사람 턴 — 안 읽혀야 한다"),
+        ]
+        path = write_rollout(rows)
+        try:
+            adapter = CX.CodexCliAdapter()
+            ref = ref_for(path)
+            since = adapter.read_session_since(ref, 0, stop_at_human_turn=True)
+            self.assertEqual(len(since.events), 1)
+            self.assertEqual(since.events[0].text, "첫 사람 턴")
+            self.assertLess(since.end_offset, os.path.getsize(path))
+        finally:
+            os.unlink(path)
+
+    def test_stop_at_human_turn_with_no_human_turn_reads_to_eof(self):
+        rows = [
+            {"type": "session_meta", "payload": {"session_id": "cx1", "cwd": REPO,
+                                                  "timestamp": "2026-09-22T16:30:00Z"}},
+            msg("assistant", "에이전트 혼잣말"),
+        ]
+        path = write_rollout(rows)
+        try:
+            adapter = CX.CodexCliAdapter()
+            ref = ref_for(path)
+            since = adapter.read_session_since(ref, 0, stop_at_human_turn=True)
+            # 에이전트 혼잣말은 사람 턴이 아니므로 멈추지 않는다 — 끝까지
+            # 읽되(agent 의 said 이벤트는 여전히 나온다), 사람 턴은 없다.
+            self.assertFalse(any(e.author == "human" for e in since.events))
+            self.assertEqual(since.end_offset, os.path.getsize(path))
+        finally:
+            os.unlink(path)
+
+    def test_max_bytes_caps_the_tail_read_and_end_offset_stays_line_aligned(self):
+        """리뷰 #3: 꼬리 크기에 비례해 비용이 늘던 것을 캡으로 막는다 — 캡을
+        넘는 레코드는 아예 안 읽고, end_offset 은 캡 안의 마지막 완전한 줄
+        끝에 멈춘다(레코드 중간이 아니다)."""
+        rows = [
+            {"type": "session_meta", "payload": {"session_id": "cx1", "cwd": REPO,
+                                                  "timestamp": "2026-09-22T16:30:00Z"}},
+        ]
+        for i in range(50):
+            rows.append(msg("assistant", "패딩 " * 50))
+        rows.append(msg("user", "캡 밖의 사람 턴"))
+        path = write_rollout(rows)
+        try:
+            adapter = CX.CodexCliAdapter()
+            ref = ref_for(path)
+            full_size = os.path.getsize(path)
+            since = adapter.read_session_since(ref, 0, max_bytes=200)
+            self.assertLess(since.end_offset, full_size)
+            self.assertNotIn("캡 밖의 사람 턴", [e.text for e in since.events])
+            # end_offset 직전 바이트는 개행이다(줄 경계 — 레코드 중간이 아니다).
+            with open(path, "rb") as fh:
+                content = fh.read()
+            self.assertTrue(since.end_offset == 0
+                           or content[since.end_offset - 1:since.end_offset] == b"\n")
+        finally:
+            os.unlink(path)
+
+    def test_stop_at_human_turn_ignores_a_complete_but_unterminated_human_line(self):
+        """리뷰(3차) #2: 개행이 아직 안 붙은(쓰는 도중일 수 있는) 완전한 JSON
+        사람 턴은 stop_at_human_turn 의 트리거로도, 이벤트로도 세지 않는다 —
+        세면 개행이 마저 붙은 뒤 다음 라운드가 baseline 을 그 줄 앞에 둔 채로
+        같은 턴을 또 찾아 두 번 재전달한다. stop_at_human_turn 이 아닌 호출
+        (read_session 포함)은 이 분기를 안 타므로 영향이 없다."""
+        rows = [
+            {"type": "session_meta", "payload": {"session_id": "cx1", "cwd": REPO,
+                                                  "timestamp": "2026-09-22T16:30:00Z"}},
+        ]
+        path = write_rollout(rows)
+        try:
+            boundary = os.path.getsize(path)  # session_meta 줄 끝(개행 포함)
+
+            human_row = {"timestamp": "2026-09-22T16:30:01Z", "ordinal": 1,
+                        "type": "response_item",
+                        "payload": {"type": "message", "role": "user", "id": "u1",
+                                    "content": [{"type": "input_text",
+                                                "text": "완전하지만 개행 없는 턴"}]}}
+            line = json.dumps(human_row, ensure_ascii=False).encode("utf-8")
+            with open(path, "ab") as fh:
+                fh.write(line)  # 개행 없이 — 쓰는 도중을 흉내
+
+            adapter = CX.CodexCliAdapter()
+            ref = ref_for(path)
+            since = adapter.read_session_since(ref, 0, stop_at_human_turn=True)
+            self.assertEqual(since.events, ())
+            self.assertEqual(since.end_offset, boundary)
+
+            # 영향 없음 — stop_at_human_turn 이 아닌 전체 읽기는 그대로 본다.
+            full = adapter.read_session(ref)
+            self.assertEqual(len(full.events), 1)
+            self.assertEqual(full.events[0].text, "완전하지만 개행 없는 턴")
+
+            with open(path, "ab") as fh:
+                fh.write(b"\n")  # 개행이 마저 붙는다
+            since2 = adapter.read_session_since(ref, 0, stop_at_human_turn=True)
+            self.assertEqual(len(since2.events), 1)
+            self.assertEqual(since2.end_offset, os.path.getsize(path))
+        finally:
+            os.unlink(path)

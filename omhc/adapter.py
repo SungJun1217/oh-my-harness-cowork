@@ -64,6 +64,25 @@ class SessionRead(NamedTuple):
     dropped: Dict[str, int]
 
 
+class SessionSince(NamedTuple):
+    """`read_session_since` 의 결과. `SessionRead` 와 거의 같지만 `end_offset`
+    을 더 들고 있다 — 이 읽기가 실제로 다 읽은, **마지막으로 완전한 줄 바로
+    뒤**의 바이트 오프셋이다.
+
+    호출자(cli._reactivate_grown_sessions)는 다음 baseline 으로 `os.stat` 의
+    크기 대신 이걸 써야 한다 — stat 이 레코드 중간에 걸리면(하네스가 쓰는
+    중일 수 있다), 그 크기를 그대로 baseline 으로 삼고 나중에 그 레코드가
+    마저 쓰인 뒤 거기서부터 읽으면 skip-to-newline 로직이 그 레코드 전체를
+    건너뛴다. `end_offset` 은 실제로 소비한 줄만 반영하므로 이 문제가 없다.
+    `max_bytes`/조기 종료로 EOF 전에 멈췄으면 `end_offset` 은 자연히 거기서
+    멈춘다 — 다음 호출이 그 지점부터 이어 읽는다."""
+
+    events: Tuple[Event, ...]
+    unparsed: int
+    dropped: Dict[str, int]
+    end_offset: int
+
+
 class HandoffBundle(NamedTuple):
     body_md: str
     repo_root: str
@@ -116,6 +135,34 @@ class HarnessAdapter:
 
     def read_session(self, ref: SessionRef) -> SessionRead:
         raise NotImplementedError
+
+    def read_session_since(self, ref: SessionRef, offset: int, *,
+                           max_bytes: Optional[int] = None,
+                           stop_at_human_turn: bool = False) -> Optional[SessionSince]:
+        """`offset` 바이트부터 읽는다. 선택 메서드 — `discover`/`health` 와
+        같은 패턴이다. 기본값 `None` 은 "이 어댑터는 구분할 수 없다"이고,
+        호출자는 그러면 오늘의 전체 스캔 경로를 그대로 쓴다 — **이 판정은
+        어댑터당 한 번이다**: 호출자가 아무 인자로나 한 번 불러 `None` 이면
+        그 어댑터는 이후 완전히 건너뛴다(콜마다 달라지지 않는다).
+
+        `codex exec resume` 처럼 같은 파일(같은 inode)에 새 턴이 이어붙는데
+        `session_meta` 가 다시 쓰이지 않는 하네스가 이걸 구현한다 — 전체
+        `read_session` 은 13.8MB rollout 에서 593ms 실측이라 훅 경로에서
+        매번 돌리면 예산(150ms)을 넘긴다. `offset` 은 이전에 관측한 파일
+        크기(바이트) — 레코드 경계일 필요는 없다: 줄 중간이면 구현이 다음
+        개행까지 건너뛴다. 반환하는 이벤트는 `event.offset >= offset` 만
+        포함한다(줄 경계로 스냅한 뒤 기준). 절대 던지지 않는다 — 가비지에도
+        빈 결과로 열화한다.
+
+        `max_bytes`(선택, 기본 무제한)를 주면 그만큼만 읽고 멈춘다 — 실측
+        (17.7MB 꼬리): 늘어난 만큼 비용이 그대로 비례해(396.6ms) 훅 예산을
+        넘길 수 있다. `stop_at_human_turn`(선택, 기본 False)이면 사람의
+        `said` 이벤트를 하나라도 찾는 즉시 멈춘다 — 존재 여부만 필요한
+        호출자(재개 감지)가 나머지를 읽지 않게 한다. 반환값의 `end_offset`
+        은 항상 **실제로 다 읽은 마지막 완전한 줄 바로 뒤** 오프셋이다 —
+        기본값(무제한, 조기 종료 없음)에서는 EOF 와 같다.
+        """
+        return None
 
     def native_resume_hint(self, ref: SessionRef) -> Optional[str]:
         raise NotImplementedError

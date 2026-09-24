@@ -263,9 +263,21 @@ your own config — don't overwrite it.
 
 `omhc status` gives every row one of three labels: **PASS** or **FAIL** for
 checks that were actually judged and can gate the exit code (adapters,
-archive, instruction files, and adapter health rows such as `codex hook`),
-and **`----`** for rows that are informational or not judgeable yet (ledger,
-off switch, pull rate, watcher) — `----` never gates. When the omhc Codex
+archive, instruction files, `ledger rejects`, and adapter health rows such as
+`codex hook`), and **`----`** for rows that are informational or not
+judgeable yet (ledger, off switch, pull rate, watcher) — `----` never gates.
+
+The ledger appends one JSON line per session start, and each line must fit
+in a single `write(2)` call (append-only, so no locking is needed — a
+one-syscall write to an `O_APPEND` fd is atomic on POSIX regardless of size,
+which is unrelated to `PIPE_BUF`; that guarantee is about pipes only). Rows
+over that cap are dropped rather than truncated (a truncated `path`/`session`
+would silently point at nothing) and the drop itself is recorded so it's not
+invisible; a retried session that still can't fit is only recorded once, not
+once per `mark`. `ledger rejects` FAILs when this repo had a drop in the last
+7 days that still doesn't fit under the current cap, `----` otherwise; `omhc
+clear` drops this repo's record of it (e.g. after raising the cap). When the
+omhc Codex
 hook is installed, a `codex hook` row is added. It FAILs when the newest
 interactive Codex session for this repo since `hooks.json` last changed never
 ran the hook — the untrusted-hook case — and names that session's originator;
@@ -440,17 +452,92 @@ committed). Generate them from real sessions on your own machine with
   between the `mark` that ran the backfill and the later `brief` call: an
   interactive session sitting behind more than 5 newer headless ones could
   then be missing from the ledger entirely. Not fixed — an uncommon
-  configuration change to hit in practice. **Known gap (partially
-  verified):** `session_meta.timestamp` is read once from a rollout's first
-  line and never updated. Measured on a real machine: a session's rollout
-  file can carry activity spanning days (80h between its first and last
-  record in one case) while keeping that one first-line timestamp — so a
-  long-lived or resumed session can look no newer than a backfill that
-  already ran against it, and separately, if that original start is older
-  than 7 days (`due.MAX_AGE_SECONDS`), the backfill's own age check skips it
-  too. A correct fix needs an ordering source other than session-start epoch
-  (e.g. last-record timestamp or file mtime), which invariant 6 rules out —
-  not fixed.
+  configuration change to hit in practice.
+
+  `session_meta.timestamp` is read once from a rollout's first line and
+  never updated — `codex exec resume` (measured: it appends to the same
+  rollout, no new `session_meta`) doesn't move it, so a resumed session's
+  start epoch stays exactly what it was, and neither the first-line start
+  time nor an `already_delivered` session id can tell the backfill path
+  that a resume happened. When the Codex hook *is* trusted, that's fine —
+  SessionStart fires with `source:"resume"`, `mark` records a fresh start
+  and a `reopen` line in `delivered.tsv` (`source:"compact"` never
+  reopens). When the hook is **not** trusted (the default, unverified
+  Codex config), fixing this needs a change-detection signal other than
+  session-start epoch — invariant 6 still rules out last-record timestamp
+  or mtime as an *ordering* source, but file **size** only detects "this
+  file grew", not "when": `mark`'s backfill now also stats the ledger's
+  last known size per foreign session (no re-scan, no date-dir window, so
+  it still works for sessions the 14-day `discover()` window can no longer
+  see) and, if it grew, reads only the new tail via the adapter's optional
+  `read_session_since(ref, offset)` (Codex: snaps to the next line
+  boundary) to check whether that tail actually contains a new human
+  turn — agent-only growth (tool calls, `turn_aborted`, `task_complete`)
+  just updates the size baseline and does not re-surface the session.
+  Reading the tail still costs roughly what a full read costs per byte
+  (measured: ~22µs/KB), so it stops as early as possible: `stop_at_human_turn`
+  returns the moment a human turn is found (measured: 0.18ms even on a
+  45MB rollout when the turn is near the read start) and a `max_bytes`
+  cap bounds the pathological case — a large tail with *no* human turn at
+  all — to a fixed worst case (measured: ~17ms for a 1MB cap regardless of
+  how much bigger the actual tail is) well inside the hook budget. A
+  capped read doesn't advance the size baseline past what it actually
+  read, so the unread remainder gets picked up on the next `mark` instead
+  of being silently skipped. The reported `end_offset` (used as the next
+  baseline, instead of the raw stat size) is always snapped to the last
+  complete line actually read — including for that very first baseline:
+  stat'ing a file mid-write can catch it mid-record, and using that raw
+  byte count as the cutoff would make a subsequent read skip the
+  remainder of that exact record, permanently losing whatever human turn
+  was being written at that instant. That snap looks backward at most
+  64KB for a newline; a single JSONL record longer than that (unmeasured,
+  believed rare) falls back to the previous known-good baseline when one
+  exists, so the worst case is re-reading a span. **Known limit:** with no
+  previous baseline it keeps the raw size — using `0` instead would make the
+  next read start from byte 0, find the session's *original* human turn and
+  hand the old content off again (reproduced in review) — so a >64KB human
+  record caught mid-write on a session's very first observation can be missed. The same reasoning applies to
+  `stop_at_human_turn`: a line that already parses as a complete human
+  turn but hasn't had its trailing newline written yet is not counted as
+  a match — counting it would advance the baseline right up to (but not
+  past) that line, so the very next `mark`, once the newline lands, would
+  find "new" growth starting at the same unterminated line and hand off
+  the same turn a second time.
+
+  A resumed session found this way still lands in the ledger through
+  **append order** (a fresh `start` row, `grew:1`), the same ordering rule
+  `due()` always used; the row's epoch is `mark`'s own clock, so
+  `due.MAX_AGE_SECONDS` never filters it out for being old. A session that
+  loses to a newer one in the same interval isn't blocked forever either,
+  regardless of how that newer session's start row got into the ledger:
+  if it came from the backfill scan, the losing session's baseline is
+  rebaselined past it in that same `mark` call (before anything has had a
+  chance to grow, minimizing the ambiguous window below); if the newer
+  session's own trusted hook wrote its start row directly — invisible to
+  the backfill scan, since that session isn't a stranger to the ledger
+  anymore — the next reactivation pass does the same rebaseline lazily,
+  whether or not the losing session happened to grow in that pass. Either
+  way, growth past that newer row is judged fresh again; it just doesn't
+  retroactively un-supersede the interval it lost. This also covers a
+  case that never had a fix before: a live-continue where the human keeps
+  typing in an already-delivered Codex session A and then switches
+  straight to a new Claude session, with no Codex SessionStart at all —
+  the growth check runs from *any* `mark`, including the receiving
+  harness's, so it needs no hook on A's side either.
+
+  **Remaining limit:** the underlying ordering is still ledger append
+  order, so if a brand-new session and a resumed/continued one both grow
+  within the *same* interval — between the newer session's start row
+  landing and the next time the older session is rebaselined (at most one
+  `mark` call later) — that growth is inherently ambiguous (size alone
+  can't tell whether it happened before or after) and stays absorbed; the
+  newer *start* wins for that interval (the older one's next growth,
+  after that interval, is judged fresh again — see above). And this is
+  Codex→Claude only, because the growth check only runs for adapters that
+  implement `read_session_since` — the Claude adapter doesn't yet, so a
+  live-continue *into a Claude session* (someone keeps typing in an
+  already-delivered Claude session, then switches to a new Codex one)
+  isn't detected until it is.
 
   </details>
 

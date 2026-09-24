@@ -6,13 +6,13 @@ import os
 import re
 import sys
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from . import (
-    adapters, agents_md, brief, due, gate, hookconf, index, ledger, locate,
+    adapters, agents_md, brief, due, fsio, gate, hookconf, index, ledger, locate,
     managed_block, pin, watch,
 )
-from .adapter import AdapterUnavailable
+from .adapter import AdapterUnavailable, SessionRef
 
 PROG = "omhc"
 NOTES_NAME = "notes.txt"
@@ -63,6 +63,13 @@ BACKFILL_CAP = 5
 # 늦게 끝나 이 mark 호출이 세션 시작을 지연시킬 수 있다.
 BACKFILL_TIME_BUDGET = 0.08
 
+# 한 하네스에서 한 번에 확인하는 최근 세션 수(`_backfill_foreign_sessions` 의
+# 재기준점 찍기, `_reactivate_grown_sessions` 둘 다 쓴다). discover()/
+# list_sessions() 처럼 전체 스캔을 하지 않고(#22: 시작한 지 14일 넘은 세션도
+# 여전히 재개가 잡혀야 한다 — discover() 의 SCAN_DAYS 창 밖이다) 원장에 이미
+# 적힌 path 로만 stat 하므로 20개는 훅 예산 안에서 무시할 만하다.
+REACTIVATE_SCAN_CAP = 20
+
 
 def _ref_repo_key(ref) -> Optional[str]:
     """이 ref 가 실제로 속한 레포 키. `locate.owning_repo_key` 로 위임한다
@@ -70,9 +77,91 @@ def _ref_repo_key(ref) -> Optional[str]:
     return locate.owning_repo_key(ref.cwd)
 
 
+def _rebaseline_after_fresh_start(adapter_id: str, key: str, root: str, home,
+                                  own_rows: List[dict], added: set,
+                                  now: float, deadline: float) -> None:
+    """리뷰(#22 재검토): 이 라운드가 `adapter_id` 에 더 최신 세션(B)을 방금
+    원장에 채웠다. 다른 기존 세션(A)들의 baseline 이 여전히 B 의 start 행
+    앞에 남아 있으면, 다음 `_reactivate_grown_sessions` 라운드가 A 의
+    "지금 크기"를 그 낡은 baseline 과 통째로 비교한다 — 그 사이(B 가 들어온
+    뒤)에 A 에 생긴 **진짜** 재개까지 "이미 B 에 밀렸다"(superseded)로
+    뭉뚱그려 seen 행으로 흡수해 버리고, 다시는 재판정하지 못한다(그 흡수가
+    실제로는 A 의 유일한 새 턴을 삼킨 것이었어도).
+
+    B 가 막 들어온 **이 순간**(아직 A 가 더 자라지 않았을 가능성이 높은
+    시점) A 들을 다시 stat 해 seen 행을 B 뒤에 남긴다 — 그러면 이후 A 에
+    생기는 진짜 성장은 이 새 baseline(이미 B 뒤에 있다) 과 비교되어 깨끗하게
+    새 판정을 받는다.
+
+    리뷰(3차, t5): 이 함수는 B 가 **백필**(discover→known_sessions 에 새로
+    잡힌 경우)로 들어왔을 때만 불린다 — B 가 자기 자신의 신뢰된 훅으로
+    직접 start 행을 남기면 `_backfill_foreign_sessions` 는 그 세션을
+    "이미 안다"고 보고(known_sessions 에 이미 있다) 다시 안 채우므로 이
+    함수가 아예 안 불린다. 그 경로는 `_reactivate_grown_sessions` 안의
+    지연(lazy) 재기준점이 대신 잡는다(그쪽 주석 참고) — 이 함수를 없애지
+    않는 이유는 백필 origin 에서는 **B 가 들어온 바로 그 순간**(아직 A 가
+    안 자랐을 가능성이 가장 높은 시점) 찍으므로, 지연 경로보다 흡수될
+    애매구간(다음 mark 까지의 창)이 짧기 때문이다 — 두 경로가 같은 결과로
+    수렴하지만 이쪽이 더 이르다."""
+    others = []
+    seen_sid = set()
+    for row in reversed(own_rows):
+        sid = row.get("session")
+        if not sid or sid in added or sid in seen_sid or not row.get("path"):
+            continue
+        seen_sid.add(sid)
+        others.append(sid)
+        if len(others) >= REACTIVATE_SCAN_CAP:
+            break
+    for sid in others:
+        if time.time() > deadline:
+            return
+        # 이 세션의 마지막 path/size — 리뷰(3차 #3)의 fallback 으로 쓴다.
+        path = None
+        prior_size = None
+        for row in own_rows:
+            if row.get("session") != sid:
+                continue
+            if row.get("path"):
+                path = row.get("path")
+            if "size" in row:
+                try:
+                    prior_size = int(row["size"])
+                except (TypeError, ValueError):
+                    pass
+        if not path:
+            continue
+        try:
+            cur_size = os.stat(path).st_size
+        except OSError:
+            continue
+        # fallback: 이전에 알던 baseline 이 있으면 그것 — 64KB 안에 개행을
+        # 못 찾아도 baseline 이 레코드 중간으로 밀리지 않는다. 없으면 None
+        # (size 그대로). 0 으로 대체하면 처음부터 다시 읽어 옛 사람 턴으로
+        # 거짓 재활성화한다(리뷰에서 재현).
+        ledger.append({
+            "repo": key, "harness": adapter_id, "session": sid,
+            "event": "seen", "via": "scan",
+            "size": fsio.line_aligned_size(path, cur_size,
+                                           fallback=prior_size),
+            "epoch": now, "path": path, "cwd": root,
+        }, home=home)
+
+
 def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
-                                home, now: float) -> None:
-    deadline = time.time() + BACKFILL_TIME_BUDGET
+                                home, now: float, *,
+                                deadline: Optional[float] = None) -> Dict[str, set]:
+    """`deadline` 을 안 주면 이 호출 하나만의 예산으로 스스로 잰다(예전 동작,
+    독립 호출·테스트 호환용). `cmd_mark` 는 `_reactivate_grown_sessions` 와
+    **같은** 예산을 나눠 써야 훅 시간을 두 배로 쓰지 않으므로 자신의
+    deadline 을 넘겨준다.
+
+    반환값: {adapter_id: {새로 채운 session_id, ...}} — `_reactivate_grown_sessions`
+    가 이걸로 "이번 mark 가 이 하네스에 더 최신 세션을 방금 채웠다"(조건 b)를
+    판정한다."""
+    if deadline is None:
+        deadline = time.time() + BACKFILL_TIME_BUDGET
+    fresh: Dict[str, set] = {}
     rows = ledger.read(repo_key=key, home=home)
     for adapter_id in sorted(adapters.REGISTRY):
         if adapter_id == harness:
@@ -90,7 +179,11 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
         known_sessions = {str(r.get("session")) for r in own_rows if r.get("session")}
         newest_start = 0.0
         for r in own_rows:
-            if r.get("event") == "start":
+            # grew 행의 epoch 는 세션의 실제 시작 시각이 아니라 재개를 감지한
+            # "now" 다(_reactivate_grown_sessions) — 이걸 newest_start 에 섞으면
+            # 아직 못 채운, 진짜로 더 오래된 세션이 "이미 최신보다 오래됨"
+            # 판정에 걸려 영영 안 채워진다.
+            if r.get("event") == "start" and not r.get("grew"):
                 newest_start = max(newest_start, float(r.get("epoch") or 0.0))
 
         # 먼저 자격 있는 것만 걸러 **전체를 놓고** 정렬한다 — 오래된 것부터
@@ -142,8 +235,239 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
                 # 같은 하네스 내부의 append 순서뿐인데, 여기서 붙이는 건
                 # 다른 하네스 행이다.
                 "via": "scan",
+                # `_reactivate_grown_sessions` 의 baseline — discover() 가 이미
+                # os.path.getsize 로 읽은 값이라 추가 stat 비용이 없다.
+                "size": ref.size,
             }
-            ledger.append(row, home=home)
+            if ledger.append(row, home=home):
+                fresh.setdefault(adapter_id, set()).add(ref.session_id)
+
+        if fresh.get(adapter_id):
+            # 방금 이 하네스에 새 세션을 채웠다 — 다른 기존 세션들의
+            # baseline 을 그 자리에서 바로 B 뒤로 옮긴다(리뷰 #1, 위
+            # _rebaseline_after_fresh_start 참고).
+            _rebaseline_after_fresh_start(adapter_id, key, root, home, own_rows,
+                                          fresh[adapter_id], now, deadline)
+    return fresh
+
+
+# 늘어난 꼬리를 얼마나 읽을지의 상한. 실측(17.7MB 꼬리): 396.6ms — 캡 없이
+# 읽으면 늘어난 크기에 그대로 비례해 훅 예산(150ms)을 넘긴다. 1MB 는 같은
+# 실측 비율(~22.4us/KB)로 약 22ms — stop_at_human_turn 이 보통 훨씬 일찍
+# 끊어 주므로 이 캡은 "사람 턴이 하나도 없는 큰 성장"의 최악 경우만 막는다.
+REACTIVATE_TAIL_CAP = 1_000_000
+
+
+def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
+                               home, now: float, deadline: float,
+                               fresh: Dict[str, set]) -> None:
+    """#22 마지막 구멍: 신뢰 안 된 Codex 훅에서 `codex exec resume` 은 새
+    rollout 을 만들지 않고 **같은 파일에 이어 쓴다** — `session_meta` 도 다시
+    안 쓴다. `_backfill_foreign_sessions` 는 discover() 의 첫 줄 시작 시각으로
+    순서를 매기므로 이 재개를 못 본다(원본 시작 시각이 그대로다); 이미
+    전달됐던 세션이면 `already_delivered` 가 due() 를 거기서 멈춘다.
+
+    파일 크기 성장은 "뭔가 바뀌었다"만 알려준다(불변식 6: 순서의 근거가
+    아니라 변화 감지 신호일 뿐이다 — 원장 append 순서가 여전히 유일한 순서
+    기준이다). 성장분에 사람의 새 턴이 있는지는 `read_session_since` 로
+    직접 확인한다(에이전트 혼잣말·turn_aborted 만으로는 재개로 보지 않는다).
+
+    `fresh`(이번 mark 가 `_backfill_foreign_sessions` 로 방금 채운 세션들)에
+    이 하네스가 있으면 건너뛴다 — 같은 호출에서 더 최신 세션이 이미 들어왔다면
+    재개 행을 그 뒤에 또 얹지 않는다(원장 append 순서가 due() 의 "가장 최근"
+    판정이므로, 얹으면 방금 채운 더 최신 세션 대신 재개된 낡은 세션이 이긴다).
+
+    훅 경로이므로 절대 던지지 않는다 — 호출자(cmd_mark)가 통째로 감싼다.
+    """
+    rows = ledger.read(repo_key=key, home=home)
+    for adapter_id in sorted(adapters.REGISTRY):
+        if adapter_id == harness:
+            continue
+        if time.time() > deadline:
+            return
+        if fresh.get(adapter_id):
+            continue
+        try:
+            inst = adapters.get(adapter_id, home=home)
+        except Exception:
+            continue
+        reader = getattr(inst, "read_session_since", None)
+        if reader is None:
+            continue
+        # 리뷰: 메서드가 있다는 것과 이 어댑터가 실제로 판정을 낸다는 것은
+        # 다르다 — Claude 처럼 항상 None 을 돌려주는(계약상 "구분할 수
+        # 없다") 구현이면 매 성장마다 의미 없는 seen 행만 쌓인다(측정: mark
+        # 4번 → seen 4번). 어댑터당 **한 번만** 확인하고, None 이면 이
+        # 어댑터는 통째로 건너뛴다 — 실제 경로를 stat 하기 전에 결정한다.
+        try:
+            probe = reader(
+                SessionRef(adapter_id=adapter_id, session_id="", source_path="",
+                          cwd=None, epoch=0.0, size=0),
+                0,
+            )
+        except Exception:
+            probe = None
+        if probe is None:
+            continue
+
+        own_rows = [r for r in rows if r.get("harness") == adapter_id]
+        if not own_rows:
+            continue
+
+        # 이 하네스의 최근 distinct 세션(최신 먼저), path 있는 것만 — no
+        # discover(), no 날짜 창. 14일 전에 시작한 세션도 여전히 원장에
+        # path 를 들고 있으면 재개를 잡는다.
+        recent_sessions: List[str] = []
+        for row in reversed(own_rows):
+            sid = row.get("session")
+            if not sid or not row.get("path") or sid in recent_sessions:
+                continue
+            recent_sessions.append(sid)
+            if len(recent_sessions) >= REACTIVATE_SCAN_CAP:
+                break
+
+        for sid in recent_sessions:
+            if time.time() > deadline:
+                return
+            path = None
+            baseline = None
+            baseline_pos = -1
+            for i, row in enumerate(own_rows):
+                if row.get("session") != sid:
+                    continue
+                if row.get("path"):
+                    path = row.get("path")
+                if "size" in row:
+                    # 가비지 size 도 mark 를 깨면 안 된다 — 건너뛰고 이전
+                    # baseline 을 유지한다.
+                    try:
+                        baseline = int(row["size"])
+                        baseline_pos = i
+                    except (TypeError, ValueError):
+                        pass
+            if not path:
+                continue
+            try:
+                cur_size = os.stat(path).st_size
+            except OSError:
+                continue
+
+            if baseline is None:
+                # 첫 관측 — 재개 여부를 아직 모른다. 다음 mark 부터 비교할
+                # 기준만 남긴다. os.stat 크기를 그대로 쓰지 않고 줄 경계로
+                # 스냅한다(리뷰) — 레코드 중간을 baseline 으로 잡으면 그
+                # 레코드가 마저 쓰인 뒤 skip-to-newline 로직이 통째로
+                # 건너뛴다.
+                ledger.append({
+                    "repo": key, "harness": adapter_id, "session": sid,
+                    "event": "seen", "via": "scan",
+                    # 첫 관측이라 이전 baseline 이 없다. 0 으로 대체하지
+                    # 않는다 — 다음 판정이 처음부터 읽어 원래의 사람 턴으로
+                    # 옛 내용을 다시 넘긴다(리뷰에서 재현). 못 찾으면 size
+                    # 그대로(64KB 넘는 레코드를 쓰는 중일 때만, 알려진 한계).
+                    "size": fsio.line_aligned_size(path, cur_size),
+                    "epoch": now, "path": path, "cwd": root,
+                }, home=home)
+                continue
+
+            # 조건 (a): baseline 이후 같은 하네스의 **다른** 세션 start 행이
+            # 붙었다면(어떤 경로로 그 행이 생겼든 — 이 하네스의 백필이든,
+            # 그 세션 자신의 신뢰된 훅이든) 이미 더 최신 것에 밀린 세션이다
+            # — 되살리지 않는다. 리뷰(3차, t5): **자라지 않았어도** 이 검사를
+            # 한다 — 안 그러면 baseline 이 B 의 start 행보다 앞에 영원히
+            # 남아, B 가 신뢰된 훅으로 직접 들어와 `_rebaseline_after_fresh_start`
+            # 가 못 본 경우 이 세션은 다시는 판정되지 않는다(그 훅이 원장에
+            # 적는 순간엔 이 함수가 아예 안 불린다 — args.harness 가 그
+            # 하네스 자신이라 `_reactivate_grown_sessions` 의 대상에서 원천
+            # 빠진다).
+            #
+            # 그렇다고 그냥 넘어가면(옛 버그) 이 baseline 이 영원히 그대로
+            # 남아 이후 어떤 mark 도 이 세션을 다시는 판정하지 못한다 —
+            # seen 행으로 기준만 올려서 흡수한다. B 이후에 A 가 **다시**
+            # 자라면(baseline 이 그 seen 행 뒤로 옮겨졌으므로 B 의 start 행
+            # 보다 앞이 아니다) 그건 새 판정으로 다시 잡힌다.
+            #
+            # **알려진 한계:** B 의 start 행과 이 라운드 사이에 A 가 이미
+            # 자랐다면(자라지 않은 경우와 달리) 그 성장이 B 전인지 후인지
+            # 알 도리가 없다 — size 하나로는 순서를 못 가리므로 흡수한다
+            # (README 의 남은 한계).
+            superseded = any(
+                row.get("event") == "start" and row.get("session") != sid
+                for row in own_rows[baseline_pos + 1:]
+            )
+            if superseded:
+                if cur_size > baseline:
+                    ledger.append({
+                        "repo": key, "harness": adapter_id, "session": sid,
+                        "event": "seen", "via": "scan",
+                        # fallback=이전 baseline(리뷰 3차 #3) — 못 찾아도
+                        # baseline 이 뒤로(레코드 중간 쪽) 밀리지 않는다.
+                        "size": fsio.line_aligned_size(path, cur_size,
+                                                       fallback=baseline),
+                        "epoch": now, "path": path, "cwd": root,
+                    }, home=home)
+                else:
+                    # 안 자랐다 — 지금 크기 그대로 재기준점만 B 뒤로 옮긴다
+                    # (값은 안 바뀐다, 원장에서의 **위치**만 바뀐다).
+                    ledger.append({
+                        "repo": key, "harness": adapter_id, "session": sid,
+                        "event": "seen", "via": "scan", "size": baseline,
+                        "epoch": now, "path": path, "cwd": root,
+                    }, home=home)
+                continue
+            if cur_size <= baseline:
+                continue
+
+            since = None
+            try:
+                since = reader(
+                    SessionRef(
+                        adapter_id=adapter_id, session_id=sid,
+                        source_path=path, cwd=root, epoch=now, size=cur_size,
+                    ),
+                    baseline,
+                    max_bytes=REACTIVATE_TAIL_CAP,
+                    stop_at_human_turn=True,
+                )
+            except Exception:
+                since = None
+            if since is None:
+                # 이 라운드는 판정할 수 없다 — baseline 을 건드리지 않고
+                # 다음 mark 에서 다시 시도한다(잘못된 baseline 을 남기는
+                # 것보다 안전하다).
+                continue
+            found_human_turn = any(
+                ev.verb == "said" and ev.author == "human" for ev in since.events
+            )
+
+            if found_human_turn:
+                # 리뷰: `cur_size` 가 아니라 `since.end_offset` 을 쓴다 — 마지막
+                # 줄이 개행 없이 끝났으면(막 쓰는 중이었을 수 있다) 그 레코드는
+                # 아직 안전히 다 읽은 게 아니라서 baseline 에 넣으면 다음 읽기가
+                # 그 줄을 통째로 건너뛴다(리뷰 #2).
+                ledger.append({
+                    "repo": key, "harness": adapter_id, "session": sid,
+                    "event": "start", "via": "scan", "size": since.end_offset,
+                    "grew": 1, "epoch": now, "path": path, "cwd": root,
+                }, home=home)
+                try:
+                    if due.already_delivered(state, sid, harness):
+                        due.mark_reopened(state, sid, adapter_id, now)
+                except Exception:
+                    pass
+                continue
+
+            # 성장은 있었지만 사람의 턴이 아니다(에이전트 혼잣말,
+            # turn_aborted, task_complete 등) — 리뷰: `since.end_offset` 을
+            # 쓴다(`cur_size` 가 아니라). 캡(`max_bytes`)에 걸려 꼬리 전부를
+            # 못 읽었으면 `end_offset` 이 실제로 읽은 데까지만 반영하므로,
+            # 다음 mark 가 못 읽은 나머지를 이어서 본다 — `cur_size` 를 그대로
+            # 썼다면 그 사이에 있었을 수도 있는 사람 턴을 영영 건너뛴다.
+            ledger.append({
+                "repo": key, "harness": adapter_id, "session": sid,
+                "event": "seen", "via": "scan", "size": since.end_offset,
+                "epoch": now, "path": path, "cwd": root,
+            }, home=home)
 
 
 def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
@@ -177,12 +501,27 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     # rollout 이 없으면 영구히 비대화형으로 적힐 수 있었다. 판정은 brief 시점에
     # 어댑터가 실제 파일을 보고 내린다(brief.compute 가 due 에 넘기는 eligible).
     ledger.append(row, home=home)
+    # SessionStart 의 `source` 어휘는 Claude Code 와 Codex 가 공유한다(둘 다
+    # 실측). "resume" 은 같은 세션에 새 턴이 이어붙었다는 뜻이다 — 그 세션이
+    # 이미 다른 하네스에 전달됐었다면 due() 가 already_delivered() 에서 멈춰
+    # resumed 턴을 영영 못 내보낸다(#22). "compact" 는 같은 신호를 주지 않는다
+    # — 컨텍스트만 압축했을 뿐 사람의 새 턴이 없으므로 재전달할 것이 없다.
+    if session and str(payload.get("source") or "") == "resume":
+        try:
+            due.mark_reopened(state, session, args.harness, row["epoch"])
+        except Exception:
+            pass
     # 다른 하네스의 세션을 원장에 백필한다(위 주석). 훅 경로이므로 실패해도
-    # mark 자체는 항상 exit 0, 빈 stdout 이어야 한다(invariant 2).
+    # mark 자체는 항상 exit 0, 빈 stdout 이어야 한다(invariant 2). 두 백필
+    # 단계(신규 세션 스캔, 재개 감지)가 같은 훅 예산을 나눠 쓴다 — 따로 재면
+    # 합쳐 두 배를 쓴다.
     try:
         if not due.is_off(state):
-            _backfill_foreign_sessions(args.harness, root, key, state, home,
-                                       row["epoch"])
+            deadline = time.time() + BACKFILL_TIME_BUDGET
+            fresh = _backfill_foreign_sessions(args.harness, root, key, state, home,
+                                               row["epoch"], deadline=deadline)
+            _reactivate_grown_sessions(args.harness, root, key, state, home,
+                                       row["epoch"], deadline, fresh)
     except Exception:
         pass
     # 어떤 omhc 호출에서든 오래된 AGENTS.md 구간을 붕괴시킨다.
@@ -495,7 +834,7 @@ def _status_json_empty() -> dict:
     키가 `/` 에서만 빠졌다)."""
     return {
         "repo_root": None, "repo_key": None, "state_dir": None,
-        "adapters": [], "ledger_rows": 0,
+        "adapters": [], "ledger_rows": 0, "ledger_rejects": 0,
         "archive": [],
         "injections": 0, "pulls": 0,
         "pull_rate_window": PULL_RATE_WINDOW,
@@ -544,6 +883,27 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     rows = [r for r in all_rows if r.get("repo") == key][-ledger.DEFAULT_LIMIT:]
     artifact = os.path.join(state, ARTIFACT_NAME)
 
+    # #22: append() 가 상한을 못 맞춰 조용히 버린 행. "최근" 만 게이팅한다 —
+    # 예전에 한 번 있었지만 그 뒤로 반복되지 않았다면 사람이 영원히 못 지우는
+    # FAIL 을 보게 하면 안 된다(off switch/archive 행과 같은 원칙,
+    # due.MAX_AGE_SECONDS 를 재사용한다). `bytes > ledger.MAX_LINE` 도 함께
+    # 본다 — 상한을 올려 고친 뒤라면(#22 리뷰) 예전에 적힌 행이 지금 상한으로는
+    # 이미 들어가므로 "고쳤다" 라는 사실을 cap 을 따로 저장하지 않고도 안다.
+    # `session` 으로 distinct 해서 센다 — `_note_rejection` 이 재시도마다 같은
+    # (repo, harness, session) 을 또 적지 않게 막지만, 그 방어가 생기기 전에
+    # 이미 쌓인 중복 줄까지 한 세션을 여러 번 버려진 것처럼 부풀리면 안 된다.
+    rejected_now = time.time()
+    recent_rejected = [
+        r for r in ledger.read_rejected(home=home, repo_key=key)
+        if (rejected_now - float(r.get("epoch") or 0.0)) <= due.MAX_AGE_SECONDS
+        and int(r.get("bytes") or 0) > ledger.MAX_LINE
+    ]
+    rejected_sessions = {
+        (r.get("harness"), r.get("session")) if r.get("session")
+        else (r.get("harness"), i)
+        for i, r in enumerate(recent_rejected)
+    }
+
     # watch.lag 가 정확히 이 계산을 소유한다. 두 벌로 두면 고정 레이아웃이
     # 바뀔 때 한쪽만 고쳐진다.
     lag_rows = watch.lag(state)
@@ -562,7 +922,12 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
             for line in fh:
                 if not line.strip():
                     continue
-                delivered_order.append(line.split("\t", 1)[0])
+                parts = line.split("\t")
+                # reopen 줄은 전달이 아니다 — 세면 resume 만 하고 아직 다시
+                # 전달되지 않은 세션이 injections/pull rate 분모에 낀다(#22).
+                if len(parts) >= 2 and parts[1] == due.REOPEN_MARKER:
+                    continue
+                delivered_order.append(parts[0])
     injections = len(delivered_order)
 
     # pull rate 의 분모를 delivered.tsv 전체로 두면, 한 레포를 오래 쓸수록
@@ -635,6 +1000,15 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     checks.append(("ledger", None,
                    "{} rows for this repo".format(len(rows)) if rows
                    else "no sessions recorded here yet — start either harness in this repo"))
+    if recent_rejected:
+        checks.append(("ledger rejects", False,
+                       "{} session(s) dropped (too long for MAX_LINE={}) since {}"
+                       " — fixed it? run `omhc clear` to drop this repo's record".format(
+                           len(rejected_sessions), ledger.MAX_LINE,
+                           time.strftime("%Y-%m-%d", time.localtime(
+                               min(float(r.get("epoch") or 0.0) for r in recent_rejected))))))
+    else:
+        checks.append(("ledger rejects", None, "none recently"))
 
     # lag_rows 의 size/lag_bytes 는 pinned/<sid>/source.jsonl 이 없어도 0 으로
     # 나온다 — "size 0" 과 "고정 성공, 꼬리 0바이트" 를 구분 못 하면 고정이
@@ -710,6 +1084,7 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         out.write(json.dumps({
             "repo_root": root, "repo_key": key, "state_dir": state,
             "adapters": installed, "ledger_rows": len(rows),
+            "ledger_rejects": len(rejected_sessions),
             "archive": lag_rows,
             "injections": injections, "pulls": pulls,
             "pull_rate_window": PULL_RATE_WINDOW,
@@ -880,7 +1255,7 @@ def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
 
 
 def cmd_clear(args, *, home=None, out=sys.stdout) -> int:
-    root, _key, state = _state_for(home)
+    root, key, state = _state_for(home)
     reason = locate.refused_root(root)
     if reason:
         out.write("{}\n".format(reason))
@@ -892,6 +1267,11 @@ def cmd_clear(args, *, home=None, out=sys.stdout) -> int:
     if os.path.exists(artifact):
         os.unlink(artifact)
         removed.append(artifact)
+    # #22 리뷰: 원인을 고친(예: MAX_LINE 을 올린) 뒤에도 `ledger rejects` 가
+    # 영원히 FAIL 로 남으면 안 된다 — 이 레포의 거부 기록만 지운다.
+    rejected_cleared = ledger.clear_rejected(key, home=home)
+    if rejected_cleared:
+        removed.append("{} ledger reject row(s)".format(rejected_cleared))
     out.write("cleared {}\n".format(", ".join(removed) if removed else "nothing"))
     return 0
 
