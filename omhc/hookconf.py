@@ -1,11 +1,12 @@
-"""훅 설치 상태 판정. 벤더 이름을 모른다 — 두 하네스가 같은 스키마를 쓴다:
-`hooks.<Event>[].hooks[].command`.
+"""훅 설치 상태 판정 + 설치/제거. 벤더 이름을 모른다 — 두 하네스가 같은
+스키마를 쓴다: `hooks.<Event>[].hooks[].command`.
 
-`omhc hooks install`(다음 유닛)과 `omhc status` 의 `<adapter-id> hooks` 행이
-공유한다. 여기서는 판정만 한다 — 실제로 파일을 쓰는 것은 다음 유닛의 몫이다.
+`omhc hooks install|uninstall` 과 `omhc status` 의 `<adapter-id> hooks` 행이
+여기 하나를 공유한다.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -13,16 +14,32 @@ import shlex
 import shutil
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
-# install.sh(install.sh:39, OMHC_CMD)는 **문자열** 정규식으로 omhc 훅을
-# 찾는다 — 사람이 손으로 병합한 hooks.SessionStart 그룹에서 "지울 대상"을
-# 넓게 잡아도 안전한 삭제 전용 작업이기 때문이다. 여기(설치 *판정*)는 반대
-# 방향의 실수(진짜로 도는 훅을 아니라고 하거나, 우연히 "omhc brief"라는
-# 글자가 들어간 사용자 훅을 설치로 착각하는 것)가 더 위험해서 argv 를
-# 구조적으로 판정한다 — 절대경로/`~`/`${HOME}`/따옴표/PATH 상의 `omhc` 처럼
-# 문자열은 다양해도 여전히 "그 명령"인 경우를 다 잡고, `echo 'run omhc brief
-# later'` 처럼 문자열만 닮은 남의 훅은 걸러낸다. 두 정규식/판정이 다른 목적을
-# 가지므로 하나로 합치지 않는다.
+from . import fsio
+
+# install.sh(strip_omhc_hooks, OMHC_CMD)는 **문자열** 정규식으로 omhc 훅을
+# 찾는다 — omhc 가 설치돼 있지 않은(또는 그 전) 상태에서도 돌아야 해서 이
+# 모듈을 부르지 못하고, 손으로 병합한 hooks.SessionStart 그룹에서 "지울
+# 대상"을 넓게 잡아도 안전한 삭제 전용 작업이기 때문이다. 여기(구조 판정)는
+# 반대 방향의 실수(진짜로 도는 훅을 아니라고 하거나, 우연히 "omhc brief"라는
+# 글자가 들어간 사용자 훅을 설치/제거로 착각하는 것)가 더 위험해서 argv 를
+# 구조적으로 판정한다.
+#
+# 두 판정은 실측으로 갈라지는 게 확인된 경우가 있고(tests/test_hooks_cmd.py
+# 의 TestInstallShParity 가 일치하는 입력만 고정한다), 하나로 합치지 않는다:
+#   - install.sh 가 더 넓게 지운다: `cd ~ && omhc brief …`(전체 명령의
+#     argv[0] 는 "cd"지만 문자열에 "omhc brief"가 들어 있다), `/usr/bin/env
+#     omhc mark …`(argv[0] 는 "env") 모두 install.sh 는 지우지만, 여기는
+#     argv[0] 의 basename 이 "omhc" 가 아니므로 손대지 않는다.
+#   - 여기가 더 넓게 인식한다: `'omhc' 'mark' --harness x`(토큰마다 따옴표)
+#     는 shlex 로 풀면 `omhc mark --harness x` 와 같아 여기는 설치로 인정하지만,
+#     install.sh 의 정규식(`omhc["']?\s+(mark|brief)`)은 "omhc" 바로 뒤
+#     선택적 따옴표 하나만 허용하고 그다음 공백 뒤에는 "mark"/"brief" 리터럴을
+#     기대하므로 `'mark`(따옴표로 시작)에는 매칭되지 않는다.
 _HOME_RE = re.compile(r"\$\{HOME\}|\$HOME\b")
+
+
+class HookConfigError(Exception):
+    """merge/strip 이 fail-closed 하려고 던지는 예외. 손대지 않았다는 뜻이다."""
 
 
 class HookConfig(NamedTuple):
@@ -202,3 +219,155 @@ def inspect(config_path: str, fragment: Dict[str, list], home: str) -> Tuple[boo
             return False, "{} not executable".format(binpath)
 
     return True, "installed"
+
+
+# --- install/uninstall (`omhc hooks install|uninstall`) ---------------------
+
+
+def _load(config_path: str) -> dict:
+    """설정 객체를 읽는다. 파일이 없으면 빈 dict(``{}``) — merge 가 그 위에
+    새로 만들 수 있어야 한다(Codex 는 원래 hooks.json 이 없다). 그 밖의
+    모든 실패는 fail-closed 하게 던진다 — 절반만 읽고 계속 진행하지 않는다."""
+    try:
+        with open(config_path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return {}
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HookConfigError("cannot parse {}: {}".format(config_path, exc))
+    try:
+        obj = json.loads(text)
+    except ValueError as exc:
+        raise HookConfigError("cannot parse {}: {}".format(config_path, exc))
+    if not isinstance(obj, dict):
+        raise HookConfigError("{}: top-level is not an object".format(config_path))
+    return obj
+
+
+def _strip_hooks(conf: dict) -> dict:
+    """`conf`(전체 설정 객체)의 사본에서 hooks.SessionStart 의 omhc mark/brief
+    훅만 지운다. install.sh 의 문자열 정규식과 달리 `_parse_call` 로 구조적으로
+    판정한다 — 지우는 쪽 실수(진짜 도는 훅을 못 지우거나, `echo 'omhc brief'`
+    같은 남의 훅을 지우는 것)가 여기서도 여전히 위험하기 때문이다.
+
+    모양이 기대를 벗어나면(hooks 가 객체가 아니다 등) install.sh 의 uninstall
+    경로와 같은 원칙으로 fail-closed 한다 — 못 알아보는 기계적 형태를 그대로
+    두거나 고쳐 쓰지 않는다.
+    """
+    conf = copy.deepcopy(conf)
+    hooks = conf.get("hooks")
+    if hooks is None:
+        return conf
+    if not isinstance(hooks, dict):
+        raise HookConfigError("hooks is not an object")
+    groups = hooks.get("SessionStart")
+    if groups is None:
+        return conf
+    if not isinstance(groups, list):
+        raise HookConfigError("hooks.SessionStart is not an array")
+
+    kept_groups = []
+    removed_any = False
+    for group in groups:
+        if not isinstance(group, dict):
+            raise HookConfigError("a SessionStart group is not an object")
+        if not isinstance(group.get("hooks"), list):
+            raise HookConfigError("a SessionStart group's hooks is not an array")
+        original_hooks = group["hooks"]
+        kept_hooks = [
+            h for h in original_hooks
+            if not (isinstance(h, dict) and isinstance(h.get("command"), str)
+                    and _parse_call(h["command"]) is not None)
+        ]
+        if len(kept_hooks) == len(original_hooks):
+            # 이 그룹에서는 아무것도 지우지 않았다 — 원래 비어 있던 그룹이라도
+            # (install.sh 와 마찬가지로) 손대지 않고 그대로 둔다. 건드리지
+            # 않은 빈 그룹까지 드롭하면, omhc 훅이 하나도 없는 설정에서도
+            # strip() 이 "바뀌었다"고 잘못 보고한다(#7 리뷰 4).
+            kept_groups.append(group)
+            continue
+        removed_any = True
+        if kept_hooks:
+            new_group = dict(group)
+            new_group["hooks"] = kept_hooks
+            kept_groups.append(new_group)
+        # else: 이 그룹은 omhc 훅만 있었고 지워서 비었다 — 그룹째 드롭한다.
+
+    if not removed_any:
+        return conf  # SessionStart 자체도 원래 모습 그대로(빈 배열이었어도) 남긴다.
+
+    if kept_groups:
+        hooks["SessionStart"] = kept_groups
+    else:
+        del hooks["SessionStart"]
+    return conf
+
+
+def _write_if_changed(config_path: str, original: dict, updated: dict) -> bool:
+    """`updated` 가 `original` 과 같으면(idempotent) 아무것도 안 쓴다 — Codex
+    health 행이 hooks.json 의 mtime 에 기대므로 그 보장이 여기서 무너지면
+    안 된다. 다르면 기존 파일을 `.omhc-bak` 로 백업(있을 때만)하고 원자적으로
+    갈아끼운다."""
+    if updated == original:
+        return False
+    real_target = os.path.realpath(config_path)
+    if os.path.exists(real_target):
+        if not os.access(real_target, os.W_OK):
+            # 실측: 0444 설정 파일은 그냥 os.replace 로도 갈아끼워질 수 있다
+            # (디렉터리 쓰기 권한만 있으면 rename 은 파일 자체의 모드를 안 본다)
+            # — 하지만 사람이 일부러 잠가 둔 파일을 조용히 덮어쓰면 안 되므로
+            # 여기서 명시적으로 거부한다(#7 리뷰 5).
+            raise HookConfigError(
+                "{} is read-only; refusing to overwrite it silently — "
+                "chmod it writable first if you want omhc to manage it".format(real_target))
+        backup = config_path + ".omhc-bak"
+        # 이전 실행이 남긴 백업이 0444 로 남아 있으면(원본이 그 시점에
+        # 읽기 전용이었다면) copy2 의 open(dst, "wb") 이 EACCES 로 터진다 —
+        # 백업은 매번 최신 원본을 가리키면 되므로 먼저 지운다(#7 리뷰 5).
+        fsio.unlink_quiet(backup)
+        shutil.copy2(config_path, backup)  # 권한 비트도 원본과 같게
+    try:
+        text = json.dumps(updated, indent=2, ensure_ascii=False) + "\n"
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(updated, indent=2, ensure_ascii=True) + "\n"
+    fsio.replace_preserving(config_path, text)
+    return True
+
+
+def strip(config_path: str) -> bool:
+    """`config_path` 의 hooks.SessionStart 에서 omhc 자신의 훅만 제거한다.
+    바뀐 게 있으면 True, 없으면(원래 omhc 훅이 없었다) False."""
+    original = _load(config_path)
+    updated = _strip_hooks(original)
+    return _write_if_changed(config_path, original, updated)
+
+
+def merge(config_path: str, fragment: Dict[str, list], home: str) -> bool:
+    """`config_path` 에 `fragment`(=`load_fragment()` 가 돌려주는 `hooks` 값)를
+    병합한다. 먼저 `strip` 해 중복을 막은 뒤 fragment 의 SessionStart 그룹을
+    이어 붙인다 — `hooks/*.json` 의 명령이 바뀌었을 때(예: `--wire sdk` →
+    `claude`) 옛 명령 옆에 새 명령이 덧붙어 brief 가 두 번 돌지 않게 한다.
+
+    이미 `inspect()` 가 PASS 하는 설치는 손대지 않는다 — 사람이 손으로
+    병합하면서 omhc 그룹 앞뒤에 자기 그룹을 두거나, omhc 훅에 `timeout`/
+    `matcher` 같은 필드를 얹거나, 순서를 바꿔도 여전히 유효한 설치일 수
+    있다. 여기서 다시 쓰면 구조가 재배치되고 그런 필드가 지워지며, 무엇보다
+    `hooks.json` 의 mtime 이 바뀐다 — omhc 의 codex hook 판정이 그 mtime 을
+    기준으로 삼아 "아직 판정 불가" 로 돌아가고, 내용이 바뀐 hooks.json 을
+    Codex 가 다시 신뢰하게 할 수도 있다(미검증). 이미 돌고 있는 설치를
+    재정렬만으로 그렇게 만들면 안 된다(#7 리뷰 3). `inspect()` 는 모든 SessionStart 그룹의 omhc
+    호출을 순서·개수·플래그까지 배포된 조각과 정확히 비교하므로, PASS 라면
+    중복 omhc 호출도 이미 없다는 뜻이다."""
+    ok, _detail = inspect(config_path, fragment, home)
+    if ok:
+        return False
+    original = _load(config_path)
+    updated = _strip_hooks(original)
+    frag_groups = fragment.get("SessionStart") or []
+    if frag_groups:
+        hooks = updated.setdefault("hooks", {})
+        hooks["SessionStart"] = list(hooks.get("SessionStart") or []) + copy.deepcopy(frag_groups)
+    return _write_if_changed(config_path, original, updated)

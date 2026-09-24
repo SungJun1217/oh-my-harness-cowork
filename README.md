@@ -199,15 +199,51 @@ ln -s "$PWD/bin/omhc" ~/.local/bin/omhc
 
 </details>
 
-Wire up the hooks by **merging** the fragment files into your own config
-(don't overwrite it). From a `curl \| sh` install they live under
-`~/.local/share/omhc/current/hooks/`; from a git checkout, under `hooks/`
-in the repo.
+Wire up the hooks with:
+
+```bash
+omhc hooks install
+```
+
+With no `--harness`, it targets every registered harness that's either
+already detected (`~/.claude/projects`, `~/.codex/sessions` exist) or whose
+config *directory* exists (`~/.claude`, `~/.codex`) — the latter covers the
+common case of installing before either harness has run a first session, so
+there's no `projects`/`sessions` directory yet. If neither exists for a
+harness (e.g. you haven't installed Codex at all), it isn't targeted by
+default; point at it explicitly with `omhc hooks install --harness
+claude-code` (or `--harness codex-cli`). If nothing at all is found, the
+command prints the registered harness ids and exits 1 instead of silently
+doing nothing.
+
+It merges the fragment into that harness's own config
+(`~/.claude/settings.json`, `~/.codex/hooks.json`) — it never overwrites the
+file, only strips any prior omhc hooks first so re-running (e.g. after a
+`hooks/*.json` change) doesn't duplicate them, and leaves an install that
+already passes (`omhc status`'s `<adapter-id> hooks` row is PASS) untouched
+even if it was hand-merged with extra fields or in a different group order.
+It's idempotent: a run with nothing to change writes nothing and makes no
+backup — the first change that does write also normalizes the file's JSON
+formatting (2-space indent). `omhc hooks uninstall [--harness ID]` removes
+only omhc's own `SessionStart` hooks the same way, structurally (parsed as
+argv, not `install.sh --uninstall`'s string regex — the two can diverge on
+unusual commands; see `omhc/hookconf.py`'s module comment for the measured
+cases). Either command backs up the config to `<file>.omhc-bak` first
+whenever it's about to change an existing file.
+
+<details>
+<summary>Merging the fragment files by hand instead</summary>
+
+They live under `~/.local/share/omhc/current/hooks/` (`curl \| sh` install)
+or `hooks/` in the repo (git checkout). Merge the fragment's `hooks` key into
+your own config — don't overwrite it.
 
 | Harness | File | Target |
 |---|---|---|
 | Claude Code | `claude-settings.fragment.json` | `hooks` in `~/.claude/settings.json` |
 | Codex CLI | `codex-hooks.json` | `~/.codex/hooks.json` |
+
+</details>
 
 > [!WARNING]
 > Measured (codex-cli 0.155.1): a hand-dropped `hooks.json` is **not trusted
@@ -451,5 +487,6 @@ committed). Generate them from real sessions on your own machine with
 | `omhc brief --harness X [--wire claude\|cursor\|sdk]` | Prints the handoff (called by the hook) |
 | `omhc clear` | Removes installed markers |
 | `omhc watch [--stop\|--once]` | Optional accelerator daemon (results are identical without it) |
+| `omhc hooks install\|uninstall [--harness ID]` | Merges/strips omhc's own `SessionStart` hooks (see Install) |
 
 </details>

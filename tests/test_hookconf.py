@@ -264,5 +264,257 @@ class TestHookconf(unittest.TestCase):
         self.assertIn("PATH", detail)
 
 
+class TestHookconfMergeStrip(unittest.TestCase):
+    """`hookconf.merge`/`strip` — `omhc hooks install|uninstall` 이 파일을
+    실제로 쓰는 부분. CLI 레벨의 출력·`--harness`·exit code 는
+    tests/test_hooks_cmd.py 가 맡는다."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.config_path = os.path.join(self._tmp.name, "settings.json")
+        self.fragment = hookconf.load_fragment("claude-settings.fragment.json")
+
+        self.home = os.path.join(self._tmp.name, "home")
+        os.makedirs(self.home)
+        self.bin_path = os.path.join(self.home, ".local", "bin", "omhc")
+        os.makedirs(os.path.dirname(self.bin_path), exist_ok=True)
+        with open(self.bin_path, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(self.bin_path, 0o755)
+
+    def _read(self):
+        with open(self.config_path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_merge_into_missing_file_creates_it(self):
+        self.assertFalse(os.path.exists(self.config_path))
+        changed = hookconf.merge(self.config_path, self.fragment, self.home)
+        self.assertTrue(changed)
+        self.assertEqual(self._read(), {"hooks": self.fragment})
+        self.assertFalse(os.path.exists(self.config_path + ".omhc-bak"))
+
+    def test_merge_twice_is_idempotent_no_backup_mtime_unchanged(self):
+        hookconf.merge(self.config_path, self.fragment, self.home)
+        before = os.stat(self.config_path).st_mtime_ns
+        changed = hookconf.merge(self.config_path, self.fragment, self.home)
+        self.assertFalse(changed)
+        self.assertEqual(os.stat(self.config_path).st_mtime_ns, before)
+        self.assertFalse(os.path.exists(self.config_path + ".omhc-bak"))
+
+    def test_merge_preserves_user_hooks_other_events_and_other_keys(self):
+        with open(self.config_path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "other_top_level_key": "keep me",
+                "hooks": {
+                    "Stop": [{"hooks": [{"type": "command", "command": "omhc done"}]}],
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "echo hello"}]},
+                    ],
+                },
+            }, fh)
+        changed = hookconf.merge(self.config_path, self.fragment, self.home)
+        self.assertTrue(changed)
+        conf = self._read()
+        self.assertEqual(conf["other_top_level_key"], "keep me")
+        self.assertEqual(conf["hooks"]["Stop"],
+                         [{"hooks": [{"type": "command", "command": "omhc done"}]}])
+        session_start = conf["hooks"]["SessionStart"]
+        self.assertEqual(session_start[0],
+                         {"hooks": [{"type": "command", "command": "echo hello"}]})
+        self.assertEqual(session_start[1], self.fragment["SessionStart"][0])
+
+    def test_backup_matches_original_bytes_and_mode(self):
+        original = json.dumps({"hooks": {}}, indent=2)
+        with open(self.config_path, "w", encoding="utf-8") as fh:
+            fh.write(original)
+        os.chmod(self.config_path, 0o640)
+        hookconf.merge(self.config_path, self.fragment, self.home)
+        backup = self.config_path + ".omhc-bak"
+        with open(backup, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), original)
+        self.assertEqual(stat.S_IMODE(os.stat(backup).st_mode), 0o640)
+        self.assertEqual(stat.S_IMODE(os.stat(self.config_path).st_mode), 0o640)
+
+    def test_symlinked_config_stays_a_symlink(self):
+        real = os.path.join(self._tmp.name, "real-settings.json")
+        with open(real, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {}}, fh)
+        link = os.path.join(self._tmp.name, "settings.json")
+        os.symlink(real, link)
+        hookconf.merge(link, self.fragment, self.home)
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(os.readlink(link), real)
+        with open(real, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"hooks": self.fragment})
+
+    def test_malformed_json_raises_and_touches_nothing(self):
+        with open(self.config_path, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        with self.assertRaises(hookconf.HookConfigError):
+            hookconf.merge(self.config_path, self.fragment, self.home)
+        with open(self.config_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "{not json")
+        self.assertFalse(os.path.exists(self.config_path + ".omhc-bak"))
+
+    # --- 리뷰 1라운드: merge 가 이미 PASS 하는 손 설치는 건드리지 않는다 -----
+
+    def _write(self, conf) -> None:
+        with open(self.config_path, "w", encoding="utf-8") as fh:
+            json.dump(conf, fh)
+
+    def test_merge_leaves_an_already_passing_install_untouched_omhc_group_first(self):
+        conf = {"hooks": {"SessionStart": [
+            self.fragment["SessionStart"][0],
+            {"hooks": [{"type": "command", "command": "echo user"}]},
+        ]}}
+        self._write(conf)
+        before = os.stat(self.config_path).st_mtime_ns
+        changed = hookconf.merge(self.config_path, self.fragment, self.home)
+        self.assertFalse(changed)
+        self.assertEqual(os.stat(self.config_path).st_mtime_ns, before)
+        self.assertFalse(os.path.exists(self.config_path + ".omhc-bak"))
+        self.assertEqual(self._read(), conf)
+
+    def test_merge_leaves_a_user_added_timeout_field_untouched(self):
+        omhc_group = json.loads(json.dumps(self.fragment["SessionStart"][0]))
+        for h in omhc_group["hooks"]:
+            h["timeout"] = 30
+        conf = {"hooks": {"SessionStart": [omhc_group]}}
+        self._write(conf)
+        before = os.stat(self.config_path).st_mtime_ns
+        changed = hookconf.merge(self.config_path, self.fragment, self.home)
+        self.assertFalse(changed)
+        self.assertEqual(os.stat(self.config_path).st_mtime_ns, before)
+        self.assertEqual(self._read(), conf)
+
+    def test_merge_leaves_a_matcher_group_untouched(self):
+        omhc_group = json.loads(json.dumps(self.fragment["SessionStart"][0]))
+        omhc_group["matcher"] = "*"
+        conf = {"hooks": {"SessionStart": [omhc_group]}}
+        self._write(conf)
+        before = os.stat(self.config_path).st_mtime_ns
+        changed = hookconf.merge(self.config_path, self.fragment, self.home)
+        self.assertFalse(changed)
+        self.assertEqual(os.stat(self.config_path).st_mtime_ns, before)
+        self.assertEqual(self._read(), conf)
+
+    def test_merge_still_rewrites_a_failing_install(self):
+        # 대조군: PASS 가 아니면(낡은 --wire) 여전히 다시 쓴다.
+        stale = json.loads(json.dumps(self.fragment))
+        stale["SessionStart"][0]["hooks"][1]["command"] = (
+            "$HOME/.local/bin/omhc brief --harness claude-code --wire sdk")
+        self._write({"hooks": stale})
+        changed = hookconf.merge(self.config_path, self.fragment, self.home)
+        self.assertTrue(changed)
+        ok, _detail = hookconf.inspect(self.config_path, self.fragment, self.home)
+        self.assertTrue(ok)
+
+    # --- 리뷰 1라운드: strip 이 손대지 않은 빈 그룹까지 지우면 안 된다 -----
+
+    def test_strip_leaves_a_preexisting_empty_session_start_array_untouched(self):
+        self._write({"hooks": {"SessionStart": []}})
+        before = os.stat(self.config_path).st_mtime_ns
+        changed = hookconf.strip(self.config_path)
+        self.assertFalse(changed)
+        self.assertEqual(os.stat(self.config_path).st_mtime_ns, before)
+        self.assertEqual(self._read(), {"hooks": {"SessionStart": []}})
+
+    def test_strip_leaves_a_preexisting_empty_group_untouched(self):
+        conf = {"hooks": {"SessionStart": [
+            {"hooks": []},
+            {"hooks": [{"type": "command", "command": "echo user"}]},
+        ]}}
+        self._write(conf)
+        before = os.stat(self.config_path).st_mtime_ns
+        changed = hookconf.strip(self.config_path)
+        self.assertFalse(changed)
+        self.assertEqual(os.stat(self.config_path).st_mtime_ns, before)
+        self.assertEqual(self._read(), conf)
+
+    # --- 리뷰 1라운드: 읽기 전용 설정 파일 ---------------------------------
+
+    def test_merge_refuses_a_read_only_config(self):
+        self._write({"hooks": {}})
+        os.chmod(self.config_path, 0o444)
+        try:
+            with self.assertRaises(hookconf.HookConfigError):
+                hookconf.merge(self.config_path, self.fragment, self.home)
+            with open(self.config_path, encoding="utf-8") as fh:
+                self.assertEqual(json.load(fh), {"hooks": {}})
+        finally:
+            os.chmod(self.config_path, 0o644)
+
+    def test_stale_read_only_backup_does_not_block_a_later_change(self):
+        self._write({"hooks": {}})
+        backup = self.config_path + ".omhc-bak"
+        with open(backup, "w", encoding="utf-8") as fh:
+            fh.write("stale")
+        os.chmod(backup, 0o444)
+        changed = hookconf.merge(self.config_path, self.fragment, self.home)
+        self.assertTrue(changed)
+        with open(backup, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"hooks": {}})
+
+    def test_non_utf8_raises_and_touches_nothing(self):
+        with open(self.config_path, "wb") as fh:
+            fh.write(b"\xff\xfe\x00{not utf-8")
+        with self.assertRaises(hookconf.HookConfigError):
+            hookconf.strip(self.config_path)
+        with open(self.config_path, "rb") as fh:
+            self.assertEqual(fh.read(), b"\xff\xfe\x00{not utf-8")
+
+    def test_malformed_shape_raises_and_touches_nothing(self):
+        with open(self.config_path, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": "not-a-list"}}, fh)
+        with self.assertRaises(hookconf.HookConfigError):
+            hookconf.strip(self.config_path)
+
+    def test_strip_removes_only_omhc_hooks(self):
+        with open(self.config_path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "hooks": {
+                    "Stop": [{"hooks": [{"type": "command", "command": "omhc done"}]}],
+                    "SessionStart": [
+                        {"hooks": [
+                            {"type": "command", "command": "echo hello"},
+                            self.fragment["SessionStart"][0]["hooks"][0],
+                            self.fragment["SessionStart"][0]["hooks"][1],
+                        ]},
+                    ],
+                },
+            }, fh)
+        changed = hookconf.strip(self.config_path)
+        self.assertTrue(changed)
+        conf = self._read()
+        self.assertEqual(conf["hooks"]["SessionStart"],
+                         [{"hooks": [{"type": "command", "command": "echo hello"}]}])
+        self.assertEqual(conf["hooks"]["Stop"],
+                         [{"hooks": [{"type": "command", "command": "omhc done"}]}])
+
+    def test_strip_drops_empty_group_and_key(self):
+        with open(self.config_path, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": self.fragment}, fh)
+        changed = hookconf.strip(self.config_path)
+        self.assertTrue(changed)
+        conf = self._read()
+        self.assertNotIn("SessionStart", conf["hooks"])
+
+    def test_strip_twice_second_time_nothing_to_remove(self):
+        with open(self.config_path, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": self.fragment}, fh)
+        hookconf.strip(self.config_path)
+        before = os.stat(self.config_path).st_mtime_ns
+        changed = hookconf.strip(self.config_path)
+        self.assertFalse(changed)
+        self.assertEqual(os.stat(self.config_path).st_mtime_ns, before)
+
+    def test_strip_on_missing_file_is_a_noop(self):
+        self.assertFalse(os.path.exists(self.config_path))
+        changed = hookconf.strip(self.config_path)
+        self.assertFalse(changed)
+        self.assertFalse(os.path.exists(self.config_path))
+
+
 if __name__ == "__main__":
     unittest.main()
