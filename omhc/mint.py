@@ -309,7 +309,8 @@ def mint(
         if len(unresolved) > _FAIL_MAX:
             bits.append("+{} fail".format(len(unresolved) - _FAIL_MAX))
         if hidden_events > 0:
-            bits.append("{} events hidden".format(hidden_events))
+            bits.append("{} event{} hidden".format(
+                hidden_events, "" if hidden_events == 1 else "s"))
         return ", ".join(bits)
 
     active = list(slots)

@@ -275,6 +275,15 @@ class TestDisclosure(unittest.TestCase):
         out = mint.mint(read_of(events), to_adapter_id="claude-code", now=NOW)
         self.assertIn("hidden", " ".join(slots_of(out)["MORE"]))
 
+    def test_more_uses_singular_for_exactly_one_hidden_event(self):
+        """#15b: "1 events hidden" 은 어색하다 — 복수는 1개일 때 안 쓴다."""
+        events = [ev(1, text="목표"),
+                  ev(2, author="agent", verb="ran", arg="pytest")]
+        out = mint.mint(read_of(events), to_adapter_id="claude-code", now=NOW)
+        more = " ".join(slots_of(out)["MORE"])
+        self.assertIn("1 event hidden", more)
+        self.assertNotIn("events hidden", more)
+
     def test_more_reports_dropped_slots(self):
         events = [ev(1, text="목표")] + [
             ev(i, text="사람의 말 {} ".format(i) * 5) for i in range(2, 12)

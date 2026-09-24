@@ -310,8 +310,8 @@ this layout.
 | Command | Role |
 |---|---|
 | `omhc status [--json]` | The one human dashboard. Includes archive lag (`lag_bytes`, `tail=…B`) and pull rate |
-| `omhc log [--last N] [--grep P] [--verb V] [--file P]` | Indexed events, one per line |
-| `omhc show <E1\|#137> [--full]` | **Looks up the original bytes by offset** (tier (b) entry point) |
+| `omhc log [--last N] [--grep P] [--verb V] [--file P]` | Indexed events, one per line. Each line starts with a `<session>#N` ref you can paste straight into `show` |
+| `omhc show <E1\|#137\|abcdef01#137> [--full]` | **Looks up the original bytes by offset** (tier (b) entry point). Bare `#N` resolves against the most recently delivered session (same rule `log`'s pull accounting uses); `<prefix>#N` names the session explicitly — an ambiguous prefix lists the candidates |
 | `omhc note "<text>"` | Leave a note. Either harness's agent can call it from the plain command line |
 
 **Pull rate** ("pulled X of N injections") is the one number for judging
