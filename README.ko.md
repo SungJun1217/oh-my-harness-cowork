@@ -155,8 +155,32 @@ omhc status          # 게이트된 검사 5개(+ 설치 시 codex hook) 전부 
 
 최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
 심링크합니다. pip·pipx 를 쓰지 않습니다(의존성이 0 이라 소스 트리가 곧
-설치물입니다). 다시 실행하면 업데이트, 버전 고정은 `| OMHC_VERSION=v0.1.0 sh`,
-제거는 `rm -rf ~/.local/share/omhc ~/.local/bin/omhc`.
+설치물입니다). 다시 실행하면 업데이트(`~/.local/share/omhc` 아래 구버전은
+`current` 가 가리키는 것만 남기고 자동 정리됩니다), 버전 고정은
+`| OMHC_VERSION=v0.1.0 sh`.
+
+제거는:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh -s -- --uninstall
+```
+
+omhc 자신의 `SessionStart` 훅만 `~/.claude/settings.json` 과
+`~/.codex/hooks.json` 에서 제거합니다 — 같은 파일, 심지어 같은 훅 그룹
+안의 다른 훅도 그대로 남습니다; JSON 은 재직렬화(2칸 들여쓰기)만 됩니다.
+먼저 `<파일>.omhc-bak` 백업을 만듭니다. 이어서 `~/.local/bin/omhc` 와
+`~/.local/share/omhc` 를 지웁니다. `~/.omhc`(아카이브·원장)는 남겨둡니다 —
+이것까지 지우려면 `OMHC_PURGE=1`(파이프로도 가능:
+`curl -fsSL .../install.sh | OMHC_PURGE=1 sh -s -- --uninstall`). 아무것도
+설치되지 않았을 때도, 두 번 실행해도 안전합니다.
+
+손대지 않는 것들:
+- **Codex 훅 신뢰.** 신뢰 항목은 그룹/훅 인덱스로 키가 매겨져서, omhc 의
+  그룹을 지우면 그 외 Codex `SessionStart` 훅들의 인덱스가 밀릴 수
+  있습니다 — 제거 후 Codex 자신의 신뢰 절차로 다시 승인해야 할 수 있습니다.
+- **레포별 잔여물.** 레포의 `AGENTS.md` 안 omhc 관리 구간과
+  `<레포>/.omhc/outbox/`. 이것도 정리하려면 제거하기 *전에* 각 레포에서
+  `omhc clear` 를 실행하십시오.
 
 <details>
 <summary>git 체크아웃에서 직접 쓰려면</summary>
@@ -169,12 +193,14 @@ ln -s "$PWD/bin/omhc" ~/.local/bin/omhc
 
 </details>
 
-훅 배선은 `hooks/` 의 파일을 각자 설정에 **병합**하십시오(덮어쓰지 말 것).
+훅 배선은 조각 파일을 각자 설정에 **병합**하십시오(덮어쓰지 말 것).
+`curl \| sh` 로 설치했다면 `~/.local/share/omhc/current/hooks/` 아래,
+git 체크아웃이라면 레포의 `hooks/` 아래에 있습니다.
 
 | 하네스 | 파일 | 대상 |
 |---|---|---|
-| Claude Code | `hooks/claude-settings.fragment.json` | `~/.claude/settings.json` 의 `hooks` |
-| Codex CLI | `hooks/codex-hooks.json` | `~/.codex/hooks.json` |
+| Claude Code | `claude-settings.fragment.json` | `~/.claude/settings.json` 의 `hooks` |
+| Codex CLI | `codex-hooks.json` | `~/.codex/hooks.json` |
 
 > [!WARNING]
 > 실측(codex-cli 0.155.1): 손으로 떨어뜨린 `hooks.json`은 기본적으로
