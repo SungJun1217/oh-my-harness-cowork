@@ -254,6 +254,11 @@ outbox 가 대신 받는 게 아니라 Codex 쪽 `brief` 호출 자체가 없어
 | `omhc show <E1\|#137> [--full]` | **원본 바이트를 오프셋으로 조회** (tier (b) 진입점) |
 | `omhc note "<text>"` | 메모. 두 하네스의 에이전트가 맨 명령줄로 호출 가능 |
 
+**인출률**("pulled X of N injections")은 omhc 의 부담이 값을 하는지 판단할
+유일한 숫자입니다. N 은 전달된 세션 수, X 는 그중 `omhc show`나 `omhc log`로
+실제로 파본 세션 수입니다(같은 세션을 여러 번 파봐도 한 번만 셉니다) — 사람이
+손으로 `omhc log`를 돌려도 셈에 들어갑니다, 에이전트뿐 아니라.
+
 끄기: `OMHC_OFF=1` 또는 `~/.omhc/<repo-key>/off` 파일.
 
 기본적으로 헤드리스 세션(`claude -p`, `codex exec`, 앱서버 클라이언트)과 Codex

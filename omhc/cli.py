@@ -190,6 +190,35 @@ def cmd_note(args, *, home=None, out=sys.stdout) -> int:
     return 0
 
 
+# --- pull rate ---------------------------------------------------------------
+
+
+def _record_pull(key: str, state: str, via: str, home, session: Optional[str] = None,
+                 tag: Optional[str] = None) -> None:
+    """`show`/`log` 로 산출물을 인출했다는 행을 원장에 남긴다. §9 인출률 회계.
+
+    `harness` 키를 절대 넣지 않는다 — due() 는 event=="start" 만 보고,
+    backfill 은 harness+start 로 own_rows 를 거르고, codex health() 도
+    event=="start" 만 "훅이 돌았다"는 증거로 센다. 이 세 곳 중 어디에도
+    pull 행이 섞여 들면 안 된다. 실패는 show/log 의 결과에 영향을 주면
+    안 되므로 통째로 삼킨다(훅 경로는 아니지만 fail-open 을 유지한다).
+
+    show 는 실제로 읽은 세션을 넘긴다. `#N` 은 옛 세션의 색인에 떨어질 수 있어
+    "가장 최근 전달" 로 두면 보지 않은 세션의 인출률이 오른다. 대상이 하나로
+    정해지지 않는 log 만 가장 최근 전달 세션(delivered.tsv 마지막 줄)에 돌린다."""
+    try:
+        session = session or due.last_delivered(state)
+        if not session:
+            return
+        row = {"repo": key, "event": "pull", "via": via, "session": session,
+               "epoch": round(time.time(), 0)}
+        if tag:
+            row["tag"] = tag
+        ledger.append(row, home=home)
+    except Exception:
+        pass
+
+
 # --- log --------------------------------------------------------------------
 
 
@@ -203,7 +232,8 @@ def _index_files(state: str) -> List[str]:
 
 
 def cmd_log(args, *, home=None, out=sys.stdout) -> int:
-    _root, _key, state = _state_for(home)
+    _root, key, state = _state_for(home)
+    _record_pull(key, state, "log", home)
     rows = []
     for path in _index_files(state):
         session = os.path.basename(path)[: -len(".idx")]
@@ -247,7 +277,7 @@ def _pinned_path(state: str, session_id: str, fallback: str) -> str:
 
 
 def cmd_show(args, *, home=None, out=sys.stdout) -> int:
-    _root, _key, state = _state_for(home)
+    _root, key, state = _state_for(home)
     target = args.target.strip()
     refs = index.read_refs(state)
 
@@ -280,6 +310,7 @@ def cmd_show(args, *, home=None, out=sys.stdout) -> int:
     out.write(raw.decode("utf-8", "replace"))
     if not raw.endswith(b"\n"):
         out.write("\n")
+    _record_pull(key, state, "show", home, session=entry["session_id"], tag=target)
     return 0
 
 
@@ -314,12 +345,24 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     # 바뀔 때 한쪽만 고쳐진다.
     lag_rows = watch.lag(state)
 
-    pulls = len([r for r in rows if r.get("event") == "pull"])
+    # X = 최소 한 번 인출된 "전달받은 세션"의 수(중복 제거), N = 전달 횟수.
+    # 같은 세션을 두 번 show 해도 X 는 한 번만 세고, injections 는 delivered.tsv
+    # 줄 수 그대로 둔다(§9 "pulled X of N injections" — N 은 전달 횟수다).
+    pull_sessions = {r.get("session") for r in rows
+                      if r.get("event") == "pull" and r.get("session")}
     injections = 0
+    delivered_sessions = set()
     delivered = os.path.join(state, due.DELIVERED_NAME)
     if os.path.exists(delivered):
         with open(delivered, encoding="utf-8", errors="replace") as fh:
-            injections = len([line for line in fh if line.strip()])
+            for line in fh:
+                if not line.strip():
+                    continue
+                injections += 1
+                session = line.split("\t", 1)[0]
+                if session:
+                    delivered_sessions.add(session)
+    pulls = len(delivered_sessions & pull_sessions)
 
     # AGENTS.md 가 CLAUDE.md 와 공유되면 Codex Path B 는 절대 쓰면 안 된다 —
     # 그 파일을 공유 배선 만들기 *전에* 심어 둔 낡은 관리 구간만 실패 사유다.

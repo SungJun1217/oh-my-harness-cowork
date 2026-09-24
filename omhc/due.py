@@ -56,6 +56,20 @@ def already_delivered(state_dir: str, session_id: str, to_harness: str) -> bool:
     return False
 
 
+def last_delivered(state_dir: str) -> Optional[str]:
+    """이 레포에 가장 최근 전달된 세션 id — delivered.tsv 의 마지막 줄. append
+    순서를 쓴다(invariant 6, 타임스탬프 아님). 아무것도 전달된 적 없으면 None."""
+    try:
+        with open(_delivered_path(state_dir), encoding="utf-8", errors="replace") as fh:
+            lines = [line for line in fh if line.strip()]
+    except OSError:
+        return None
+    if not lines:
+        return None
+    parts = lines[-1].rstrip("\n").split("\t")
+    return parts[0] if parts and parts[0] else None
+
+
 def mark_delivered(state_dir: str, watermark, *, to_harness: str, epoch: float) -> None:
     """이 세션을 이 하네스에 전달했다고 기록한다. 같은 것을 두 번 밀지 않기 위함."""
     if watermark is None:

@@ -264,6 +264,12 @@ this layout.
 | `omhc show <E1\|#137> [--full]` | **Looks up the original bytes by offset** (tier (b) entry point) |
 | `omhc note "<text>"` | Leave a note. Either harness's agent can call it from the plain command line |
 
+**Pull rate** ("pulled X of N injections") is the one number for judging
+whether omhc's overhead is worth it: X is how many of the N delivered
+sessions were actually dug into via `omhc show` or `omhc log` (each session
+counts once, no matter how many times it's pulled) — a human running
+`omhc log` by hand counts too, not just an agent.
+
 Turn it off: `OMHC_OFF=1`, or an `~/.omhc/<repo-key>/off` file.
 
 By default, headless sessions (`claude -p`, `codex exec`, app-server clients) and
