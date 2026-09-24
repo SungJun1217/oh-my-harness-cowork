@@ -149,6 +149,32 @@ class TestStatusRows(unittest.TestCase):
         self.assertIsNone(labels["off switch"])
         self.assertEqual(labels["adapters"], "pass")
 
+    def test_pull_rate_counts_distinct_delivered_sessions_not_pull_rows(self):
+        os.makedirs(self.t.state, exist_ok=True)
+        with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",
+                  encoding="utf-8") as fh:
+            fh.write("s1\tclaude-code\tcodex-cli\t1700000000\n")
+            fh.write("s2\tclaude-code\tcodex-cli\t1700000001\n")
+        from omhc import ledger
+
+        # s1 을 세 번 show 해도 (via 는 show/log 무관) 한 번만 센다. s3 은
+        # delivered.tsv 에 없는 세션이라 X 를 늘리면 안 된다.
+        for _ in range(3):
+            ledger.append({"repo": self.t.key, "event": "pull", "via": "show",
+                           "session": "s1", "epoch": 1700000002},
+                          home=self.t.home)
+        ledger.append({"repo": self.t.key, "event": "pull", "via": "log",
+                       "session": "s3", "epoch": 1700000003}, home=self.t.home)
+
+        code, text = self.run_status()
+        word, detail = _find_row(text, "pull rate")
+        self.assertEqual(word, "----")
+        self.assertIn("pulled 1 of 2 injections", detail)
+
+        code_json, payload = self.run_status_json()
+        self.assertEqual(payload["pulls"], 1)
+        self.assertEqual(payload["injections"], 2)
+
     def test_health_row_with_ok_none_is_uninformative_and_never_gates(self):
         fake = mock.Mock()
         fake.health.return_value = (("custom diag", None, "not judgeable yet"),)
