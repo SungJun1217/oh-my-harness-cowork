@@ -150,11 +150,26 @@ warning under Install).
 ## Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
+omhc status          # 5 gated checks, all PASS/FAIL. No SKIP
+```
+
+This unpacks the latest release into `~/.local/share/omhc/<version>` and
+symlinks `~/.local/bin/omhc` — no pip, no pipx (zero dependencies, so the
+source tree *is* the install). Re-run to update; pin a version with
+`| OMHC_VERSION=v0.1.0 sh`; uninstall with
+`rm -rf ~/.local/share/omhc ~/.local/bin/omhc`.
+
+<details>
+<summary>From a git checkout instead</summary>
+
+```bash
 git clone git@github.com:SungJun1217/oh-my-harness-cowork.git
 cd oh-my-harness-cowork
 ln -s "$PWD/bin/omhc" ~/.local/bin/omhc
-omhc status          # 5 gated checks, all PASS/FAIL. No SKIP
 ```
+
+</details>
 
 Wire up the hooks by **merging** the files under `hooks/` into your own
 config (don't overwrite it).
