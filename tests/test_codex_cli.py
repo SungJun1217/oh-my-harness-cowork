@@ -357,8 +357,9 @@ class TestLegacyToolCallShapes(unittest.TestCase):
 
 
 class TestCommandExecutionBenignExitOne(unittest.TestCase):
-    """era B: parsed_cmd 가 전부 읽기이고 출력도 비면 exit 1 은 관용구다(실측 2건).
-    검증용 grep -q 는 보통 parsed_cmd 가 unknown 이라 여기 안 걸린다."""
+    """era B: parsed_cmd 가 전부 읽기이고 출력도 비면 exit 1 은 관용구다(실측 3건).
+    검증용 grep -q 는 보통 parsed_cmd 가 unknown 이라 여기 안 걸린다. 더 넓히지
+    않는 이유는 _item_fact 의 주석(#11)."""
 
     def _read(self, item):
         rows = [{"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
@@ -383,6 +384,30 @@ class TestCommandExecutionBenignExitOne(unittest.TestCase):
     def test_unknown_kind_with_exit_1_is_still_a_failure(self):
         read = self._read(self._ce(1, [{"type": "unknown", "cmd": "grep -q foo ."}]))
         self.assertEqual([(e.verb, e.ok) for e in read.events], [("ran", False)])
+
+    def test_several_inspect_entries_with_empty_output_are_ok(self):
+        # rg … && sed … && sed … 처럼 전부 읽기이고 출력이 없으면 관용구다.
+        read = self._read(self._ce(1, [{"type": "search", "cmd": "rg foo"},
+                                       {"type": "read", "cmd": "sed -n 1p a"},
+                                       {"type": "read", "cmd": "sed -n 1p b"}]))
+        self.assertEqual([e.ok for e in read.events], [True])
+
+    def test_missing_file_before_a_search_stays_a_failure(self):
+        # sed P && rg … — && 가 끊겨 sed 의 실패가 종료 코드다. 출력이 있으니 실패.
+        read = self._read(self._ce(
+            1, [{"type": "read", "cmd": "sed -n 1p missing"},
+                {"type": "search", "cmd": "rg foo"}],
+            stdout="sed: missing: No such file or directory"))
+        self.assertEqual([e.ok for e in read.events], [False])
+
+    def test_list_then_search_with_output_stays_a_failure(self):
+        # ls -la; rg --files -g … — ls 의 출력이 있어 무해한지 구조만으로는 가를 수
+        # 없다. 알면서 두는 누락이다(#11).
+        read = self._read(self._ce(
+            1, [{"type": "list_files", "cmd": "ls -la"},
+                {"type": "list_files", "cmd": "rg --files -g x"}],
+            stdout="total 0\ndrwxr-xr-x  2 u  g  64 .\n"))
+        self.assertEqual([e.ok for e in read.events], [False])
 
     def test_search_with_non_empty_output_and_exit_1_is_still_a_failure(self):
         read = self._read(self._ce(
