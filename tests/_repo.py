@@ -276,6 +276,36 @@ def append_codex_turn(path: str, ordinal: int = 90) -> None:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def plant_hook_install(home: str, adapter_id: str) -> None:
+    """임시 홈에 `adapter_id` 의 SessionStart 훅을 실제 배포 조각 그대로 심는다.
+
+    `omhc status` 가 hookconf 로 새로 판정하는 `<adapter-id> hooks` 행을 이
+    유닛의 관심사가 아닌 테스트에서 PASS 로 고정하는 용도다 — 바이너리
+    실행 가능 검사까지 통과하도록 `$HOME/.local/bin/omhc` 자리에도 더미
+    실행 파일을 둔다.
+    """
+    from omhc import hookconf
+
+    fragment_name = {
+        "claude-code": "claude-settings.fragment.json",
+        "codex-cli": "codex-hooks.json",
+    }[adapter_id]
+    config_path = {
+        "claude-code": os.path.join(home, ".claude", "settings.json"),
+        "codex-cli": os.path.join(home, ".codex", "hooks.json"),
+    }[adapter_id]
+    fragment = hookconf.load_fragment(fragment_name)
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w", encoding="utf-8") as fh:
+        json.dump({"hooks": fragment}, fh)
+
+    bin_path = os.path.join(home, ".local", "bin", "omhc")
+    os.makedirs(os.path.dirname(bin_path), exist_ok=True)
+    with open(bin_path, "w", encoding="utf-8") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")
+    os.chmod(bin_path, 0o755)
+
+
 class TempRepo:
     """임시 홈 + git 레포 한 쌍. setUp 네 곳에 복제돼 있던 것.
 

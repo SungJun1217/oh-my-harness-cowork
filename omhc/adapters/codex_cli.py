@@ -7,7 +7,7 @@ import re
 import time
 from typing import Dict, List, Optional, Tuple
 
-from .. import fsio, guard, locate
+from .. import fsio, guard, hookconf, locate
 from ..adapter import (
     Capability,
     HandoffBundle,
@@ -703,6 +703,16 @@ class CodexCliAdapter:
     def hooks_path(self) -> str:
         return os.path.join(self.home, ".codex", "hooks.json")
 
+    def hook_config(self):
+        return hookconf.HookConfig(
+            config_path=self.hooks_path(),
+            fragment_name="codex-hooks.json",
+            post_write_note=(
+                "codex-cli 0.155.1 실측: 손으로 놓인 hooks.json 은 기본적으로 신뢰되지 "
+                "않는다 — Codex 자체의 훅 신뢰 절차로 한 번 승인해야 실제로 돈다."
+            ),
+        )
+
     def hook_is_installed(self) -> bool:
         """omhc 를 부르는 SessionStart 훅이 설치돼 있는가.
 
@@ -788,7 +798,8 @@ class CodexCliAdapter:
         try:
             if not self.hook_is_installed():
                 # 훅을 설치한 적 없는 사용자에게 매번 행을 보여주는 건 소음이다
-                # — "설치 안 됨" 은 기존 "adapters" 행이 이미 말해준다.
+                # — "설치 안 됨" 은 이제 `<adapter-id> hooks` 행(hookconf 기반,
+                # cmd_status)이 이미 말해준다.
                 return ()
             hooks_path = self.hooks_path()
             try:

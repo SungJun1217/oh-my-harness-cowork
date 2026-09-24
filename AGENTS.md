@@ -47,7 +47,7 @@ Entry: `bin/omhc` → `omhc/cli.py` (subcommands `mark`, `brief`, `note`, `log`,
 5. Archive: `pin.py` hardlinks (`os.link`) the original session file into `~/.omhc/<repo-key>/`, and `index.py` appends a ~115 B/event TSV offset index. The archive *is* the original bytes; `omhc show E1` reads them back by offset.
 6. `deliver.deliver()` routes: adapter's `install_handoff` → adapter's `fallback_channels` (Codex: `AGENTS.md` managed block via `agents_md.py`/`managed_block.py`) → universal floor `<repo>/.omhc/outbox/`. The router has no vendor strings.
 
-State lives in `~/.omhc/<repo-key>/` (`locate.py`); `fsio.py` owns atomic writes/appends. `watch.py` is an optional accelerator daemon; correctness never depends on it.
+State lives in `~/.omhc/<repo-key>/` (`locate.py`); `fsio.py` owns atomic writes/appends. `watch.py` is an optional accelerator daemon; correctness never depends on it. `hookconf.py` owns the shared `hooks.<Event>[].hooks[].command` schema both harnesses' SessionStart fragments use, so `cmd_status`'s `<adapter-id> hooks` row and `omhc hooks install` judge installs the same way without vendor names in the core.
 
 **Adapters** (`omhc/adapter.py` contract, `omhc/adapters/`): a new harness = one file implementing `detect`, `list_sessions`, `read_session`, `native_resume_hint`, `install_handoff` with `@_register`, one import line in `adapters/__init__.py`, one fixture. No core changes — needing one is a contract defect. `tests/conformance/test_suite.py` parameterizes 22 invariants over the registry, so every adapter gets them automatically. Read-only adapters are a normal state.
 
