@@ -42,6 +42,17 @@ def _state_for(home: Optional[str], start: Optional[str] = None):
 # 쪽 훅이 멀쩡히 돌아도 Codex→Claude 가 죽는다. 그래서 **Claude 의** mark 가
 # 얹혀서 다른 하네스(Codex)의 세션을 원장에 채운다 — due() 자체는 안 바뀐다.
 BACKFILL_CAP = 5
+# #22: cap 을 넘는 초과분과, discover() 의 시간 예산에 밀려 못 본 나머지는
+# 이후 어떤 mark 도 다시 채우지 않는다 — 다음 호출의 newest_start 가 이미
+# 이번에 고른 것 중 가장 최근 것이라 그보다 오래된 미채움 세션은 "원장의
+# 최신 start 보다 오래됨" 판정에 영영 걸린다. 그런데도 무해한 건 두 가지가
+# 겹쳐서다: due() 는 가장 최근 자격 있는 외래 세션 하나만 보면 되고,
+# discover() 는 brief 의 eligible(#21)과 **같은** 헤드리스 필터
+# (allow_headless())를 쓴다 — 그래서 보통 discover() 가 채우는 것과 due() 가
+# 원하는 것이 같은 집합이다. 유일하게 깨지는 경우는 mark 시점과 이후 brief
+# 시점 사이에 OMHC_ALLOW_HEADLESS 가 달라지는 것뿐이다(그러면 그 사이에 생긴
+# 대화형 세션이 헤드리스 더미 뒤에 있다가 채워지지 않은 채로 cap 에 밀릴 수
+# 있다) — 흔치 않은 설정 변경이라 v1 에서는 감수한다.
 # 훅 예산(150ms) 의 일부만 쓴다. 비싼 부분은 discover() 자체(Codex 는 날짜
 # 디렉터리 스캔)이므로 이 deadline 을 discover() 에도 그대로 넘겨 어댑터가
 # 스스로 스캔을 끊게 한다 — 여기서만 재고 있으면 discover() 호출 자체가
@@ -81,11 +92,18 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
         # 먼저 자격 있는 것만 걸러 **전체를 놓고** 정렬한다 — 오래된 것부터
         # 자르면(리뷰 결함) 8개 중 5개가 죄다 옛것이 되어 due() 가 최신 대신
         # 4번째로 최신인 세션을 돌려준다. 최신 N개를 골라야 한다.
+        #
+        # "이미 아는 세션"은 **id 로만** 거른다(known_sessions) — epoch 로
+        # 거르지 않는다. session_meta.timestamp 는 초 단위라 같은 초에 시작한
+        # 서로 다른 두 세션이 있을 수 있고, 그걸 epoch 로 판정했다면(#22,
+        # 반개구간 <=) id 가 다른데도 하나가 죽는다. 그래서 진짜 새 것인지는
+        # newest_start 와 **엄격히** 비교하고(<), 이미 원장에 있는지는 id 로
+        # 따로 본다.
         eligible = []
         for ref in refs:
             if not ref.session_id or ref.session_id in known_sessions:
                 continue
-            if ref.epoch <= newest_start:
+            if ref.epoch < newest_start:
                 continue
             if now and (now - ref.epoch) > due.MAX_AGE_SECONDS:
                 continue
@@ -112,6 +130,13 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
                 "cwd": root,
                 # health() 가 이 값을 보고 "훅이 실제로 돌았다" 는 증거에서 뺀다
                 # (codex_cli.py) — 백필이 신뢰 없는 훅을 가려버리면 안 된다.
+                #
+                # #22: 이 세션들은 실제 시작 시각이 이 mark 자신의 시작 행보다
+                # 앞서더라도 원장에는 이 행 **뒤에** 붙는다(mark 는 자기 행부터
+                # 적고 백필은 그다음이라). due() 는 하네스별로 원장을 훑으므로
+                # (harness == my_harness 인 행은 건너뜀) 무해하다 — 영향은
+                # 같은 하네스 내부의 append 순서뿐인데, 여기서 붙이는 건
+                # 다른 하네스 행이다.
                 "via": "scan",
             }
             ledger.append(row, home=home)

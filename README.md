@@ -424,11 +424,29 @@ committed). Generate them from real sessions on your own machine with
   anything already ledgered for that harness in this repo, up to 5 sessions
   per `mark` call. `omhc status`'s `codex hook` row ignores those `scan` rows
   on purpose — counting them would hide the fact that the hook itself never
-  ran. **Known gap (unverified):** `codex resume` of an old rollout keeps
-  that rollout's original start timestamp, so a resumed old session can be
-  missed by the "must be newer" check — and separately, if that original
-  start is older than 7 days (`due.MAX_AGE_SECONDS`), the backfill's own age
-  check skips it too, resumed or not.
+  ran. **Known gap (#22, harmless in the default config):** sessions beyond
+  those 5 (or beyond `discover()`'s own hook-path time budget) are never
+  backfilled later either — the next `mark` call's watermark is already the
+  newest one just picked, so anything older permanently fails the "newer
+  than what's ledgered" check. This is harmless because `due()` only ever
+  needs the single newest *eligible* foreign session, and `discover()`
+  applies the same headless filter (`allow_headless()`) that `brief`'s
+  eligibility check does — so what gets backfilled and what `due()` wants
+  are normally the same set. It only breaks if `OMHC_ALLOW_HEADLESS` differs
+  between the `mark` that ran the backfill and the later `brief` call: an
+  interactive session sitting behind more than 5 newer headless ones could
+  then be missing from the ledger entirely. Not fixed — an uncommon
+  configuration change to hit in practice. **Known gap (partially
+  verified):** `session_meta.timestamp` is read once from a rollout's first
+  line and never updated. Measured on a real machine: a session's rollout
+  file can carry activity spanning days (80h between its first and last
+  record in one case) while keeping that one first-line timestamp — so a
+  long-lived or resumed session can look no newer than a backfill that
+  already ran against it, and separately, if that original start is older
+  than 7 days (`due.MAX_AGE_SECONDS`), the backfill's own age check skips it
+  too. A correct fix needs an ordering source other than session-start epoch
+  (e.g. last-record timestamp or file mtime), which invariant 6 rules out —
+  not fixed.
 
   </details>
 
