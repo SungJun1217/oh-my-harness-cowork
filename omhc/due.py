@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import collections
 import os
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from . import fsio, ledger, locate
 
@@ -68,6 +68,26 @@ def last_delivered(state_dir: str) -> Optional[str]:
         return None
     parts = lines[-1].rstrip("\n").split("\t")
     return parts[0] if parts and parts[0] else None
+
+
+def delivered_order(state_dir: str) -> List[str]:
+    """이 레포에 전달된 세션 id 들 — delivered.tsv 에서 **마지막으로** 나온 순서.
+    append 순서를 쓴다(invariant 6). `omhc log` 의 세션 정렬 근거다(#18 리뷰).
+
+    마지막 등장 기준이어야 last_delivered() 와 맞는다 — 한 세션이 두 번째 대상에
+    다시 전달되면 그때 색인도 자라므로, 첫 등장 자리에 두면 log 의 끝이 `show` 의
+    기본 세션과 어긋나고 `--last N` 이 그 세션의 새 줄을 떨어뜨린다."""
+    try:
+        with open(_delivered_path(state_dir), encoding="utf-8", errors="replace") as fh:
+            lines = [line for line in fh if line.strip()]
+    except OSError:
+        return []
+    last = {}
+    for pos, line in enumerate(lines):
+        parts = line.rstrip("\n").split("\t")
+        if parts and parts[0]:
+            last[parts[0]] = pos
+    return sorted(last, key=last.get)
 
 
 def mark_delivered(state_dir: str, watermark, *, to_harness: str, epoch: float) -> None:
