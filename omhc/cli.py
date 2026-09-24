@@ -177,6 +177,16 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     # rollout 이 없으면 영구히 비대화형으로 적힐 수 있었다. 판정은 brief 시점에
     # 어댑터가 실제 파일을 보고 내린다(brief.compute 가 due 에 넘기는 eligible).
     ledger.append(row, home=home)
+    # SessionStart 의 `source` 어휘는 Claude Code 와 Codex 가 공유한다(둘 다
+    # 실측). "resume" 은 같은 세션에 새 턴이 이어붙었다는 뜻이다 — 그 세션이
+    # 이미 다른 하네스에 전달됐었다면 due() 가 already_delivered() 에서 멈춰
+    # resumed 턴을 영영 못 내보낸다(#22). "compact" 는 같은 신호를 주지 않는다
+    # — 컨텍스트만 압축했을 뿐 사람의 새 턴이 없으므로 재전달할 것이 없다.
+    if session and str(payload.get("source") or "") == "resume":
+        try:
+            due.mark_reopened(state, session, args.harness, row["epoch"])
+        except Exception:
+            pass
     # 다른 하네스의 세션을 원장에 백필한다(위 주석). 훅 경로이므로 실패해도
     # mark 자체는 항상 exit 0, 빈 stdout 이어야 한다(invariant 2).
     try:
@@ -562,7 +572,12 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
             for line in fh:
                 if not line.strip():
                     continue
-                delivered_order.append(line.split("\t", 1)[0])
+                parts = line.split("\t")
+                # reopen 줄은 전달이 아니다 — 세면 resume 만 하고 아직 다시
+                # 전달되지 않은 세션이 injections/pull rate 분모에 낀다(#22).
+                if len(parts) >= 2 and parts[1] == due.REOPEN_MARKER:
+                    continue
+                delivered_order.append(parts[0])
     injections = len(delivered_order)
 
     # pull rate 의 분모를 delivered.tsv 전체로 두면, 한 레포를 오래 쓸수록

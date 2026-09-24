@@ -422,7 +422,11 @@ bash tests/smoke.sh                             # 적대적 입력 8종
   7일(`due.MAX_AGE_SECONDS`)보다 오래됐으면, 백필 자체의 나이 검사에서도
   걸러집니다. 올바른 수정은 세션 시작 epoch 이 아닌 다른 순서 기준(마지막
   레코드 타임스탬프나 파일 mtime)이 필요한데, invariant 6 이 이를 금지합니다
-  — 고치지 않았습니다.
+  — 고치지 않았습니다. 이 구멍은 백필 경로에만 있습니다. Codex 훅이 신뢰되어
+  있으면 `codex exec resume`(실측: 같은 롤아웃에 이어 씀)이 SessionStart 를
+  `source:"resume"` 으로 발화하고, `mark` 가 새 start 행과 `delivered.tsv` 의
+  `reopen` 줄을 남기므로, 이미 전달된 세션이라도 재개하면 다시 넘어갑니다.
+  `source:"compact"` 는 다시 열지 않습니다.
 
   </details>
 

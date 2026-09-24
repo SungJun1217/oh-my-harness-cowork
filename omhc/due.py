@@ -15,6 +15,13 @@ DELIVERED_NAME = "delivered.tsv"
 OFF_MARKER = "off"
 OFF_ENV = "OMHC_OFF"
 
+# delivered.tsv 의 2번째 열(to_harness)에 절대 나오지 않는 값 — harness id 는
+# 레지스트리에 등록된 어댑터 id 뿐이라 이 문자열과 충돌하지 않는다. 이 자리를
+# 쓰면 줄 자체는 기존 4열 포맷 그대로라(session, marker, from, epoch) 이 필드를
+# 모르는 옛 리더도 "parts[1] == to_harness" 비교에서 그냥 불일치로 지나친다
+# (#22: resume 이 이미 전달된 세션을 되살릴 수 있어야 한다).
+REOPEN_MARKER = "reopen"
+
 # 이보다 오래된 외래 세션은 이어갈 작업으로 보지 않는다. 일주일 전 세션을
 # "방금 일어난 일"처럼 주입하면 다음 에이전트가 끝난 일을 다시 한다.
 MAX_AGE_SECONDS = 7 * 24 * 3600
@@ -45,29 +52,43 @@ def _delivered_path(state_dir: str) -> str:
 
 
 def already_delivered(state_dir: str, session_id: str, to_harness: str) -> bool:
+    """이 세션을 이 하네스에 전달했는가 — **파일 순서상 마지막** 판정이 이긴다
+    (invariant 6). resume 이 이 세션에 대해 reopen 을 적은 뒤라면, 그 reopen 이
+    이전의 delivered 줄보다 뒤에 있으므로 "아직 전달 안 함"이 이긴다 — resumed
+    턴이 다시 핸드오프될 수 있어야 한다(#22)."""
+    delivered = False
     try:
         with open(_delivered_path(state_dir), encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 parts = line.rstrip("\n").split("\t")
-                if len(parts) >= 2 and parts[0] == session_id and parts[1] == to_harness:
-                    return True
+                if len(parts) < 2 or parts[0] != session_id:
+                    continue
+                if parts[1] == REOPEN_MARKER:
+                    delivered = False
+                elif parts[1] == to_harness:
+                    delivered = True
     except OSError:
         return False
-    return False
+    return delivered
 
 
 def last_delivered(state_dir: str) -> Optional[str]:
-    """이 레포에 가장 최근 전달된 세션 id — delivered.tsv 의 마지막 줄. append
-    순서를 쓴다(invariant 6, 타임스탬프 아님). 아무것도 전달된 적 없으면 None."""
+    """이 레포에 가장 최근 전달된 세션 id — delivered.tsv 를 뒤에서부터 훑어
+    처음 만나는 **전달** 줄(append 순서, invariant 6). reopen 줄은 전달이
+    아니므로 건너뛴다 — 안 그러면 resume 직후 "가장 최근 전달"이 아직 다시
+    보내지도 않은 세션을 가리킨다. 전달된 적 없으면 None."""
     try:
         with open(_delivered_path(state_dir), encoding="utf-8", errors="replace") as fh:
             lines = [line for line in fh if line.strip()]
     except OSError:
         return None
-    if not lines:
-        return None
-    parts = lines[-1].rstrip("\n").split("\t")
-    return parts[0] if parts and parts[0] else None
+    for line in reversed(lines):
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) >= 2 and parts[1] == REOPEN_MARKER:
+            continue
+        if parts and parts[0]:
+            return parts[0]
+    return None
 
 
 def delivered_order(state_dir: str) -> List[str]:
@@ -76,7 +97,10 @@ def delivered_order(state_dir: str) -> List[str]:
 
     마지막 등장 기준이어야 last_delivered() 와 맞는다 — 한 세션이 두 번째 대상에
     다시 전달되면 그때 색인도 자라므로, 첫 등장 자리에 두면 log 의 끝이 `show` 의
-    기본 세션과 어긋나고 `--last N` 이 그 세션의 새 줄을 떨어뜨린다."""
+    기본 세션과 어긋나고 `--last N` 이 그 세션의 새 줄을 떨어뜨린다.
+
+    reopen 줄은 전달이 아니므로 순위에 반영하지 않는다 — resume 만 하고 아직
+    다시 전달되지 않은 세션이 reopen 줄 때문에 log 맨 끝으로 튀면 안 된다."""
     try:
         with open(_delivered_path(state_dir), encoding="utf-8", errors="replace") as fh:
             lines = [line for line in fh if line.strip()]
@@ -85,6 +109,8 @@ def delivered_order(state_dir: str) -> List[str]:
     last = {}
     for pos, line in enumerate(lines):
         parts = line.rstrip("\n").split("\t")
+        if len(parts) >= 2 and parts[1] == REOPEN_MARKER:
+            continue
         if parts and parts[0]:
             last[parts[0]] = pos
     return sorted(last, key=last.get)
@@ -97,6 +123,18 @@ def mark_delivered(state_dir: str, watermark, *, to_harness: str, epoch: float) 
     line = "\t".join(
         (watermark.session_id, to_harness, watermark.harness, "{:.0f}".format(epoch))
     )
+    fsio.append_line(_delivered_path(state_dir), line)
+
+
+def mark_reopened(state_dir: str, session_id: str, from_harness: str, epoch: float) -> None:
+    """이 세션이 resume 되어 새 턴이 생겼다고 기록한다 — 이미 전달됐었어도
+    already_delivered() 가 다시 False 를 돌려주게 한다(#22: `codex exec resume`
+    은 같은 rollout 에 이어 붙고, 그 세션이 예전에 전달됐었다면 due() 가 거기서
+    멈춰 resumed 턴이 영영 안 나갔다). `mark` 의 훅 경로에서 부른다 — 호출자가
+    감싸 invariant 2 를 지킨다."""
+    if not session_id:
+        return
+    line = "\t".join((session_id, REOPEN_MARKER, from_harness or "", "{:.0f}".format(epoch)))
     fsio.append_line(_delivered_path(state_dir), line)
 
 

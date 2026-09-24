@@ -40,8 +40,11 @@ class Harness:
         return self.t.plant_codex(session_id=session_id, human=human, when=epoch,
                                   meta_extra=extra, ledger_home=ledger_home)
 
-    def mark(self, harness="claude-code", session_id="me1", env=None):
-        stdin = json.dumps({"cwd": self.root, "session_id": session_id})
+    def mark(self, harness="claude-code", session_id="me1", env=None, source=None):
+        payload = {"cwd": self.root, "session_id": session_id}
+        if source is not None:
+            payload["source"] = source
+        stdin = json.dumps(payload)
         args = cli.build_parser().parse_args(
             ["mark", "--harness", harness, "--stdin", stdin])
         out = io.StringIO()
@@ -312,6 +315,69 @@ class TestEndToEnd(unittest.TestCase):
             os.chdir(cwd)
         line = next(l for l in out.getvalue().splitlines() if "codex hook" in l)
         self.assertTrue(line.startswith("FAIL"), out.getvalue())
+
+
+class TestResumeReopensDelivery(unittest.TestCase):
+    """`source:"resume"` 가 SessionStart payload 로 오면(#22, Claude Code 와
+    Codex 둘 다 실측), 이미 전달됐던 세션도 due() 가 다시 집어야 한다 —
+    `codex exec resume` 은 같은 rollout 에 이어붙고 새 rollout(session_meta)을
+    만들지 않는다."""
+
+    def setUp(self):
+        self.h = Harness()
+        self.addCleanup(self.h.close)
+
+    def _deliver(self, now, human):
+        from omhc import brief
+
+        path = self.h.plant("cx1", now - 600, human=human)
+        self.h.mark()
+        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        self.assertIsNotNone(got)
+        due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
+        self.assertIsNone(
+            due.due(self.h.key, "claude-code", "me1", now, home=self.h.home))
+        return brief, path
+
+    def _resume_with_new_turn(self, path, text):
+        # `codex exec resume` 은 새 rollout 을 만들지 않고 같은 파일에
+        # 이어붙인다(실측) — session_meta 는 다시 안 쓴다.
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_repo.codex_user_row(text, ordinal=50),
+                                ensure_ascii=False) + "\n")
+
+    def test_resume_after_delivery_makes_it_due_again(self):
+        now = time.time()
+        _, path = self._deliver(now, "필드 경로부터 다시 확인해줘")
+        self._resume_with_new_turn(path, "이제 두 번째 턴도 반영해줘")
+        self.h.mark(harness="codex-cli", session_id="cx1", source="resume")
+        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.session_id, "cx1")
+
+    def test_next_brief_of_the_other_harness_contains_the_resumed_turn(self):
+        now = time.time()
+        brief, path = self._deliver(now, "필드 경로부터 다시 확인해줘")
+        self._resume_with_new_turn(path, "이제 두 번째 턴도 반영해줘")
+        self.h.mark(harness="codex-cli", session_id="cx1", source="resume")
+        body = brief.compute(my_harness="claude-code", my_session_id="me2",
+                             repo_root=self.h.root, home=self.h.home, now=now)
+        self.assertIn("이제 두 번째 턴도 반영해줘", body)
+
+    def test_compact_after_delivery_does_not_reopen(self):
+        now = time.time()
+        self._deliver(now, "필드 경로부터 다시 확인해줘")
+        self.h.mark(harness="codex-cli", session_id="cx1", source="compact")
+        self.assertIsNone(
+            due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
+
+    def test_resume_of_a_never_delivered_session_is_unchanged(self):
+        now = time.time()
+        self.h.plant("cx1", now - 600)
+        self.h.mark(harness="codex-cli", session_id="cx1", source="resume")
+        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.session_id, "cx1")
 
 
 if __name__ == "__main__":
