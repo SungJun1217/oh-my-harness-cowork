@@ -241,9 +241,9 @@ class TestMeasuredShapes(unittest.TestCase):
 
 
 class TestLegacyToolCallShapes(unittest.TestCase):
-    """UNVERIFIED — 0.156.1 은 function_call 을 쓰지 않는다. 이전/다른 버전의
-    function_call·local_shell_call 을 위한 경로이고 실물로 확인된 적이 없다.
-    """
+    """era A (codex-cli 0.141–0.142) — function_call name=exec_command/
+    apply_patch/spawn_agent, 출력은 평문(JSON 아님). 픽스처 없이도 도는 실측
+    모양 단위 테스트(_repo.codex_* 빌더가 정확히 그 텍스트 헤더를 쓴다)."""
 
     def _read(self, rows) -> A.SessionRead:
         path = write_rollout(rows)
@@ -252,48 +252,166 @@ class TestLegacyToolCallShapes(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_unverified_function_call_maps_to_a_neutral_verb(self):
-        read = self._read([
-            {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
-            {"type": "response_item", "payload": {
-                "type": "function_call", "name": "shell", "call_id": "c1",
-                "arguments": json.dumps({"command": ["pytest", "-q"]})}},
-        ])
-        verbs = [e.verb for e in read.events if e.arg]
-        self.assertEqual(verbs, ["ran"])
-        self.assertEqual(read.unparsed, 0)
+    META = {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}}
 
-    def test_unverified_function_call_output_marks_failure(self):
-        read = self._read([
-            {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
-            {"type": "response_item", "payload": {
-                "type": "function_call", "name": "shell", "call_id": "c1",
-                "arguments": json.dumps({"command": ["pytest"]})}},
-            {"type": "response_item", "payload": {
-                "type": "function_call_output", "call_id": "c1",
-                "output": json.dumps({"exit_code": 1, "output": "3 failed"})}},
+    def test_exec_command_exit_0_is_ok(self):
+        rows = _repo.codex_exec_command_rows(["pytest", "-q"], code=0)
+        read = self._read([self.META] + rows)
+        ran = [e for e in read.events if e.verb == "ran"]
+        self.assertEqual(len(ran), 1)
+        self.assertEqual(ran[0].arg, "pytest -q")
+        self.assertTrue(ran[0].ok)
+
+    def test_exec_command_exit_1_is_a_failure(self):
+        rows = _repo.codex_exec_command_rows(["pytest", "-q"], code=1)
+        read = self._read([self.META] + rows)
+        ran = [e for e in read.events if e.verb == "ran"]
+        self.assertEqual(len(ran), 1)
+        self.assertFalse(ran[0].ok)
+
+    def test_running_then_write_stdin_exit_updates_the_original_event(self):
+        rows = (_repo.codex_exec_command_rows(["npm", "run", "dev"], running_sid=42)
+               + _repo.codex_write_stdin_rows(42, code=1))
+        read = self._read([self.META] + rows)
+        ran = [e for e in read.events if e.verb == "ran"]
+        self.assertEqual(len(ran), 1)
+        self.assertEqual(ran[0].arg, "npm run dev")
+        self.assertFalse(ran[0].ok)
+        self.assertEqual(read.dropped.get("tool_bookkeeping", 0), 1)
+
+    def test_a_call_with_no_output_stays_ok_abort(self):
+        rows = _repo.codex_exec_command_rows(["ls"])  # code/running_sid 둘 다 None
+        read = self._read([self.META] + rows)
+        ran = [e for e in read.events if e.verb == "ran"]
+        self.assertEqual(len(ran), 1)
+        self.assertTrue(ran[0].ok)
+
+    def test_aborted_by_user_is_a_failure(self):
+        read = self._read([self.META, {
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "exec_command",
+                       "call_id": "ec9",
+                       "arguments": json.dumps({"cmd": "long-running-thing"})}},
+            {"type": "response_item",
+             "payload": {"type": "function_call_output", "call_id": "ec9",
+                        "output": "aborted by user after 12.3s"}},
         ])
         ran = [e for e in read.events if e.verb == "ran"]
         self.assertEqual(len(ran), 1)
         self.assertFalse(ran[0].ok)
 
-    def test_unverified_apply_patch_maps_to_modified(self):
-        read = self._read([
-            {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
-            {"type": "response_item", "payload": {
-                "type": "function_call", "name": "apply_patch", "call_id": "c2",
-                "arguments": json.dumps({"input": "*** Update File: omhc/x.py"})}},
-        ])
-        self.assertEqual([e.verb for e in read.events if e.arg], ["modified"])
+    def test_apply_patch_and_filechange_with_the_same_id_merge_into_one_event(self):
+        rows = _repo.codex_apply_patch_rows(
+            ["*** Update File: /abs/omhc/x.py"], with_filechange=True)
+        read = self._read([self.META] + rows)
+        modified = [e for e in read.events if e.verb == "modified"]
+        self.assertEqual(len(modified), 1)
+        self.assertEqual(modified[0].paths, ("/abs/omhc/x.py",))
+        self.assertTrue(modified[0].ok)
 
-    def test_unverified_local_shell_call_maps_to_ran(self):
-        read = self._read([
-            {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
-            {"type": "response_item", "payload": {
-                "type": "local_shell_call", "call_id": "c3",
-                "action": {"type": "exec", "command": ["ls", "-la"]}}},
-        ])
-        self.assertEqual([e.verb for e in read.events if e.arg], ["ran"])
+    def test_apply_patch_alone_resolves_relative_paths_against_workdir(self):
+        rows = _repo.codex_apply_patch_rows(
+            ["*** Update File: omhc/x.py"], with_filechange=False, workdir="/w/repo")
+        read = self._read([self.META] + rows)
+        modified = [e for e in read.events if e.verb == "modified"]
+        self.assertEqual(len(modified), 1)
+        self.assertEqual(modified[0].paths, ("/w/repo/omhc/x.py",))
+
+    def test_spawn_agent_maps_to_delegated_and_never_leaks_the_message(self):
+        row = _repo.codex_spawn_agent_row("fix-flaky-test", "여기 비밀 지침이 있다")
+        read = self._read([self.META, row])
+        delegated = [e for e in read.events if e.verb == "delegated"]
+        self.assertEqual(len(delegated), 1)
+        self.assertEqual(delegated[0].arg, "fix-flaky-test")
+        joined = "\n".join(e.text + e.arg for e in read.events)
+        self.assertNotIn("비밀 지침", joined)
+
+    def test_bookkeeping_tools_produce_no_events(self):
+        rows = []
+        for i, name in enumerate(("wait", "wait_agent", "list_agents",
+                                  "interrupt_agent", "send_message",
+                                  "followup_task", "request_user_input",
+                                  "list_available_plugins_to_install")):
+            rows.append({"type": "response_item", "payload": {
+                "type": "function_call", "name": name, "call_id": "bk{}".format(i),
+                "arguments": "{}"}})
+        read = self._read([self.META] + rows)
+        self.assertEqual(read.events, ())
+        self.assertEqual(read.dropped.get("tool_bookkeeping"), len(rows))
+
+    def test_unknown_tool_name_is_unmapped_not_an_event(self):
+        read = self._read([self.META, {
+            "type": "response_item", "payload": {
+                "type": "function_call", "name": "brand_new_tool_2099",
+                "call_id": "u1", "arguments": "{}"}}])
+        self.assertEqual(read.events, ())
+        self.assertEqual(read.dropped.get("unmapped_tool"), 1)
+
+    def test_agent_message_is_dropped_not_human_or_said(self):
+        read = self._read([self.META, {
+            "type": "response_item",
+            "payload": {"type": "agent_message", "text": "에이전트 간 메시지"}}])
+        self.assertEqual(read.events, ())
+        self.assertEqual(read.dropped.get("agent_message"), 1)
+        self.assertEqual(read.unparsed, 0)
+
+
+class TestCommandExecutionBenignExitOne(unittest.TestCase):
+    """era B: parsed_cmd 가 전부 읽기이고 출력도 비면 exit 1 은 관용구다(실측 2건).
+    검증용 grep -q 는 보통 parsed_cmd 가 unknown 이라 여기 안 걸린다."""
+
+    def _read(self, item):
+        rows = [{"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
+               _repo.codex_item_row(item, 2)]
+        path = write_rollout(rows)
+        try:
+            return CX.CodexCliAdapter().read_session(ref_for(path))
+        finally:
+            os.unlink(path)
+
+    def _ce(self, exit_code, parsed_cmd, stdout="", stderr=""):
+        return {"type": "CommandExecution", "id": "e1",
+               "command": ["/bin/bash", "-lc", "grep -r foo ."],
+               "cwd": "file://" + REPO, "parsed_cmd": parsed_cmd,
+               "status": "failed" if exit_code else "completed",
+               "exit_code": exit_code, "stdout": stdout, "stderr": stderr}
+
+    def test_search_with_empty_output_and_exit_1_is_ok(self):
+        read = self._read(self._ce(1, [{"type": "search", "cmd": "grep -r foo ."}]))
+        self.assertEqual([(e.verb, e.ok) for e in read.events], [("inspected", True)])
+
+    def test_unknown_kind_with_exit_1_is_still_a_failure(self):
+        read = self._read(self._ce(1, [{"type": "unknown", "cmd": "grep -q foo ."}]))
+        self.assertEqual([(e.verb, e.ok) for e in read.events], [("ran", False)])
+
+    def test_search_with_non_empty_output_and_exit_1_is_still_a_failure(self):
+        read = self._read(self._ce(
+            1, [{"type": "search", "cmd": "grep -r foo ."}], stdout="1 match"))
+        self.assertEqual([(e.verb, e.ok) for e in read.events], [("inspected", False)])
+
+
+class TestMintShowsRealCodexFacts(unittest.TestCase):
+    """era A 모양 세션이라도 FAIL/DID 가 실제 명령·경로를 보여줘야 한다 —
+    이전 매핑은 arg 가 비어 있었다."""
+
+    def test_fail_and_did_carry_the_real_command_and_path(self):
+        from omhc import mint
+
+        changed = os.path.join(REPO, "omhc", "x.py")
+        rows = ([{"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
+                msg("user", "테스트를 고쳐줘")]
+               + _repo.codex_exec_command_rows(["pytest", "-q"], code=1)
+               + _repo.codex_apply_patch_rows(
+                   ["*** Update File: {}".format(changed)], with_filechange=True))
+        path = write_rollout(rows)
+        try:
+            read = CX.CodexCliAdapter().read_session(ref_for(path))
+            body = mint.mint(read, to_adapter_id="claude-code", now=0.0)
+        finally:
+            os.unlink(path)
+        self.assertIn("pytest -q", body)
+        self.assertIn("omhc/x.py", body)
+        self.assertLessEqual(len(body.encode("utf-8")), 900)
 
 
 class TestInteractiveFilter(unittest.TestCase):
@@ -951,3 +1069,50 @@ class TestHealthLedgerWindow(unittest.TestCase):
             rows = CX.CodexCliAdapter(home=home).health(REPO, all_rows)
             self.assertTrue(rows[0][1])
             self.assertIn("ran for the latest session", rows[0][2])
+
+
+class TestExecOutcomeHeaderOnly(unittest.TestCase):
+    def test_exit_line_in_the_body_does_not_override_a_running_header(self):
+        # 본문(Output: 뒤)은 프로그램 출력이다. 거기 찍힌 "Exit code: 0" 이
+        # "running" 헤더를 이기면 write_stdin 의 실패가 원래 이벤트에 닿지 않는다.
+        out = CX._parse_exec_outcome(
+            "Chunk ID: x\nWall time: 10 seconds\nProcess running with session ID 7\n"
+            "Original token count: 5\nOutput:\n[step] Exit code: 0\nExit code: 0\n")
+        self.assertIsNone(out.ok)
+        self.assertEqual(out.session_id, "7")
+
+
+class TestSubagentRolloutWithTwoMetaLines(unittest.TestCase):
+    """실측(0.155.1 sandbox): 서브에이전트 rollout 은 session_meta 가 두 줄이다 —
+    첫 줄이 자기 것(source.subagent·thread_source·parent_thread_id), 둘째 줄이
+    부모의 것 — 그리고 부모의 사람 프롬프트를 user.text 로 다시 담는다. 첫 줄의
+    서브에이전트 표식만이 그 프롬프트가 GOAL 로 세탁되는 것을 막는다."""
+
+    def test_the_first_meta_line_decides_and_it_is_never_a_source(self):
+        with tempfile.TemporaryDirectory() as home:
+            day = os.path.join(home, ".codex", "sessions", "2026", "09", "24")
+            os.makedirs(day)
+            path = os.path.join(day, "rollout-2026-09-24T14-00-00-sub.jsonl")
+            rows = [
+                {"type": "session_meta", "payload": {
+                    "id": "sub", "session_id": "parent", "cwd": REPO,
+                    "timestamp": "2026-09-24T05:00:00Z",
+                    "source": {"subagent": {"thread_spawn": {}}},
+                    "thread_source": "subagent", "parent_thread_id": "parent"}},
+                {"type": "session_meta", "payload": {
+                    "id": "parent", "session_id": "parent", "cwd": REPO,
+                    "timestamp": "2026-09-24T04:59:00Z", "source": "cli",
+                    "originator": "codex-tui"}},
+                {"type": "response_item", "payload": {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "PARENT_GOAL 이거 고쳐줘"}],
+                    "internal_chat_message_metadata_passthrough": {
+                        "content_item_kinds": ["user.text"]}}},
+            ]
+            with open(path, "w", encoding="utf-8") as fh:
+                for row in rows:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            adapter = CX.CodexCliAdapter(home=home)
+            self.assertFalse(adapter.classify(path))
+            self.assertIsNone(adapter.ref_for_path(path, "parent"))
+            self.assertEqual(adapter.list_sessions(REPO), [])

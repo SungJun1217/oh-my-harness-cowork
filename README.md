@@ -294,16 +294,17 @@ committed). Generate them from real sessions on your own machine with
 
 ### Known limitations
 
-- **Codex tool-call mapping is unverified.**
+- **Codex 0.144–0.148 sessions carry no command facts.**
   <details>
   <summary>Details</summary>
 
-  This machine's Codex was unauthenticated (401), so no real
-  `function_call` records were available. The implementation follows the
-  Rust serde field names; unknown payloads are counted as `unparsed`
-  instead of raising. Refresh the golden fixtures with `codex login` then
-  `python3 tests/harvest.py --force`. The test class name is left tagged
-  `UNVERIFIED`.
+  The Codex mapping is measured against 194 real rollouts (codex-cli
+  0.141–0.155.1), which fall into three eras. 0.141–0.142 record shell runs as
+  `exec_command` function calls with plain-text exit status. 0.149 and later
+  record them as `CommandExecution` items. In 0.144–0.148 the shell call exists
+  only inside JavaScript source that the adapter deliberately does not parse
+  (whitelist, fail-closed), so those sessions read with edits but no `ran`
+  events. Unknown record types are still counted as `unparsed`.
 
   </details>
 

@@ -276,14 +276,16 @@ bash tests/smoke.sh                             # 적대적 입력 7종
 
 ### 알려진 한계
 
-- **Codex 툴 호출 매핑이 미검증입니다.**
+- **Codex 0.144–0.148 세션에는 명령 사실이 없습니다.**
   <details>
   <summary>자세히</summary>
 
-  이 머신의 Codex가 인증되지 않아(401) 실물 `function_call` 레코드를 얻지
-  못했습니다. Rust serde 필드명 기준으로 구현했고 모르는 페이로드는 예외 대신
-  `unparsed`로 계상됩니다. `codex login` 후 `python3 tests/harvest.py --force`
-  로 골든을 갱신해야 합니다. 테스트 클래스 이름에 `UNVERIFIED`를 남겨 뒀습니다.
+  Codex 매핑은 실제 rollout 194개(codex-cli 0.141–0.155.1)로 실측했고, 세 시기로
+  나뉩니다. 0.141–0.142 는 셸 실행을 `exec_command` 함수 호출과 평문 종료 코드로,
+  0.149 이후는 `CommandExecution` 항목으로 남깁니다. 0.144–0.148 은 셸 호출이
+  어댑터가 일부러 파싱하지 않는 JavaScript 소스 안에만 있어서(화이트리스트,
+  fail-closed), 그 세션은 수정 사항만 있고 `ran` 이벤트 없이 읽힙니다. 모르는
+  레코드 종류는 여전히 `unparsed`로 계상됩니다.
 
   </details>
 
