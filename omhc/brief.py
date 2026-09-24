@@ -150,8 +150,7 @@ def compute(
         # 있을 때 같은 이벤트가 두 번 색인되어 `omhc log` 가 중복을 보이고
         # `omhc show #N` 이 낡은 행을 가리킬 수 있다.
         idx = os.path.join(state, "index", ref.session_id + ".idx")
-        seen = index.last_seq(idx)
-        index.append_rows(idx, [e for e in read.events if e.seq > seen])
+        index.append_new(idx, read.events)
         index.write_refs(state, ref, mint.failure_tags(read))
     except OSError as exc:
         _log_failure(home, "archive failed: {}".format(exc))

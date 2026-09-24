@@ -92,5 +92,60 @@ class TestIndex(unittest.TestCase):
             self.assertNotIn("비밀 이야기", fh.read())
 
 
+class TestAppendNew(unittest.TestCase):
+    """커서는 seq 가 아니라 바이트 offset 이다(#23)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "s.idx")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_first_call_indexes_everything_with_the_parser_seq(self):
+        self.assertEqual(index.append_new(self.path, [mk(1), mk(2), mk(3)]), 3)
+        self.assertEqual([r.seq for r in index.rows(self.path)], [1, 2, 3])
+
+    def test_second_call_only_adds_events_past_the_last_record(self):
+        index.append_new(self.path, [mk(1), mk(2)])
+        self.assertEqual(index.append_new(self.path, [mk(1), mk(2), mk(3)]), 1)
+        rows = index.rows(self.path)
+        self.assertEqual([r.seq for r in rows], [1, 2, 3])
+        self.assertEqual([r.offset for r in rows], [100, 200, 300])
+
+    def test_a_parser_that_drops_more_records_does_not_lose_new_events(self):
+        """업그레이드 전 파서가 seq 1..5 를 매겼고, 새 파서는 그중 둘을 버려
+        같은 세션의 이후 이벤트가 seq 4, 5 로 나온다. seq 커서였다면 둘 다
+        `seq > 5` 에 걸려 빠졌다."""
+        index.append_new(self.path, [mk(i) for i in range(1, 6)])
+        reparsed = [mk(1), mk(3), mk(5),
+                    mk(4, offset=600), mk(5, offset=700)]
+        self.assertEqual(index.append_new(self.path, reparsed), 2)
+        rows = index.rows(self.path)
+        self.assertEqual([r.offset for r in rows][-2:], [600, 700])
+        # 번호는 이 색인 안에서 이어진다 — 겹치면 `show <세션>#4` 가 모호해진다.
+        self.assertEqual([r.seq for r in rows], [1, 2, 3, 4, 5, 6, 7])
+
+    def test_a_parser_that_reads_more_records_does_not_duplicate(self):
+        index.append_new(self.path, [mk(1), mk(3)])
+        reparsed = [mk(1), mk(2, offset=150), mk(3), mk(4)]
+        self.assertEqual(index.append_new(self.path, reparsed), 1)
+        self.assertEqual([r.offset for r in index.rows(self.path)], [100, 300, 400])
+
+    def test_events_sharing_one_record_are_not_split_across_calls(self):
+        """Claude 의 assistant 레코드 하나가 tool_use 여러 개를 낳으면 이벤트들이
+        같은 offset/length 를 공유한다."""
+        same = [mk(1), mk(2, offset=100), mk(3, offset=100)]
+        index.append_new(self.path, same)
+        self.assertEqual(index.append_new(self.path, same + [mk(4, offset=200)]), 1)
+        self.assertEqual(len(index.rows(self.path)), 4)
+
+    def test_nothing_new_writes_nothing(self):
+        index.append_new(self.path, [mk(1)])
+        size = os.path.getsize(self.path)
+        self.assertEqual(index.append_new(self.path, [mk(1)]), 0)
+        self.assertEqual(os.path.getsize(self.path), size)
+
+
 if __name__ == "__main__":
     unittest.main()

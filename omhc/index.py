@@ -142,6 +142,32 @@ def last_seq(path: str) -> int:
     return last.seq if last else 0
 
 
+def append_new(path: str, events: Iterable) -> int:
+    """아직 색인되지 않은 이벤트만 덧붙인다. brief 와 watch.sweep 이 같은 규칙을
+    쓴다 — 둘이 어긋나면 데몬이 돌 때 같은 이벤트가 두 번 색인된다.
+
+    커서는 seq 가 아니라 소스 파일의 바이트 offset 이다(#23). seq 는 파서가 매기는
+    서수라 파서가 레코드를 더 버리도록 바뀌면 업그레이드 전에 색인된 세션의 이후
+    이벤트 seq 가 예전보다 작아지고, `seq > last_seq` 로 고르면 그만큼이 영영
+    색인되지 않는다(반대로 더 많이 읽게 바뀌면 중복된다). 바이트 위치는 파서와
+    무관하다. 한 레코드에서 나온 이벤트는 같은 offset 을 공유하고 항상 한 번에
+    읽히므로 "마지막 행의 레코드 끝 이후" 로 고르면 빠짐도 겹침도 없다.
+
+    덧붙이는 행의 seq 는 이 색인의 마지막 seq 에서 이어 다시 매긴다. 파서 seq 를
+    그대로 쓰면 위 경우에 기존 행과 번호가 겹쳐 `show <세션>#N` 이 엉뚱한 행을
+    연다. 파서가 그대로면 두 번호는 같다.
+    """
+    cursor = watermark(path)
+    seq = last_seq(path)
+    fresh = []
+    for ev in events:
+        if ev.offset < cursor:
+            continue
+        seq += 1
+        fresh.append(ev._replace(seq=seq))
+    return append_rows(path, fresh)
+
+
 def find(path: str, seq: int) -> Optional[Row]:
     for row in rows(path):
         if row.seq == seq:
