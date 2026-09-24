@@ -21,7 +21,7 @@ and make it real: edit, verify, report. You do not redesign, and you do not comm
 3. `GOAL`/`NEXT` are verbatim `author == human` text only; agent claims go to `PLAN?`. Approval-style turns never become `NEXT`.
 4. Whitelist parsing only. Never start parsing harness machinery (`attachment`, `skill_listing`, `<environment_context>`, system-reminders). Guard stays fail-closed on machine-derived text; drop, never rewrite.
 5. No tool-name field in the IR — neutral verbs only.
-6. No LLM calls, no third-party dependencies. Python 3.9 stdlib only — no `dataclass(slots=True)`, no `match`, no `X | Y` type unions at runtime (`from __future__ import annotations` is fine), no 3.10+ APIs.
+6. No LLM calls, no third-party dependencies. stdlib only. Python 3.9 is the minimum, and code must also run on every newer 3.x — no `dataclass(slots=True)`, no `match`, no `X | Y` type unions at runtime (`from __future__ import annotations` is fine), no 3.10+ APIs, and nothing removed or deprecated in newer versions (`distutils`, `imp`, …).
 7. Order by byte offset / ordinal, never by timestamp.
 8. Adding a harness = one file in `omhc/adapters/` + one import line + one fixture. Do not touch the core for it.
 9. Fixtures contain real conversations and are never committed; do not add them to git.
@@ -42,7 +42,7 @@ python3 -m unittest discover -s tests -t . -q   # ~12s — don't add slow tests
 bash tests/smoke.sh                             # when touching bin/, hooks, brief, deliver, gate, or cli
 ```
 
-Project hooks back this up: a Python 3.9 syntax check runs after every `.py` edit, and `git commit` is blocked unless both suites pass. Treat a hook failure as your bug to fix, not something to bypass.
+Project hooks back this up: a syntax check against the 3.9 grammar runs after every `.py` edit (whatever the local `python3` version is), and `git commit` is blocked unless both suites pass. Treat a hook failure as your bug to fix, not something to bypass.
 
 Never launch `claude` or `codex` to test. If a test fails and the cause is outside your scope, report it — do not "fix" unrelated tests or weaken assertions to make them pass.
 

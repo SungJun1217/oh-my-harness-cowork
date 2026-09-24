@@ -36,7 +36,7 @@ If a conclusion touches any of these, **say so explicitly**.
 3. Provenance separation: `GOAL`/`NEXT` are verbatim quotes from `author == human` only; agent claims go to `PLAN?`. A short approval turn ("계속 진행해") must never be laundered into `NEXT`.
 4. Whitelist parsing. Harness machinery (`attachment`, `skill_listing`, `<environment_context>`, system-reminders, etc.) is never parsed at all. The guard is fail-closed on machine-derived text.
 5. The IR has no tool-name field — neutral verbs only.
-6. No LLM calls. Python 3.9 stdlib only (`dataclass(slots=True)` does not exist there).
+6. No LLM calls, stdlib only. Python 3.9 is the **minimum** supported version, not the only one — code must run on 3.9 and on every newer 3.x (so no `dataclass(slots=True)`, `match`, or other 3.10+ features, and nothing removed or deprecated in newer versions either).
 7. Timestamps are not an ordering source — byte offset / ordinal is the order.
 8. `from == to` short-circuits the pipeline.
 9. A new adapter = one file + one fixture. A conclusion that requires touching the core signals a contract defect.

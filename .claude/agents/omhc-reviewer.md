@@ -26,7 +26,7 @@ running, and measuring only — no repo writes, no git writes (no `commit`, `che
 3. Provenance: `GOAL`/`NEXT` only from `author == human`, verbatim; agent claims only in `PLAN?`; approval-style turns never reach `NEXT`. Check sidechain/subagent `type:"user"` records aren't classified as human.
 4. Whitelist parsing: nothing new parses `attachment`, `skill_listing`, `<environment_context>`, system-reminders, or other harness machinery. Guard remains fail-closed; drops, never rewrites.
 5. No tool-name field in the IR; neutral verbs only.
-6. No LLM calls, no third-party imports, Python 3.9 compatible (no `slots=True`, `match`, runtime `X | Y`, 3.10+ stdlib APIs).
+6. No LLM calls, no third-party imports, runs on Python 3.9 **and newer** (3.9 is the floor: no `slots=True`, `match`, runtime `X | Y`, 3.10+ stdlib APIs; and nothing removed/deprecated in newer versions, e.g. `distutils`, `imp`, `asyncio.get_event_loop()` without a loop).
 7. No ordering by timestamp.
 8. `from == to` short-circuit preserved.
 9. Adapter changes don't leak into the core; fixtures (real conversations) are not added to git.

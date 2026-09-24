@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/py-syntax.sh",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/py_syntax.py",
             "timeout": 10
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/pre-commit-gate.sh",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/pre_commit_gate.py",
             "timeout": 120,
             "statusMessage": "Running tests before commit..."
           }
