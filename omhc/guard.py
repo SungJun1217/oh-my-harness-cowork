@@ -25,7 +25,10 @@ FOREIGN_MARKERS = (
 UNWITNESSED_OK: dict = {}
 
 # 사람이 쓰지 않았는데 사람 턴처럼 보이는 합성 문자열. 실물에서 목격된 것만.
-SYNTHETIC_HUMAN = ("[Request interrupted by user]",)
+SYNTHETIC_HUMAN = (
+    "[Request interrupted by user]",
+    "[Request interrupted by user for tool use]",
+)
 
 # 최상위 XML 봉투 하나를 앞에서 떼어내는 패턴.
 # 태그 이름 목록이 아니라 구조로 판정하므로 처음 보는 태그도 자동으로 걸린다.
