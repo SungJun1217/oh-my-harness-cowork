@@ -319,6 +319,65 @@ class AdapterContract(unittest.TestCase):
                 self.assertIsInstance(receipt, A.InstallReceipt)
                 self.assertTrue(receipt.channel)
 
+    def test_26_classify_never_raises_on_garbage(self):
+        for adapter_id in adapter_ids():
+            with self.subTest(adapter=adapter_id):
+                with tempfile.NamedTemporaryFile("wb", suffix=".jsonl",
+                                                 delete=False) as fh:
+                    fh.write(b"\x00\xff{not json\n\n\x80\x81")
+                    path = fh.name
+                try:
+                    got = adapters.get(adapter_id).classify(path)
+                    self.assertIsInstance(got, bool)
+                finally:
+                    os.unlink(path)
+                # 없는 파일도 던지지 않는다(반환값은 fail-open 정책이라 어댑터마다
+                # 다를 수 있다 — 여기서는 예외가 없다는 것만 본다).
+                adapters.get(adapter_id).classify("/nope/missing.jsonl")
+
+    def test_27_health_is_a_tuple_of_3_tuples_and_never_raises(self):
+        """health 는 선택 메서드다(fallback_channels 와 같은 패턴). 빈 홈에서도
+        절대 던지지 않고, 준 게 있다면 (label, ok, detail) 모양이어야 한다.
+
+        빈 홈에서는 대부분의 어댑터가 (정당하게) 빈 튜플을 준다 — codex-cli 는
+        훅이 설치돼 있지 않으면 행 자체를 생략한다. 여기서 벤더 지식 없이 훅
+        설치 상태를 흉내 낼 방법이 없으므로, 실제로 행이 나오는 경로의 모양
+        검증은 해당 어댑터의 전용 테스트(tests/test_codex_cli.py::TestHealth)가
+        맡는다 — 이 테스트는 "던지지 않는다" 와 "나온 게 있다면 모양이 맞다"
+        만 모든 어댑터에 대해 증명한다.
+        """
+        for adapter_id in adapter_ids():
+            with self.subTest(adapter=adapter_id):
+                with tempfile.TemporaryDirectory() as home:
+                    rows = adapters.get(adapter_id, home=home).health(REPO, [])
+                rows = tuple(rows)
+                for row in rows:
+                    self.assertEqual(len(row), 3)
+                    label, ok, detail = row
+                    self.assertIsInstance(label, str)
+                    self.assertIsInstance(ok, bool)
+                    self.assertIsInstance(detail, str)
+
+    def test_28_discover_is_an_iterable_of_session_refs_and_never_raises(self):
+        """discover 는 mark 백필 전용 선택 메서드다(fallback_channels/health 와
+        같은 패턴). 빈 홈에서도 절대 던지지 않고, 준 게 있다면 SessionRef 여야
+        한다 — Claude 는 (일부러) 항상 빈 튜플이다(discover 의 docstring 참고).
+
+        `deadline` 은 키워드 전용이 아니라 위치로도 받아들여야 cmd_mark 의
+        호출(`discover(root, deadline=deadline)`)이 모든 어댑터에서 통한다 —
+        이미 지난 deadline 을 줘도 던지지 않아야 한다."""
+        import time
+
+        for adapter_id in adapter_ids():
+            with self.subTest(adapter=adapter_id):
+                with tempfile.TemporaryDirectory() as home:
+                    inst = adapters.get(adapter_id, home=home)
+                    refs = tuple(inst.discover(REPO))
+                    expired = tuple(inst.discover(REPO, deadline=time.time() - 1))
+                for got in (refs, expired):
+                    for ref in got:
+                        self.assertIsInstance(ref, A.SessionRef)
+
 
 if __name__ == "__main__":
     unittest.main()

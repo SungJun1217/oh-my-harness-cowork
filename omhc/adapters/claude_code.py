@@ -18,7 +18,7 @@ from ..adapter import (
     SessionRef,
 )
 from ..event import ARG_LIMIT, Event
-from . import _register, install_state_artifact, iso_epoch
+from . import _register, allow_headless, install_state_artifact, iso_epoch
 
 ARTIFACT_NAME = "omhc.txt"
 
@@ -207,7 +207,8 @@ class ClaudeCodeAdapter:
             except OSError:
                 continue
             head = head_of(path)
-            if str(head.get("entrypoint") or "") in NON_INTERACTIVE_ENTRYPOINTS:
+            if (str(head.get("entrypoint") or "") in NON_INTERACTIVE_ENTRYPOINTS
+                    and not allow_headless()):
                 continue
             if head.get("sidechain") or head.get("agentId"):
                 continue
@@ -391,7 +392,8 @@ class ClaudeCodeAdapter:
         sdk-py(보안 리뷰 훅 등이 남긴 것)였다.
         """
         head = head_of(source_path)
-        if str(head.get("entrypoint") or "") in NON_INTERACTIVE_ENTRYPOINTS:
+        if (str(head.get("entrypoint") or "") in NON_INTERACTIVE_ENTRYPOINTS
+                and not allow_headless()):
             return False
         return not (head.get("sidechain") or head.get("agentId"))
 
@@ -412,6 +414,14 @@ class ClaudeCodeAdapter:
             size=stat.st_size,
         )
 
+    def discover(self, repo_root: Optional[str],
+                deadline: Optional[float] = None) -> Tuple[SessionRef, ...]:
+        """빈 튜플을 명시한다. list_sessions 는 이 머신에서 130개 파일 34.3MB 를
+        읽어 249ms 였다(brief.py 의 _ref_for 주석) — Codex 쪽 mark 가 이걸
+        돌리면 훅 예산을 넘긴다. Claude 세션은 자기 훅이 항상 신뢰되므로
+        Codex→Claude 백필을 Claude 어댑터가 구현할 필요도 없다."""
+        return ()
+
     def native_resume_hint(self, ref: SessionRef) -> Optional[str]:
         """같은 벤더끼리는 이것이 무손실이며 우월하다. 우리 요약은 열등하다."""
         return "claude --resume {}".format(ref.session_id)
@@ -424,5 +434,11 @@ class ClaudeCodeAdapter:
 
         비어 있음을 명시한다 — 기반 클래스를 아무도 상속하지 않으므로 기본값이
         상속으로 얻어지지 않는다.
+        """
+        return ()
+
+    def health(self, repo_root: Optional[str], ledger_rows):
+        """Claude Code 의 SessionStart 훅은 신뢰 문제가 없어 codex 류의 조용한
+        생략이 없다 — 진단할 행태 결함이 없으므로 빈 튜플이다.
         """
         return ()

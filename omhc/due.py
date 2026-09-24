@@ -72,6 +72,13 @@ def due(
     번째 소비자로 **추가**한다(기존 코드 수정이 아니다). 순서 키는 파일 mtime 도
     레코드별 타임스탬프도 아니다 — 원장의 세션 시작 epoch 와 소스 파일 내 바이트
     오프셋이다. 이 머신의 최대 트랜스크립트에 타임스탬프 역행이 254건 있다.
+
+    cli._backfill_foreign_sessions 도 같은 키를 쓴다 — 신뢰 안 된 훅 때문에
+    원장에 없는 하네스의 세션을 discover() 로 찾아 채울 때, 그 세션의 시작
+    epoch(어댑터가 session_meta 등에서 읽음)를 원장에 이미 있는 그 하네스의
+    최신 시작 epoch 와 비교해 append 순서를 정한다. **여전히 mtime 은 아니다**
+    — "세션 시작 epoch 로만 순서를 정한다"는 이 함수와 완전히 같은 규칙이고,
+    다른 파일(원장 대 rollout)의 epoch 를 비교한다는 점만 새롭다.
     """
     state = locate.state_dir(repo_key, home=home)
     if is_off(state):

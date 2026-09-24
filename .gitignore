@@ -15,3 +15,6 @@ sandbox/
 build/
 dist/
 *.egg-info/
+
+# Claude Code 의 병렬 에이전트 worktree. 레포 안에 생기지만 커밋 대상이 아니다.
+.claude/worktrees/

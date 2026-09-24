@@ -132,6 +132,30 @@ class HarnessAdapter:
         """
         raise NotImplementedError
 
+    def discover(self, repo_root: Optional[str], deadline: Optional[float] = None):
+        """이 레포에 새로 나타난 세션들. `mark` 의 원장 백필 전용 선택 메서드.
+
+        `fallback_channels`/`health` 와 같은 선택 메서드 패턴이다 — 기본은 빈
+        튜플이며, list_sessions 처럼 비싼 전체 스캔을 모든 어댑터가 구현할
+        의무는 없다(Claude 는 이 스캔이 249ms 실측이라 훅 경로에서 절대 쓰면
+        안 되므로 명시적으로 빈 튜플을 돌려준다).
+
+        구현하는 어댑터는 반환하는 `SessionRef.epoch` 를 **세션 시작 시각**으로
+        채워야 한다 — list_sessions 의 epoch(파일 mtime, "최근 것부터" 정렬용)와
+        다르다. cmd_mark 가 이 값을 원장의 최신 시작 epoch 와 비교해 append
+        순서를 정하므로(invariant 6 이 금지하는 "순서의 근거로 삼는 mtime"이
+        아니라, due() 와 같은 키인 세션 시작 epoch 를 그대로 쓰는 것이다 —
+        허용된 예외다), mtime 을 여기 섞으면 오래된 세션이 최신으로 오인될
+        수 있다.
+
+        `deadline` 은 `time.time()` 과 같은 시계의 절대 시각(선택)이다. 스캔
+        비용이 큰 어댑터(Codex 의 날짜 디렉터리 순회)는 루프 안에서 주기적으로
+        확인해 넘기면 지금까지 모은 것만 돌려주고 멈춰야 한다 — 안 그러면
+        cmd_mark 쪽 시간 예산은 discover() 호출이 끝난 뒤에야 재기 때문에
+        무의미해진다. 기본값 `None` 은 "끊지 않는다"이다.
+        """
+        return ()
+
     def fallback_channels(self):
         """install_handoff 가 실패했을 때 순서대로 시도할 채널들.
 
@@ -140,6 +164,26 @@ class HarnessAdapter:
         "어댑터 추가는 파일 하나" 라는 계약이 문자 그대로 깨진다 — 세 번째
         WRITE 어댑터가 자기 파일 기반 폴백(Cursor 의 rules, kimi-code 의 메모리)을
         선언할 방법이 없어진다.
+        """
+        return ()
+
+    def health(self, repo_root: Optional[str], ledger_rows) -> Tuple[Tuple[str, bool, str], ...]:
+        """선택적 진단. 기본은 빈 튜플 — 모든 어댑터가 구현할 의무는 없다.
+
+        실측(codex-cli 0.155.1): 신뢰되지 않은 `~/.codex/hooks.json` 훅은 메시지도
+        원장 행도 없이 조용히 건너뛰어진다. brief 가 한 번도 안 돌아도 `omhc
+        status` 는 전부 PASS 를 보였다 — 사용자가 그 사실을 알 방법이 없었다.
+        하네스별 행태 증거가 필요하므로 코어가 아니라 어댑터가 소유한다.
+
+        `fallback_channels` 처럼 선택 메서드 패턴을 따른다 — 구현하지 않는
+        어댑터는 이 기본값으로 충분하고, `cmd_status` 가 단정하는 `(label, ok,
+        detail)` 형태만 지키면 된다. 절대 예외를 던지지 않는다 — status 는
+        진단 도구이고, 진단이 죽으면 열화를 보고할 방법이 없어진다.
+
+        `ledger_rows` 는 **레포로 거르지 않은** 원장이다 — 세션 id 는 전역
+        유일하므로, 호출자가 이 레포 키로 미리 거르면 자기 `.git` 을 가진 중첩
+        워크트리·서브모듈에서 시작한 세션이 다른 repo 키로 기록돼 영원히 "안
+        돈 것"으로 보인다.
         """
         return ()
 

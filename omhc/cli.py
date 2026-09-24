@@ -36,6 +36,95 @@ def _state_for(home: Optional[str], start: Optional[str] = None):
 # --- mark -------------------------------------------------------------------
 
 
+# 신뢰되지 않은 Codex 훅은 mark 를 조용히 건너뛴다(실측, codex_cli.py 참고).
+# 그러면 그 Codex 세션은 원장에 영영 없고, due() 는 원장만 읽으므로 Claude
+# 쪽 훅이 멀쩡히 돌아도 Codex→Claude 가 죽는다. 그래서 **Claude 의** mark 가
+# 얹혀서 다른 하네스(Codex)의 세션을 원장에 채운다 — due() 자체는 안 바뀐다.
+BACKFILL_CAP = 5
+# 훅 예산(150ms) 의 일부만 쓴다. 비싼 부분은 discover() 자체(Codex 는 날짜
+# 디렉터리 스캔)이므로 이 deadline 을 discover() 에도 그대로 넘겨 어댑터가
+# 스스로 스캔을 끊게 한다 — 여기서만 재고 있으면 discover() 호출 자체가
+# 늦게 끝나 이 mark 호출이 세션 시작을 지연시킬 수 있다.
+BACKFILL_TIME_BUDGET = 0.08
+
+
+def _ref_repo_key(ref) -> Optional[str]:
+    """이 ref 가 실제로 속한 레포 키. cmd_mark 가 자기 세션에 쓰는 것과 같은
+    해석(`locate.resolve_repo_root` → `locate.repo_key`)을 그대로 쓴다.
+
+    discover() 의 cwd 일치는 "root 아래(equal-or-descendant)"라서, `.git`
+    없는 부모 디렉터리에서 mark 가 불리면 그 밑의 **다른** 레포(자기 `.git`을
+    가진 자식, 예: 중첩 워크트리·서브모듈)에서 시작한 세션까지 통과한다.
+    거기서 온 세션을 그 부모의 repo 키로 원장에 적으면 다른 레포의 GOAL 이
+    이 레포의 브리핑에 새어든다 — repo 키를 다시 계산해 걸러야 한다.
+    """
+    if not ref.cwd:
+        return None
+    return locate.repo_key(locate.resolve_repo_root(ref.cwd))
+
+
+def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
+                                home, now: float) -> None:
+    deadline = time.time() + BACKFILL_TIME_BUDGET
+    rows = ledger.read(repo_key=key, home=home)
+    for adapter_id in sorted(adapters.REGISTRY):
+        if adapter_id == harness:
+            continue
+        if time.time() > deadline:
+            break
+        try:
+            refs = list(adapters.get(adapter_id, home=home).discover(
+                root, deadline=deadline))
+        except Exception:
+            continue
+        if not refs:
+            continue
+        own_rows = [r for r in rows if r.get("harness") == adapter_id]
+        known_sessions = {str(r.get("session")) for r in own_rows if r.get("session")}
+        newest_start = 0.0
+        for r in own_rows:
+            if r.get("event") == "start":
+                newest_start = max(newest_start, float(r.get("epoch") or 0.0))
+
+        # 먼저 자격 있는 것만 걸러 **전체를 놓고** 정렬한다 — 오래된 것부터
+        # 자르면(리뷰 결함) 8개 중 5개가 죄다 옛것이 되어 due() 가 최신 대신
+        # 4번째로 최신인 세션을 돌려준다. 최신 N개를 골라야 한다.
+        eligible = []
+        for ref in refs:
+            if not ref.session_id or ref.session_id in known_sessions:
+                continue
+            if ref.epoch <= newest_start:
+                continue
+            if now and (now - ref.epoch) > due.MAX_AGE_SECONDS:
+                continue
+            if _ref_repo_key(ref) != key:
+                continue
+            eligible.append(ref)
+        eligible.sort(key=lambda r: r.epoch)
+        selected = eligible[-BACKFILL_CAP:]
+
+        # 고른 뒤에는 **오름차순으로 붙인다** — 원장의 append 순서가 시작
+        # 순서와 일치해야 due() 가(원장을 거꾸로 읽어 "가장 최근"을 고른다)
+        # 진짜 최신 세션을 돌려준다. 이미 최신 N개로 골랐으므로 여기서부터는
+        # 시간 예산으로 중간에 끊지 않는다 — 끊으면 방금 고른 최신 세션이
+        # 아니라 그보다 오래된 것만 남을 수 있다(리뷰 결함). 어차피 최대
+        # BACKFILL_CAP 줄만 쓰므로 비용은 무시할 만하다.
+        for ref in selected:
+            row = {
+                "repo": key,
+                "harness": adapter_id,
+                "session": ref.session_id,
+                "event": "start",
+                "epoch": ref.epoch,
+                "path": ref.source_path,
+                "cwd": root,
+                # health() 가 이 값을 보고 "훅이 실제로 돌았다" 는 증거에서 뺀다
+                # (codex_cli.py) — 백필이 신뢰 없는 훅을 가려버리면 안 된다.
+                "via": "scan",
+            }
+            ledger.append(row, home=home)
+
+
 def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     """세션 시작을 원장에 남긴다. 훅이 부른다. 약 220바이트 한 줄."""
     raw = args.stdin if args.stdin is not None else _stdin_text()
@@ -73,6 +162,14 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
         except Exception:
             pass
     ledger.append(row, home=home)
+    # 다른 하네스의 세션을 원장에 백필한다(위 주석). 훅 경로이므로 실패해도
+    # mark 자체는 항상 exit 0, 빈 stdout 이어야 한다(invariant 2).
+    try:
+        if not due.is_off(state):
+            _backfill_foreign_sessions(args.harness, root, key, state, home,
+                                       row["epoch"])
+    except Exception:
+        pass
     # 어떤 omhc 호출에서든 오래된 AGENTS.md 구간을 붕괴시킨다.
     try:
         agents_md.collapse(root)
@@ -206,7 +303,10 @@ def _check(out, label: str, ok: bool, detail: str) -> bool:
 def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     root, key, state = _state_for(home)
     installed = adapters.present(now=time.time)
-    rows = [r for r in ledger.read(home=home) if r.get("repo") == key]
+    # repo_key= 를 쓴다 — read() 는 limit(기본 2000, 머신 전체 공유)보다 먼저
+    # repo 필터를 적용하므로, 여러 레포를 오가는 사람에게서 이 레포의 행이
+    # 슬라이스 밖으로 밀려나지 않는다(ledger.read 문서 참고).
+    rows = ledger.read(home=home, repo_key=key)
     artifact = os.path.join(state, ARTIFACT_NAME)
 
     # watch.lag 가 정확히 이 계산을 소유한다. 두 벌로 두면 고정 레이아웃이
@@ -226,6 +326,22 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     leaked = bool(shared) and managed_block.installed_captured_at(
         agents_md.path_for(root)) is not None
 
+    # 선택적 어댑터 진단(예: codex 신뢰 안 된 훅). 세션 id 는 전역 유일이므로
+    # 레포로 거르지 않은 원장을 넘긴다 — 위 rows 처럼 이 레포로 미리 거르면
+    # 자기 .git 을 가진 중첩 워크트리·서브모듈에서 시작한 세션이 다른 repo 키로
+    # 기록돼 여기서 영원히 "안 돈 것"으로 보인다. limit(기본 2000, 머신 전체
+    # 공유)이 14일 창을 못 덮을 수 있다는 게 알려진 한계다 — 개인용 도구고
+    # status 는 훅 경로가 아니므로 필요하면 여기서만 무제한으로 읽는다.
+    # 한 어댑터가 죽어도 나머지 status 가 죽으면 안 되므로 어댑터별로 감싼다.
+    all_rows = ledger.read(home=home, limit=0)
+    health_rows = []
+    for adapter_id in installed:
+        try:
+            inst = adapters.get(adapter_id, home=home)
+            health_rows.extend(getattr(inst, "health", lambda *a: ())(root, all_rows))
+        except Exception:
+            continue
+
     if args.json:
         out.write(json.dumps({
             "repo_root": root, "repo_key": key, "state_dir": state,
@@ -234,6 +350,8 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
             "injections": injections, "pulls": pulls,
             "off": due.is_off(state), "watcher_pid": watch.read_lock(state),
             "instruction_files": {"shared": shared, "stale_block": leaked},
+            "health": [{"label": label, "ok": ok, "detail": detail}
+                       for label, ok, detail in health_rows],
         }, ensure_ascii=False, indent=2) + "\n")
         return 0
 
@@ -260,6 +378,8 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
                      "AGENTS.md not shared with CLAUDE.md"
                      if os.path.exists(agents_md.path_for(root))
                      else "no AGENTS.md")
+    for label, health_ok, detail in health_rows:
+        ok &= _check(out, label, health_ok, detail)
     # 항상 참인 항목을 ok 에 접으면 독자가 리터럴 True 를 추적해야 안다.
     # watcher 줄처럼 정보로만 출력한다.
     _check(out, "pull rate", True,

@@ -111,15 +111,18 @@ PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
   <img src="assets/flow-light.svg" width="100%" alt="SessionStart 훅이 mark 와 brief 를 부르고, due() 가 상대 하네스의 최신 세션을 고르고, 화이트리스트 파서가 Event 를 만들고, mint() 가 900바이트 이하 핸드오프를 렌더링하고, gate() 가 세션당 한 번만 통과시키고, 아카이브가 원본을 하드링크하며 오프셋 색인을 남기는 그림">
 </picture>
 
-**두 방향 모두 Codex의 SessionStart 훅이 신뢰되어 돌아야 합니다.** `due()`가
-상대 세션을 고르려면 그 세션이 시작될 때 자신의 `mark`가 원장에 남아 있어야
-하는데, 그 기록은 오직 그 하네스 자신의 훅에서만 남습니다. Codex 훅이
-신뢰되지 않으면 `mark`도 `brief`도 안 돌아 그 Codex 세션 자체가 원장에 잡히지
-않으므로, Codex→Claude(그 세션을 찾을 원장 행이 없음)와 Claude→Codex(Codex
-쪽 `brief` 호출 자체가 없음) 둘 다 아무것도 전달하지 못합니다. 두 훅이 다른
-점은 **신뢰 절차의 유무**입니다 — Claude Code 훅은 설정에 넣으면 그대로
-돌지만, Codex 훅은 Codex 자신의 절차로 한 번 승인해야 합니다(아래 설치 절
-경고 참고).
+**Claude→Codex 는 여전히 Codex의 SessionStart 훅이 신뢰되어 돌아야
+합니다** — `brief`는 그 훅 안에서만 돌고, 훅이 안 돌면 Codex 쪽은 애초에
+주입할 기회 자체가 없습니다. **Codex→Claude 는 더 이상 거기 매이지
+않습니다.** `due()`가 상대 세션을 고르려면 그 세션의 시작이 원장에 있어야
+하고, 보통은 그 하네스 자신의 훅만 그 행을 남기지만, 이제 Claude 의
+`mark`가 다른 어댑터의 `discover()`도 함께 불러 롤아웃 파일에서 바로 Codex
+세션을 찾아 원장에 채워 넣습니다(원장에 `via:"scan"`으로 표시). 그래서
+Codex 자신의 훅이 신뢰된 적이 없어도 그 세션이 원장에 남습니다. 두 훅이
+여전히 다른 점은 **신뢰 절차의 유무**입니다 — Claude Code 훅은 설정에
+넣으면 그대로 돌지만, Codex 훅은 Codex 자신의 절차로 한 번 승인해야
+합니다(아래 설치 절 경고 참고) — 그리고 그 승인은 여전히 Claude→Codex
+방향을 살리는 유일한 방법입니다.
 
 **두 개의 결정적 선택:**
 
@@ -147,7 +150,7 @@ PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
-omhc status          # 게이트된 검사 5개 전부 PASS/FAIL. SKIP 은 없다
+omhc status          # 게이트된 검사 5개(+ 설치 시 codex hook) 전부 PASS/FAIL. SKIP 은 없다
 ```
 
 최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
@@ -175,16 +178,21 @@ ln -s "$PWD/bin/omhc" ~/.local/bin/omhc
 
 > [!WARNING]
 > 실측(codex-cli 0.155.1): 손으로 떨어뜨린 `hooks.json`은 기본적으로
-> 신뢰되지 않고, **신뢰되지 않은 훅은 메시지 없이 조용히 건너뛰어** `mark`도
-> `brief`도 한 번도 돌지 않고, 그러면 두 방향 모두 전달되지 않습니다 — Codex
-> 자신의 훅 신뢰 절차로 한 번 승인해야 합니다.
+> 신뢰되지 않고, **신뢰되지 않은 훅은 메시지 없이 조용히 건너뛰어** Codex
+> 쪽의 `mark`도 `brief`도 한 번도 돌지 않아 그 방향(**Claude→Codex**)으로는
+> Codex 세션에 아무것도 주입되지 않습니다 — 그 방향을 고치려면 Codex 자신의
+> 훅 신뢰 절차로 한 번 승인해야 합니다. **Codex→Claude** 는 이것 없이도
+> 됩니다 — Claude 자신의 `mark`가 롤아웃 파일에서 바로 Codex 세션을 원장에
+> 채워 넣습니다.
 > 두 조각 모두 `--wire claude`를 씁니다 — `--wire sdk`(최상위
 > `additionalContext`)는 codex-cli 0.155.1에서 `hook: SessionStart Failed`로
 > 거부되고 아무것도 주입되지 않습니다.
 
 `omhc status`는 게이트된 검사 5개(adapters/ledger/archive/off switch/
 instruction files, 전부 PASS/FAIL)와 정보성 행 2개(pull rate, watcher)를
-보여줍니다.
+보여줍니다. omhc Codex 훅이 설치돼 있으면 `codex hook` 행이 붙습니다. 훅 설치 뒤
+이 레포의 가장 최근 Codex 세션이 훅을 한 번도 돌리지 않았으면(신뢰되지 않은 훅)
+FAIL 이고, 그 세션의 originator 를 함께 보여줍니다.
 
 ### AGENTS.md 를 Claude Code 와 공유하는 레포
 
@@ -279,21 +287,29 @@ bash tests/smoke.sh                             # 적대적 입력 7종
 
   </details>
 
-- **신뢰되지 않은 Codex 훅은 두 방향 모두를 통째로 끕니다.**
+- **신뢰되지 않은 Codex 훅은 여전히 Claude→Codex 방향을 통째로 끕니다.**
   <details>
   <summary>자세히</summary>
 
   실측(codex-cli 0.155.1): 신뢰되지 않은 `hooks.json`은 메시지 없이 조용히
-  건너뛰어 `mark`도 `brief`도 한 번도 돌지 않습니다. `mark`가 안 돌면 그 Codex
-  세션은 원장(ledger)에 전혀 기록되지 않으므로, 나중에 Claude Code를 열어도
-  `due()`가 찾을 원장 행이 없어 Codex→Claude 방향도 받지 못합니다.
+  건너뛰어 Codex 쪽의 `mark`도 `brief`도 한 번도 돌지 않습니다.
   `deliver()`(Path B 포함)는 `brief` 호출 안에서만 실행되므로, 훅이
-  신뢰되지 않으면 Claude→Codex 방향도 `AGENTS.md` 관리 구간이나 outbox가
-  대신 받는 게 아니라 아예 켜지지 않습니다 — **"하루 루프의 절반은 동작한다"는
-  성립하지 않습니다.** Path B/outbox는 `brief`가 실제로 도는데
-  `install_handoff`가 실패할 때 열립니다 — 대표적으로 `~/.codex/hooks.json`에
-  omhc 훅이 없을 때이지만, `~/.omhc` 쓰기 실패 등 다른 예외도 같은 경로를
-  탑니다(예: 수동 `omhc brief --harness codex-cli`).
+  신뢰되지 않으면 Claude→Codex 방향은 `AGENTS.md` 관리 구간이나 outbox가
+  대신 받는 게 아니라 아예 켜지지 않습니다. Path B/outbox는 `brief`가 실제로
+  도는데 `install_handoff`가 실패할 때 열립니다 — 대표적으로
+  `~/.codex/hooks.json`에 omhc 훅이 없을 때이지만, `~/.omhc` 쓰기 실패 등
+  다른 예외도 같은 경로를 탑니다(예: 수동 `omhc brief --harness codex-cli`).
+
+  Codex→Claude 는 더 이상 그 훅에 매이지 않습니다 — Claude 자신의 `mark`가
+  Codex 어댑터의 `discover()`를 불러, 이 레포에서 이미 원장에 있는 그 하네스
+  행보다 더 최근인 Codex 세션의 원장 행을 롤아웃 파일에서 바로 채워 넣습니다
+  (`via:"scan"`, `mark` 호출당 최대 5개). `omhc status`의 `codex hook` 행은
+  일부러 이 `scan` 행을 세지 않습니다 — 세면 훅 자체가 안 돈 사실이
+  가려집니다. **알려진 구멍(미검증):** `codex resume`으로 옛 롤아웃을 이어가면
+  그 롤아웃의 원래 시작 시각이 그대로 남으므로, "더 최근이어야 한다" 검사에
+  걸려 재개된 옛 세션이 누락될 수 있습니다 — 그리고 그 원래 시작 시각이
+  7일(`due.MAX_AGE_SECONDS`)보다 오래됐으면, 재개 여부와 무관하게 백필 자체의
+  나이 검사에서도 걸러집니다.
 
   </details>
 
