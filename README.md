@@ -151,7 +151,7 @@ warning under Install).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
-omhc status          # 5 gated checks, all PASS/FAIL. No SKIP
+omhc status          # 5 gated checks (+ codex hook when installed), all PASS/FAIL. No SKIP
 ```
 
 This unpacks the latest release into `~/.local/share/omhc/<version>` and
@@ -190,7 +190,9 @@ config (don't overwrite it).
 
 `omhc status` shows 5 gated checks (adapters/ledger/archive/off switch/
 instruction files, all PASS/FAIL) plus 2 informational rows (pull rate,
-watcher).
+watcher). When the omhc Codex hook is installed, a `codex hook` row is added: it
+FAILs when the newest Codex session for this repo since the hook was installed never
+ran it — the untrusted-hook case — and names that session's originator.
 
 ### Repos that share AGENTS.md with Claude Code
 
