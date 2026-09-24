@@ -51,8 +51,13 @@ class TestDetect(unittest.TestCase):
             self.assertFalse(got.present)
             self.assertTrue(got.note)
 
-    def test_detect_finds_the_real_projects_dir(self):
-        self.assertTrue(CC.ClaudeCodeAdapter().detect().present)
+    def test_detect_finds_an_existing_projects_dir(self):
+        """실제 홈을 보지 않는다. CI 러너에는 Claude Code 가 없어서 실측 홈에 기대면 항상 빨갛다."""
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".claude", "projects"))
+            got = CC.ClaudeCodeAdapter(home=home).detect()
+            self.assertTrue(got.present)
+            self.assertEqual(got.note, os.path.join(home, ".claude", "projects"))
 
 
 @unittest.skipUnless(have_fixtures, MISSING)
