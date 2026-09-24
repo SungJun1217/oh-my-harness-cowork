@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 630" width="1040" height="630" role="img" aria-label="How omhc reads a source harness session, mints a handoff, archives the original bytes, and injects the result into the target harness's new session">
+<style>text{white-space:pre}</style>
+<rect x="0.5" y="0.5" width="1039" height="629" rx="16" fill="#1B1917"/>
+<defs><marker id="fa-dark" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#A3968C"/></marker><marker id="fg-dark" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#7FBFA4"/></marker></defs>
+<clipPath id="clip0-dark"><rect x="20" y="40" width="210" height="250" rx="13"/></clipPath><rect x="20" y="40" width="210" height="250" rx="13" fill="#26211E" stroke="#3A332E" stroke-width="1.5"/><rect x="20" y="40" width="5" height="250" fill="#A3968C" clip-path="url(#clip0-dark)"/>
+<clipPath id="clip1-dark"><rect x="350" y="40" width="340" height="250" rx="13"/></clipPath><rect x="350" y="40" width="340" height="250" rx="13" fill="#26211E" stroke="#3A332E" stroke-width="1.5"/><rect x="350" y="40" width="5" height="250" fill="#A3968C" clip-path="url(#clip1-dark)"/>
+<clipPath id="clip2-dark"><rect x="800" y="40" width="210" height="250" rx="13"/></clipPath><rect x="800" y="40" width="210" height="250" rx="13" fill="#26211E" stroke="#3A332E" stroke-width="1.5"/><rect x="800" y="40" width="5" height="250" fill="#F0A45C" clip-path="url(#clip2-dark)"/>
+<circle cx="377.0" cy="119.0" r="11.0" fill="#A3968C"/><text x="377.0" y="123.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12" fill="#1B1917" text-anchor="middle" font-weight="bold">1</text>
+<circle cx="377.0" cy="146.0" r="11.0" fill="#A3968C"/><text x="377.0" y="150.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12" fill="#1B1917" text-anchor="middle" font-weight="bold">2</text>
+<circle cx="377.0" cy="173.0" r="11.0" fill="#F0A45C"/><text x="377.0" y="177.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12" fill="#1B1917" text-anchor="middle" font-weight="bold">3</text>
+<circle cx="377.0" cy="200.0" r="11.0" fill="#A3968C"/><text x="377.0" y="204.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12" fill="#1B1917" text-anchor="middle" font-weight="bold">4</text>
+<circle cx="377.0" cy="227.0" r="11.0" fill="#A3968C"/><text x="377.0" y="231.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12" fill="#1B1917" text-anchor="middle" font-weight="bold">5</text>
+<circle cx="377.0" cy="254.0" r="11.0" fill="#A3968C"/><text x="377.0" y="258.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12" fill="#1B1917" text-anchor="middle" font-weight="bold">6</text>
+<line x1="230" y1="115.0" x2="344" y2="115.0" stroke="#A3968C" stroke-width="1.5" marker-end="url(#fa-dark)"/>
+<line x1="794" y1="177.5" x2="696" y2="177.5" stroke="#A3968C" stroke-width="1.5" marker-end="url(#fa-dark)"/>
+<line x1="696" y1="227.5" x2="794" y2="227.5" stroke="#7FBFA4" stroke-width="1.5" marker-end="url(#fg-dark)"/>
+<clipPath id="clip3-dark"><rect x="180" y="400" width="680" height="150" rx="13"/></clipPath><rect x="180" y="400" width="680" height="150" rx="13" fill="#26211E" stroke="#3A332E" stroke-width="1.5"/><rect x="180" y="400" width="5" height="150" fill="#A3968C" clip-path="url(#clip3-dark)"/>
+<line x1="520.0" y1="290" x2="520.0" y2="396" stroke="#A3968C" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#fa-dark)"/>
+<text x="36.0" y="74.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="17" fill="#EDE3D9" text-anchor="start" font-weight="600">Codex CLI session</text>
+<text x="36.0" y="102.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12" fill="#A3968C" text-anchor="start">session file on disk</text>
+<text x="36.0" y="120.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12" fill="#A3968C" text-anchor="start">(JSONL / rollout)</text>
+<text x="36.0" y="170.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11.5" fill="#A3968C" text-anchor="start">already on disk --</text>
+<text x="36.0" y="188.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11.5" fill="#A3968C" text-anchor="start">nothing is re-run</text>
+<text x="816.0" y="74.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="17" fill="#EDE3D9" text-anchor="start" font-weight="600">Claude Code</text>
+<text x="816.0" y="102.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12" fill="#A3968C" text-anchor="start">new session</text>
+<text x="816.0" y="152.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11.5" fill="#EDE3D9" text-anchor="start">SessionStart hook</text>
+<text x="816.0" y="170.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11.5" fill="#EDE3D9" text-anchor="start">fires here</text>
+<text x="816.0" y="218.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" fill="#A3968C" text-anchor="start">handoff shows up</text>
+<text x="816.0" y="236.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11" fill="#A3968C" text-anchor="start">in its context</text>
+<text x="520.0" y="70.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="18" fill="#EDE3D9" text-anchor="middle" font-weight="600">omhc</text>
+<text x="520.0" y="88.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="11.5" fill="#A3968C" text-anchor="middle">brief.compute()</text>
+<text x="398.0" y="124.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12.5" fill="#EDE3D9" text-anchor="start">due() -&gt; other harness's session</text>
+<text x="398.0" y="151.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12.5" fill="#EDE3D9" text-anchor="start">parse -&gt; whitelist -&gt; Event</text>
+<text x="398.0" y="178.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12.5" fill="#F0A45C" text-anchor="start">mint() &lt;= 900 B (assert)</text>
+<text x="398.0" y="205.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12.5" fill="#EDE3D9" text-anchor="start">gate() once per session</text>
+<text x="398.0" y="232.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12.5" fill="#EDE3D9" text-anchor="start">archive: os.link + TSV index</text>
+<text x="398.0" y="259.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="12.5" fill="#EDE3D9" text-anchor="start">deliver() -&gt; stdout (delivered.tsv)</text>
+<text x="287.0" y="105.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="10.5" fill="#A3968C" text-anchor="middle">read (parse)</text>
+<text x="745.0" y="167.5" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="10.5" fill="#A3968C" text-anchor="middle">mark + brief</text>
+<text x="745.0" y="217.5" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="10.5" fill="#7FBFA4" text-anchor="middle">inject: stdout</text>
+<text x="200.0" y="430.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="16" fill="#EDE3D9" text-anchor="start" font-weight="600">archive (written after gate)</text>
+<text x="200.0" y="458.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13" fill="#EDE3D9" text-anchor="start">~/.omhc/&lt;repo-key&gt;/</text>
+<text x="200.0" y="480.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13" fill="#EDE3D9" text-anchor="start">os.link hardlinks the original session file</text>
+<text x="200.0" y="502.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13" fill="#EDE3D9" text-anchor="start">TSV offset index, ~115 B per event</text>
+<text x="200.0" y="524.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13" fill="#EDE3D9" text-anchor="start">omhc show E1 reads the original bytes back by offset</text>
+<text x="520.0" y="590.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" fill="#A3968C" text-anchor="middle">the same path runs in reverse</text>
+<text x="520.0" y="612.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#A3968C" text-anchor="middle">Codex→Claude and Claude→Codex both need the Codex SessionStart hook trusted: its mark is what records Codex sessions.</text>
+</svg>
