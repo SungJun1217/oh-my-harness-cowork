@@ -278,7 +278,7 @@ class TestEndToEnd(unittest.TestCase):
         hooks_path = os.path.join(hooks_dir, "hooks.json")
         with open(hooks_path, "w", encoding="utf-8") as fh:
             json.dump({"hooks": {"SessionStart": [
-                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+                {"hooks": [{"type": "command", "command": "omhc brief --harness codex-cli"}]}]}}, fh)
         install_epoch = now - 3600
         os.utime(hooks_path, (install_epoch, install_epoch))
         self.h.plant("cx1", now - 600)  # install 이후 시작

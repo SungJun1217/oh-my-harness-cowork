@@ -274,6 +274,23 @@ class TestInstallShParity(unittest.TestCase):
             {"hooks": [{"type": "command", "command": "echo hello"}]},
         ]}})
 
+    def test_only_omhc_hooks_drops_the_hooks_key_entirely(self):
+        # #20: SessionStart 가 omhc 훅뿐이면, 지우고 나서 hooks 가 빈 객체로
+        # 남는 게 아니라 hooks 키 자체가 사라져야 한다 — 두 판정이 같이 그런다.
+        conf = {"hooks": {"SessionStart": [
+            {"hooks": [
+                {"type": "command", "command": "$HOME/.local/bin/omhc mark --harness claude-code"},
+                {"type": "command", "command": "$HOME/.local/bin/omhc brief --harness claude-code --wire claude"},
+            ]},
+        ]}}
+        got_sh, changed_sh = self._run_install_sh(json.loads(json.dumps(conf)))
+        got_py, changed_py = self._run_hookconf_strip(json.loads(json.dumps(conf)))
+        self.assertTrue(changed_sh)
+        self.assertTrue(changed_py)
+        self.assertEqual(got_sh, {})
+        self.assertEqual(got_py, {})
+        self._assert_parity(conf)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -105,6 +105,10 @@ def main():
         hooks["SessionStart"] = kept_groups
     else:
         del hooks["SessionStart"]
+    if not hooks:
+        # hooks 가 SessionStart 하나만 들고 있었다면 이제 빈 객체다 — 남겨두면
+        # 아무 것도 설치한 적 없는 설정에 {"hooks": {}} 만 흔적으로 남는다.
+        del conf["hooks"]
 
     shutil.copy2(target, target + ".omhc-bak")  # 권한 비트도 원본과 같게
 
