@@ -61,6 +61,23 @@ omhc status          # 다섯 검사 전부 PASS/FAIL. SKIP 은 없다
 | Claude Code | `hooks/claude-settings.fragment.json` | `~/.claude/settings.json` 의 `hooks` |
 | Codex CLI | `hooks/codex-hooks.json` | `~/.codex/hooks.json` |
 
+### AGENTS.md 를 Claude Code 와 공유하는 레포
+
+권장 배치는 `AGENTS.md` 를 하네스 중립 원본으로 두고, `CLAUDE.md` 는 실제 파일로
+`@AGENTS.md` 로 시작한 뒤 Claude 전용 내용을 잇는 것입니다(이 레포 자체가 그
+구조입니다). `CLAUDE.md` 를 `AGENTS.md` 로의 심링크로 두는 것도 마찬가지로
+공유입니다 — 어느 쪽이든 `AGENTS.md` 는 심링크여선 안 됩니다.
+
+이런 레포에서는 omhc 가 `AGENTS.md` 에 절대 쓰지 않습니다. Codex 용 관리 구간
+(Path B)이 Claude Code 세션에도 그대로 읽혀 핸드오프가 새고, 심링크를 통해 쓰면
+공유·추적 중인 원본 파일이 바뀌기 때문입니다. Codex 로의 핸드오프는 Codex의
+SessionStart 훅(Path A)으로 전달됩니다 — 이 훅이 신뢰되어 돌지 않으면 Path B/
+outbox 가 대신 받는 게 아니라 Codex 쪽 `brief` 호출 자체가 없어 아무것도
+전달되지 않으므로, **Codex 는 outbox 디렉터리를 자동으로 읽지도 않을뿐더러**
+위 표의 Codex 훅을 반드시 설치해야 합니다(그리고 그 훅을 Codex 자신의 절차로
+신뢰해야 합니다). `omhc status` 의 `instruction files` 행이 이 레이아웃을
+보여줍니다.
+
 ## 사용
 
 | 명령 | 역할 |
@@ -105,10 +122,16 @@ omhc의 가치는 **벤더가 다를 때**입니다. 교차 벤더 재생은 thi
   구현했고 모르는 페이로드는 예외 대신 `unparsed`로 계상됩니다. `codex login`
   후 `python3 tests/harvest.py --force` 로 골든을 갱신해야 합니다. 테스트
   클래스 이름에 `UNVERIFIED`를 남겨 뒀습니다.
-- **Codex 훅 신뢰가 미검증입니다.** `HookStateToml{enabled, trusted_hash}`가 손으로
-  떨어뜨린 `hooks.json`을 거부할 수 있습니다. 거부돼도 Codex→Claude 방향은 훅에
-  의존하지 않으므로 하루 루프의 절반은 동작하고, 반대 방향은 `AGENTS.md` 관리
-  구간이 받습니다.
+- **실측(codex-cli 0.155.1): 신뢰되지 않은 `hooks.json`은 메시지 없이 조용히
+  건너뛰어 `brief`가 한 번도 돌지 않습니다.** `deliver()`(Path B 포함)는 그
+  `brief` 호출 안에서만 실행되므로, 훅이 신뢰되지 않으면 Codex로 들어가는
+  방향은 아무것도 받지 못합니다 — `AGENTS.md` 관리 구간이나 outbox가 대신
+  받는 게 아니라 아예 켜지지 않습니다. Codex→Claude 방향은 이 훅에 의존하지
+  않고 rollout 파일을 직접 읽으므로 하루 루프의 절반은 그래도 동작합니다.
+  Path B/outbox는 `brief`가 실제로 도는데 `install_handoff`가 실패할 때
+  열립니다 — 대표적으로 `~/.codex/hooks.json`에 omhc 훅이 없을 때이지만,
+  `~/.omhc` 쓰기 실패 등 다른 예외도 같은 경로를 탑니다(예: 수동
+  `omhc brief --harness codex-cli`).
 - **원본 포맷은 공식 계약이 아닙니다.** Claude Code의 on-disk 스키마는 문서화되지
   않았고 2026년 내내 파괴적으로 변했습니다(공식 `SessionStore`조차 엔트리를
   "opaque"로 선언합니다). 화이트리스트 + fail-open + `status`의 열화 보고로
@@ -141,5 +164,7 @@ v1은 어댑터 2개만 구현합니다. 3번째를 붙이는 비용은 **파일
 3. `tests/fixtures/<harness>/` 에 실물 세션 하나를 얼린다
 
 코어 수정은 없습니다. 읽기와 쓰기는 독립 capability라서, 세션 훅이 없는 하네스는
-**읽기 전용 어댑터가 정상 상태**이고 결함이 아닙니다. 주입 경로가 아예 없으면
-`<repo>/.omhc/outbox/` 로 떨어지는 보편 바닥이 받습니다.
+**읽기 전용 어댑터가 정상 상태**이고 결함이 아닙니다. 그 하네스로의 `brief`가
+실행됐는데 주입 경로가 없으면(또는 실패하면) `<repo>/.omhc/outbox/` 로 떨어지는
+보편 바닥이 받습니다 — `brief` 자체가 안 도는 경우(예: 훅이 없거나 신뢰되지
+않아 세션 시작 때 불리지 않음)는 outbox도 받지 못합니다.

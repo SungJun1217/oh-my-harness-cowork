@@ -433,6 +433,22 @@ class TestMetadataKindDiscriminator(unittest.TestCase):
         humans = [e for e in read.events if e.author == "human"]
         self.assertEqual(len(humans), 1)
 
+    def test_omhcs_own_injected_handoff_is_not_a_human_turn(self):
+        """실측(codex-cli 0.155.1): omhc 가 주입한 표식이 role=user 로 rollout 에
+
+        실제로 나타난다(content_item_kinds=["hooks.additional_context"]). 이걸
+        사람 발화로 잘못 읽으면 다음 핸드오프가 omhc 자신의 표식을 GOAL/NEXT 로
+        착각해 되먹임 루프가 생긴다.
+        """
+        read = self._read([
+            {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
+            self._msg("user", "[omhc] GOAL: 리더를 붙여서 양방향으로 만들기",
+                      ["hooks.additional_context"]),
+            self._msg("user", "진짜 사람의 말", ["user.text"]),
+        ])
+        self.assertEqual(len([e for e in read.events if e.author == "human"]), 1)
+        self.assertIn("kind:hooks.additional_context", read.dropped)
+
     def test_a_new_user_prefixed_kind_is_not_lost(self):
         """접두 허용이라 새 user.* kind 가 생겨도 사람의 말을 잃지 않는다."""
         read = self._read([

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from omhc import adapter as A
+from omhc import guard
 from omhc.adapters import claude_code as CC
 
 from . import _repo
@@ -117,7 +118,9 @@ class TestReadSession(unittest.TestCase):
         joined = "\n".join(e.text for e in humans)
         self.assertNotIn("<command-name>", joined)
         self.assertNotIn("<local-command-stdout>", joined)
-        self.assertNotIn("[Request interrupted by user]", joined)
+        for synthetic in guard.SYNTHETIC_HUMAN:
+            for ev in humans:
+                self.assertNotEqual(ev.text, synthetic)
 
     def test_tool_result_user_records_never_become_human(self):
         """Claude Code는 tool_result 를 type:\"user\" 로 되돌린다. 67개가 그렇다."""
@@ -218,6 +221,39 @@ class TestReadSessionForgedRecords(unittest.TestCase):
              "message": {"content": "메타"}},
         ])
         self.assertEqual(len(read.events), 0)
+
+    def test_synthetic_assistant_record_is_dropped(self):
+        """Claude Code 2.1.281 자신의 스킵 판정과 같은 레코드다.
+
+        <synthetic> 모델이나 isApiErrorMessage 는 로그인 안내 같은 하네스 자체
+        발화이지 에이전트의 말이 아니다 — PLAN? 으로도 새어나가면 안 된다.
+        """
+        read = self._read([
+            {"type": "assistant", "cwd": REPO, "isApiErrorMessage": True,
+             "timestamp": "2026-09-22T00:00:00.000Z",
+             "message": {"model": "claude-opus-4",
+                         "content": [{"type": "text",
+                                      "text": "Not logged in · Please run /login"}]}},
+            {"type": "assistant", "cwd": REPO,
+             "timestamp": "2026-09-22T00:00:01.000Z",
+             "message": {"model": "<synthetic>",
+                         "content": [{"type": "text", "text": "synthetic push"}]}},
+        ])
+        self.assertEqual(len(read.events), 0)
+        self.assertEqual(read.dropped.get("synthetic"), 2)
+
+    def test_interrupted_for_tool_use_yields_no_human_event_and_no_next_slot(self):
+        rows = [
+            {"type": "user", "cwd": REPO, "timestamp": "2026-09-22T00:00:00.000Z",
+             "message": {"content": "정상적인 목표 진술"}},
+            {"type": "user", "cwd": REPO, "timestamp": "2026-09-22T00:00:01.000Z",
+             "message": {"content": "[Request interrupted by user for tool use]"}},
+        ]
+        read = self._read(rows)
+        self.assertEqual(len(read.events), 1)
+        from omhc import mint
+        out = mint.mint(read, to_adapter_id="codex-cli", budget=900, now=1758500000.0)
+        self.assertNotIn("interrupted by user for tool use", out)
 
     def test_cwd_is_found_even_when_absent_from_the_first_records(self):
         rows = [

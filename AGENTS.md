@@ -24,6 +24,11 @@ bin/omhc status                                       # the one human dashboard 
 - CI (`.github/workflows/test.yml`) runs both suites on Python 3.9–3.14 (ubuntu) and 3.9/3.14 (macOS).
 - Commit only with both suites green, and never push without asking.
 
+## Branches
+
+- `main` holds released states only. `develop` is the integration branch. Each unit of work is a `feature/<slug>` branched from `develop` and merged back with `git merge --no-ff` (one merge commit per unit), then deleted.
+- Never commit directly to `main` or `develop`. Release (`develop` → `main`, optionally tagged `v0.x`) only when the user asks.
+
 ## Trying omhc for real
 
 Trying omhc for real: don't install it on the host (its SessionStart hook would fire in the sessions developing it, and it writes `AGENTS.md` into the working tree). Use the gitignored `sandbox/` scripts: `bash sandbox/setup.sh` builds an isolated `HOME` at `~/omhc-sandbox`, and `bash sandbox/run.sh claude|codex|omhc …` runs the host binaries under it. Everything omhc and both harnesses touch is under `HOME`.

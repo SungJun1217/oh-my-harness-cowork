@@ -59,6 +59,12 @@ _VERB_BY_TOOL = {
 # 모르는 툴의 기본값. 조용히 버리지 않고 이 이름으로 계상한다.
 _DEFAULT_VERB = "ran"
 
+# Claude Code 2.1.281 자신의 스킵 판정: isApiErrorMessage===true ||
+# isVirtual===true || message.model==="<synthetic>" (바이너리에서 확인).
+# 이 값들을 가진 assistant 레코드는 사람도 에이전트도 쓰지 않은, 하네스가
+# 스스로 합성한 텍스트다(로그인 안내, 합성 PushNotification tool_use 등).
+_SYNTHETIC_MODEL = "<synthetic>"
+
 _PATH_KEYS = ("file_path", "path", "notebook_path")
 _ARG_KEYS = ("command", "file_path", "pattern", "query", "prompt", "description", "path")
 
@@ -266,8 +272,18 @@ class ClaudeCodeAdapter:
                     bump("compact_summary")
                     continue
 
-                epoch = iso_epoch(row.get("timestamp"))
                 message = row.get("message") or {}
+                if kind == "assistant" and (
+                    row.get("isApiErrorMessage") is True
+                    or row.get("isVirtual") is True
+                    # isVirtual 은 실물에서 아직 목격되지 않았지만 업스트림
+                    # 판정식의 일부라 함께 넣는다.
+                    or message.get("model") == _SYNTHETIC_MODEL
+                ):
+                    bump("synthetic")
+                    continue
+
+                epoch = iso_epoch(row.get("timestamp"))
                 content = message.get("content")
 
                 if kind == "user":

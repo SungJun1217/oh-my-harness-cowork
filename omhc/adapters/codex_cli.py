@@ -234,7 +234,11 @@ def _output_failed(payload: dict) -> bool:
 class CodexCliAdapter:
     adapter_id = "codex-cli"
     capabilities = frozenset({Capability.READ, Capability.WRITE})
-    wire = "sdk"
+    # 실측(codex-cli 0.155.1, --dangerously-bypass-hook-trust): 최상위
+    # {"additionalContext": …} 는 "hook: SessionStart Failed" 로 거부되고
+    # 아무것도 주입되지 않는다. hookSpecificOutput 중첩 형식은 rollout 에
+    # content_item_kinds=["hooks.additional_context"] 로 실제로 나타난다.
+    wire = "claude"
 
     def __init__(self, *, home: Optional[str] = None, now=time.time) -> None:
         self._home = home
@@ -473,8 +477,16 @@ class CodexCliAdapter:
         return install_state_artifact(bundle, home=self._home)
 
     def fallback_channels(self):
-        """Path B: 훅 신뢰(HookStateToml)가 손으로 떨어뜨린 hooks.json 을 거부할 수
-        있으므로, 훅 신뢰도 모델 협조도 필요 없는 AGENTS.md 관리 구간을 둔다."""
+        """Path B: install_handoff 가 실패할 때만 열린다 —
+
+        즉 이 brief 호출이 실제로 실행됐는데(codex-cli 훅이 신뢰돼 돌았거나,
+        수동 `omhc brief --harness codex-cli` 였거나) install_handoff 가 실패한
+        경우다. 대표적으로 hooks.json 에 omhc 훅 문자열이 없을 때
+        NoInjectionChannel 을 던지지만, deliver() 의 채널 루프는 install_handoff
+        의 다른 예외(예: ~/.omhc 쓰기 실패)도 같은 방식으로 여기로 넘긴다.
+        훅 자체가 신뢰되지 않아 brief 가 한 번도 안 돌면 deliver() 호출 자체가
+        없으므로 Path B 도 열리지 않는다 — 그 경우 Codex 로 들어가는 방향은
+        아무것도 받지 못한다."""
         from .. import agents_md
 
         return (agents_md.install,)
