@@ -127,6 +127,25 @@ class TestEndToEnd(unittest.TestCase):
             self.h.mark()
         self.assertEqual(len(self.h.scan_rows()), 1)
 
+    def test_mark_still_exits_0_with_empty_stdout_when_its_own_row_is_refused(self):
+        """#22: transcript_path 가 상한을 못 맞추는 극단(예: PATH_MAX 급 경로)
+        에서도 훅 경로(mark)는 절대 던지지 않고 빈 stdout·exit 0 이어야 한다
+        (invariant 2). 거부는 눈에 보이는 곳(ledger.rejected)에만 남는다."""
+        from omhc import ledger
+
+        payload = {"cwd": self.h.root, "session_id": "me1",
+                   "transcript_path": "/p" * 500}
+        args = cli.build_parser().parse_args(
+            ["mark", "--harness", "claude-code", "--stdin", json.dumps(payload)])
+        out = io.StringIO()
+        code = cli.cmd_mark(args, home=self.h.home, out=out)
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), "")
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        self.assertEqual(rows, [])
+        rejected = ledger.read_rejected(home=self.h.home, repo_key=self.h.key)
+        self.assertEqual(len(rejected), 1)
+
     def test_omhc_off_disables_the_scan(self):
         now = time.time()
         self.h.plant("cx1", now - 600)

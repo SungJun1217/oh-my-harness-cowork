@@ -505,7 +505,7 @@ def _status_json_empty() -> dict:
     키가 `/` 에서만 빠졌다)."""
     return {
         "repo_root": None, "repo_key": None, "state_dir": None,
-        "adapters": [], "ledger_rows": 0,
+        "adapters": [], "ledger_rows": 0, "ledger_rejects": 0,
         "archive": [],
         "injections": 0, "pulls": 0,
         "pull_rate_window": PULL_RATE_WINDOW,
@@ -553,6 +553,27 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     all_rows = ledger.read(home=home, limit=0)
     rows = [r for r in all_rows if r.get("repo") == key][-ledger.DEFAULT_LIMIT:]
     artifact = os.path.join(state, ARTIFACT_NAME)
+
+    # #22: append() 가 상한을 못 맞춰 조용히 버린 행. "최근" 만 게이팅한다 —
+    # 예전에 한 번 있었지만 그 뒤로 반복되지 않았다면 사람이 영원히 못 지우는
+    # FAIL 을 보게 하면 안 된다(off switch/archive 행과 같은 원칙,
+    # due.MAX_AGE_SECONDS 를 재사용한다). `bytes > ledger.MAX_LINE` 도 함께
+    # 본다 — 상한을 올려 고친 뒤라면(#22 리뷰) 예전에 적힌 행이 지금 상한으로는
+    # 이미 들어가므로 "고쳤다" 라는 사실을 cap 을 따로 저장하지 않고도 안다.
+    # `session` 으로 distinct 해서 센다 — `_note_rejection` 이 재시도마다 같은
+    # (repo, harness, session) 을 또 적지 않게 막지만, 그 방어가 생기기 전에
+    # 이미 쌓인 중복 줄까지 한 세션을 여러 번 버려진 것처럼 부풀리면 안 된다.
+    rejected_now = time.time()
+    recent_rejected = [
+        r for r in ledger.read_rejected(home=home, repo_key=key)
+        if (rejected_now - float(r.get("epoch") or 0.0)) <= due.MAX_AGE_SECONDS
+        and int(r.get("bytes") or 0) > ledger.MAX_LINE
+    ]
+    rejected_sessions = {
+        (r.get("harness"), r.get("session")) if r.get("session")
+        else (r.get("harness"), i)
+        for i, r in enumerate(recent_rejected)
+    }
 
     # watch.lag 가 정확히 이 계산을 소유한다. 두 벌로 두면 고정 레이아웃이
     # 바뀔 때 한쪽만 고쳐진다.
@@ -650,6 +671,15 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     checks.append(("ledger", None,
                    "{} rows for this repo".format(len(rows)) if rows
                    else "no sessions recorded here yet — start either harness in this repo"))
+    if recent_rejected:
+        checks.append(("ledger rejects", False,
+                       "{} session(s) dropped (too long for MAX_LINE={}) since {}"
+                       " — fixed it? run `omhc clear` to drop this repo's record".format(
+                           len(rejected_sessions), ledger.MAX_LINE,
+                           time.strftime("%Y-%m-%d", time.localtime(
+                               min(float(r.get("epoch") or 0.0) for r in recent_rejected))))))
+    else:
+        checks.append(("ledger rejects", None, "none recently"))
 
     # lag_rows 의 size/lag_bytes 는 pinned/<sid>/source.jsonl 이 없어도 0 으로
     # 나온다 — "size 0" 과 "고정 성공, 꼬리 0바이트" 를 구분 못 하면 고정이
@@ -725,6 +755,7 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         out.write(json.dumps({
             "repo_root": root, "repo_key": key, "state_dir": state,
             "adapters": installed, "ledger_rows": len(rows),
+            "ledger_rejects": len(rejected_sessions),
             "archive": lag_rows,
             "injections": injections, "pulls": pulls,
             "pull_rate_window": PULL_RATE_WINDOW,
@@ -895,7 +926,7 @@ def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
 
 
 def cmd_clear(args, *, home=None, out=sys.stdout) -> int:
-    root, _key, state = _state_for(home)
+    root, key, state = _state_for(home)
     reason = locate.refused_root(root)
     if reason:
         out.write("{}\n".format(reason))
@@ -907,6 +938,11 @@ def cmd_clear(args, *, home=None, out=sys.stdout) -> int:
     if os.path.exists(artifact):
         os.unlink(artifact)
         removed.append(artifact)
+    # #22 리뷰: 원인을 고친(예: MAX_LINE 을 올린) 뒤에도 `ledger rejects` 가
+    # 영원히 FAIL 로 남으면 안 된다 — 이 레포의 거부 기록만 지운다.
+    rejected_cleared = ledger.clear_rejected(key, home=home)
+    if rejected_cleared:
+        removed.append("{} ledger reject row(s)".format(rejected_cleared))
     out.write("cleared {}\n".format(", ".join(removed) if removed else "nothing"))
     return 0
 

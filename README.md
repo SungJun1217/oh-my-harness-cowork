@@ -263,9 +263,21 @@ your own config — don't overwrite it.
 
 `omhc status` gives every row one of three labels: **PASS** or **FAIL** for
 checks that were actually judged and can gate the exit code (adapters,
-archive, instruction files, and adapter health rows such as `codex hook`),
-and **`----`** for rows that are informational or not judgeable yet (ledger,
-off switch, pull rate, watcher) — `----` never gates. When the omhc Codex
+archive, instruction files, `ledger rejects`, and adapter health rows such as
+`codex hook`), and **`----`** for rows that are informational or not
+judgeable yet (ledger, off switch, pull rate, watcher) — `----` never gates.
+
+The ledger appends one JSON line per session start, and each line must fit
+in a single `write(2)` call (append-only, so no locking is needed — a
+one-syscall write to an `O_APPEND` fd is atomic on POSIX regardless of size,
+which is unrelated to `PIPE_BUF`; that guarantee is about pipes only). Rows
+over that cap are dropped rather than truncated (a truncated `path`/`session`
+would silently point at nothing) and the drop itself is recorded so it's not
+invisible; a retried session that still can't fit is only recorded once, not
+once per `mark`. `ledger rejects` FAILs when this repo had a drop in the last
+7 days that still doesn't fit under the current cap, `----` otherwise; `omhc
+clear` drops this repo's record of it (e.g. after raising the cap). When the
+omhc Codex
 hook is installed, a `codex hook` row is added. It FAILs when the newest
 interactive Codex session for this repo since `hooks.json` last changed never
 ran the hook — the untrusted-hook case — and names that session's originator;
