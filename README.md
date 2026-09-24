@@ -111,17 +111,20 @@ resolved), unedited (749/900 bytes). The header's `2h11m` is session length
   <img src="assets/flow-light.svg" width="100%" alt="Diagram: a SessionStart hook triggers mark and brief, due() picks the other harness's latest session, a whitelist parser builds Events, mint() renders a handoff under 900 bytes, gate() admits it once per session, and the archive hardlinks the original session with a byte-offset index">
 </picture>
 
-**Both directions require Codex's SessionStart hook to be trusted and
-running.** For `due()` to pick a counterpart session, that session's start
-must already be recorded in the ledger — and only that harness's own hook
-writes that record. If the Codex hook is not trusted, neither `mark` nor
-`brief` ever runs, so that Codex session never lands in the ledger at all:
-Codex → Claude fails (no ledger row to find) and Claude → Codex fails just as
-completely (no `brief` call on the Codex side to begin with). The one
-difference between the two hooks is **whether a trust step exists at all** —
-the Claude Code hook runs as soon as it's in the settings file, but the Codex
-hook needs a one-time approval through Codex's own trust flow (see the
-warning under Install).
+**Claude → Codex still requires Codex's SessionStart hook to be trusted and
+running** — `brief` only runs inside that hook, and without it nothing on the
+Codex side ever gets a chance to inject. **Codex → Claude no longer depends
+on it.** For `due()` to pick a counterpart session, that session's start must
+be in the ledger, and normally only that harness's own hook writes that row —
+but Claude's `mark` now also calls the other adapters' `discover()` and
+backfills any Codex session it finds directly from the rollout files
+(tagged `via:"scan"` in the ledger), so a Codex session lands in the ledger
+even when its own hook was never trusted. The one difference left between the
+two hooks is **whether a trust step exists at all** — the Claude Code hook
+runs as soon as it's in the settings file, but the Codex hook needs a
+one-time approval through Codex's own trust flow (see the warning under
+Install) — and that approval is still the only way to get anything flowing
+in the Claude → Codex direction.
 
 **Two decisive choices:**
 
@@ -182,10 +185,13 @@ config (don't overwrite it).
 > [!WARNING]
 > Measured (codex-cli 0.155.1): a hand-dropped `hooks.json` is **not trusted
 > by default, and an untrusted hook is silently skipped with no message** —
-> neither `mark` nor `brief` ever runs, so nothing is delivered in either
-> direction. You must approve it once through Codex's own hook trust flow.
-> Both fragments use `--wire claude` — `--wire sdk` (top-level
-> `additionalContext`) is rejected by codex-cli 0.155.1 with
+> neither `mark` nor `brief` ever runs on the Codex side, so nothing gets
+> injected into Codex sessions that way (**Claude → Codex**). You must
+> approve it once through Codex's own hook trust flow to fix that direction.
+> **Codex → Claude** still works without it — Claude's own `mark` backfills
+> the Codex session straight from the rollout file. Both fragments use
+> `--wire claude` — `--wire sdk`
+> (top-level `additionalContext`) is rejected by codex-cli 0.155.1 with
 > `hook: SessionStart Failed` and nothing gets injected.
 
 `omhc status` shows 5 gated checks (adapters/ledger/archive/off switch/
@@ -301,22 +307,31 @@ committed). Generate them from real sessions on your own machine with
 
   </details>
 
-- **An untrusted Codex hook turns off both directions entirely.**
+- **An untrusted Codex hook still turns off Claude → Codex entirely.**
   <details>
   <summary>Details</summary>
 
   Measured (codex-cli 0.155.1): an untrusted `hooks.json` is silently
-  skipped, and neither `mark` nor `brief` ever runs. Without `mark`, that
-  Codex session never lands in the ledger, so `due()` later has no row to
-  find even when Claude Code opens — Codex → Claude also fails. Because
-  `deliver()` (Path B included) only runs inside a `brief` call, an
+  skipped, and neither `mark` nor `brief` ever runs on the Codex side.
+  Because `deliver()` (Path B included) only runs inside a `brief` call, an
   untrusted hook means Claude → Codex isn't caught by the `AGENTS.md`
-  managed block or the outbox either — it just never turns on. **"Half the
-  daily loop still works" does not hold.** Path B/outbox only open when
-  `brief` actually runs but `install_handoff` fails — typically a missing
-  omhc hook in `~/.codex/hooks.json`, though other exceptions (e.g. a
-  write failure under `~/.omhc`) take the same path, such as calling
-  `omhc brief --harness codex-cli` manually.
+  managed block or the outbox either — it just never turns on. Path B/outbox
+  only open when `brief` actually runs but `install_handoff` fails —
+  typically a missing omhc hook in `~/.codex/hooks.json`, though other
+  exceptions (e.g. a write failure under `~/.omhc`) take the same path, such
+  as calling `omhc brief --harness codex-cli` manually.
+
+  Codex → Claude no longer needs that hook: Claude's own `mark` calls the
+  Codex adapter's `discover()` and backfills the Codex session's ledger row
+  (`via:"scan"`) directly from the rollout file whenever it's newer than
+  anything already ledgered for that harness in this repo, up to 5 sessions
+  per `mark` call. `omhc status`'s `codex hook` row ignores those `scan` rows
+  on purpose — counting them would hide the fact that the hook itself never
+  ran. **Known gap (unverified):** `codex resume` of an old rollout keeps
+  that rollout's original start timestamp, so a resumed old session can be
+  missed by the "must be newer" check — and separately, if that original
+  start is older than 7 days (`due.MAX_AGE_SECONDS`), the backfill's own age
+  check skips it too, resumed or not.
 
   </details>
 

@@ -339,6 +339,61 @@ class CodexCliAdapter:
         refs.sort(key=lambda r: (-r.epoch, r.source_path))
         return refs
 
+    def discover(self, repo_root: Optional[str],
+                deadline: Optional[float] = None) -> List[SessionRef]:
+        """`omhc mark` 의 원장 백필 전용. list_sessions 와 대상은 같지만(같은
+        디렉터리, 같은 대화형 판정), **epoch 이 다르다** — 여기서는 파일
+        mtime 이 아니라 session_meta.timestamp(세션이 실제로 시작한 시각)를
+        쓴다. cmd_mark 가 이 값을 원장의 최신 시작 epoch 와 비교해 백필 순서를
+        지키므로(invariant 6), mtime 을 섞으면 재개(resume)로 mtime 만 갱신된
+        옛 세션이 최신으로 오인될 수 있다.
+
+        타임스탬프를 못 읽으면(모르는 모양) 조용히 건너뛴다 — 순서를 보장할
+        수 없는 행을 원장에 넣는 것보다 놓치는 편이 낫다.
+
+        `deadline` 을 넘기면(호출자의 시간 예산) 스캔 도중이라도 지금까지
+        모은 것만 돌려주고 멈춘다 — 날짜 디렉터리가 14일치라 파일이 많을 때
+        cmd_mark 의 훅 예산을 이 호출 하나가 다 쓸 수 있어서다.
+        """
+        if repo_root is None:
+            return []
+        root = os.path.realpath(repo_root)
+        refs: List[SessionRef] = []
+        for directory in _recent_date_dirs(self.sessions_root(), SCAN_DAYS, self._now):
+            if deadline is not None and time.time() > deadline:
+                break
+            # glob 은 파일시스템 순서라 정렬되지 않는다. 파일명이
+            # rollout-YYYY-MM-DDTHH-MM-SS- 로 시작하므로 역순 정렬이 곧 최신순이고,
+            # deadline 에 잘려도 가장 최근 세션부터 읽힌다.
+            for path in sorted(glob.glob(os.path.join(directory, "rollout-*.jsonl")),
+                               reverse=True):
+                if deadline is not None and time.time() > deadline:
+                    break
+                meta = session_meta(path)
+                if not meta or not _is_interactive(meta):
+                    continue
+                cwd = meta.get("cwd")
+                if not isinstance(cwd, str) or not locate.is_within(root, cwd):
+                    continue
+                started = iso_epoch(meta.get("timestamp"))
+                if not started:
+                    continue
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    continue
+                refs.append(
+                    SessionRef(
+                        adapter_id=self.adapter_id,
+                        session_id=str(meta.get("session_id") or meta.get("id") or ""),
+                        source_path=path,
+                        cwd=cwd,
+                        epoch=started,
+                        size=size,
+                    )
+                )
+        return refs
+
     def read_session(self, ref: SessionRef) -> SessionRead:
         events: List[Event] = []
         dropped: Dict[str, int] = {}
@@ -597,8 +652,12 @@ class CodexCliAdapter:
                 if not meta:
                     continue
                 # 파일 두 개(hooks.json mtime, rollout 의 session_meta.timestamp)의
-                # 시각을 비교한다 — invariant 6 이 금지하는 "순서의 근거"가 아니라
-                # 일회성 진단이라 허용한다(이 비교 결과로 이벤트를 정렬하지 않는다).
+                # 시각을 비교한다 — 한쪽이 mtime 이라 invariant 6 이 금지하는
+                # "순서의 근거"가 아니라 일회성 진단이라 허용한다(이 비교 결과로
+                # 이벤트를 정렬하지 않는다). cli._backfill_foreign_sessions 가
+                # 하는 비교와는 다르다 — 거기는 두 세션 시작 epoch(둘 다
+                # session_meta.timestamp 계열, mtime 아님)를 비교해 원장 append
+                # 순서를 정하는, invariant 6 이 허용하는 예외다.
                 started = iso_epoch(meta.get("timestamp"))
                 if not started or started <= install_epoch:
                     continue

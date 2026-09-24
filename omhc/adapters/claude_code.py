@@ -414,6 +414,14 @@ class ClaudeCodeAdapter:
             size=stat.st_size,
         )
 
+    def discover(self, repo_root: Optional[str],
+                deadline: Optional[float] = None) -> Tuple[SessionRef, ...]:
+        """빈 튜플을 명시한다. list_sessions 는 이 머신에서 130개 파일 34.3MB 를
+        읽어 249ms 였다(brief.py 의 _ref_for 주석) — Codex 쪽 mark 가 이걸
+        돌리면 훅 예산을 넘긴다. Claude 세션은 자기 훅이 항상 신뢰되므로
+        Codex→Claude 백필을 Claude 어댑터가 구현할 필요도 없다."""
+        return ()
+
     def native_resume_hint(self, ref: SessionRef) -> Optional[str]:
         """같은 벤더끼리는 이것이 무손실이며 우월하다. 우리 요약은 열등하다."""
         return "claude --resume {}".format(ref.session_id)
