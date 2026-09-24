@@ -30,6 +30,33 @@ class Base(unittest.TestCase):
         _repo.append_codex_turn(path, ordinal=90 + i)
 
 
+class TestSweepCursor(Base):
+    def test_session_indexed_by_an_older_parser_still_gets_new_rows(self):
+        """업그레이드 전 파서가 더 많은 이벤트를 세어 색인의 seq 가 지금 파서보다
+        크다(#23). seq 커서였다면 이어진 턴이 `seq > last_seq` 에 걸려 영영
+        색인되지 않았다."""
+        path = self.plant_codex()
+        watch.sweep(self.root, self.state, home=self.home)
+        idx = os.path.join(self.state, "index", "cx1.idx")
+        old = index.rows(idx)
+        self.assertTrue(old)
+        with open(idx, "w", encoding="utf-8") as fh:
+            for row in old:
+                fh.write("\t".join((str(row.seq + 10), "{:.0f}".format(row.epoch),
+                                    row.author, row.verb, "1" if row.ok else "0",
+                                    str(row.offset), str(row.length),
+                                    ",".join(row.paths), row.arg)) + "\n")
+
+        self.append_turn(path, 1)
+        watch.forget()
+        self.assertGreater(watch.sweep(self.root, self.state, home=self.home), 0)
+        rows = index.rows(idx)
+        self.assertGreater(len(rows), len(old))
+        self.assertGreater(rows[-1].offset, old[-1].offset)
+        seqs = [r.seq for r in rows]
+        self.assertEqual(seqs, list(range(11, 11 + len(rows))))
+
+
 class TestLock(Base):
     def test_acquire_then_release(self):
         watch.acquire(self.state)

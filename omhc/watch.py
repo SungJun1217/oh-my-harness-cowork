@@ -104,11 +104,10 @@ def sweep(repo_root: str, state_dir: str, *, home: Optional[str] = None) -> int:
                 if _SEEN.get(ref.source_path) == stamp:
                     continue
                 idx = os.path.join(state_dir, "index", ref.session_id + ".idx")
-                seen = index.last_seq(idx)
                 read = adapter.read_session(ref)
-                fresh = [e for e in read.events if e.seq > seen]
+                fresh = index.append_new(idx, read.events)
                 if fresh:
-                    written += index.append_rows(idx, fresh)
+                    written += fresh
                     pin.pin_session(state_dir, ref)
                 _SEEN[ref.source_path] = stamp
             except Exception:
