@@ -379,21 +379,27 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     # 한 어댑터가 죽어도 나머지 status 가 죽으면 안 되므로 어댑터별로 감싼다.
     all_rows = ledger.read(home=home, limit=0)
     health_rows = []
-    hook_rows = []
     for adapter_id in installed:
         try:
             inst = adapters.get(adapter_id, home=home)
         except Exception:
-            # 어댑터 생성 자체가 안 되면 health 도 hooks 도 판정할 근거가 없다.
+            # 어댑터 생성 자체가 안 되면 health 를 판정할 근거가 없다.
             continue
-        # health 와 hooks 는 서로 독립적인 판정이다 — 한쪽이 죽어도 다른 쪽 행은
-        # 여전히 나와야 한다(리뷰 결함: 예전엔 health 의 예외가 hooks 판정
-        # 자체를 건너뛰었다).
         try:
             health_rows.extend(getattr(inst, "health", lambda *a: ())(root, all_rows))
         except Exception:
             pass
+
+    # hooks 행은 `installed`(detect() 로 감지된 것)보다 넓다 — curl 설치
+    # 직후, 하네스가 한 번도 안 돌아 detect() 가 보는 세션 디렉터리가 아직
+    # 없어도 설정 디렉터리(~/.claude, ~/.codex)는 있을 수 있고, 그 경우도
+    # "설치됐는지" 는 여전히 보여줘야 한다(hook_config_targets, #7 리뷰 1).
+    # health 와 독립이다 — 한쪽이 죽어도 다른 쪽 행은 여전히 나와야 한다
+    # (리뷰 결함: 예전엔 health 의 예외가 hooks 판정 자체를 건너뛰었다).
+    hook_rows = []
+    for adapter_id in hook_config_targets(home):
         try:
+            inst = adapters.get(adapter_id, home=home)
             hc = getattr(inst, "hook_config", lambda: None)()
             if hc is not None:
                 fragment = hookconf.load_fragment(hc.fragment_name)
@@ -526,6 +532,124 @@ def cmd_brief(args, *, home=None, out=sys.stdout) -> int:
     )
 
 
+# --- hooks --------------------------------------------------------------
+
+
+def _adapters_with_hook_config(home) -> List[str]:
+    """`hook_config()` 를 구현한(=SessionStart 훅 개념이 있는) 등록된 어댑터
+    id 전부. 감지 여부와 무관하다 — `--harness` 없이 아무 대상도 못 찾았을 때
+    "이 중에서 골라라" 로 보여줄 목록이다."""
+    ids = []
+    for adapter_id in sorted(adapters.REGISTRY):
+        try:
+            inst = adapters.get(adapter_id, home=home)
+        except Exception:
+            continue
+        if getattr(inst, "hook_config", lambda: None)() is not None:
+            ids.append(adapter_id)
+    return ids
+
+
+def hook_config_targets(home) -> List[str]:
+    """`hook_config()` 가 있고, 이 머신에서 그 하네스가 감지됐거나(`detect()`)
+    설정 디렉터리가 이미 있는 어댑터 id 들. `omhc status` 의 `<adapter-id>
+    hooks` 행과 `omhc hooks install` 의 기본 대상이 이 규칙을 공유한다.
+
+    curl 설치 직후, 어느 하네스도 아직 한 번도 안 돈 시점에는 `detect()` 가
+    보는 세션 디렉터리(`~/.claude/projects`, `~/.codex/sessions`)가 없다 —
+    하지만 하네스 자신의 설정 디렉터리(`~/.claude`, `~/.codex`)는 그 하네스를
+    한 번이라도 실행했거나 사람이 미리 만들어 뒀다면 존재할 수 있다. 이 규칙이
+    없으면 첫 사용자에게 `hooks install` 이 "찾은 게 없다"며 조용히 아무 일도
+    안 하고, `status` 도 훅 행 자체를 안 보여준다(#7 리뷰 1)."""
+    ids = []
+    for adapter_id in sorted(adapters.REGISTRY):
+        try:
+            inst = adapters.get(adapter_id, home=home)
+        except Exception:
+            continue
+        hc = getattr(inst, "hook_config", lambda: None)()
+        if hc is None:
+            continue
+        try:
+            detected = inst.detect().present
+        except Exception:
+            detected = False
+        if detected or os.path.isdir(os.path.dirname(hc.config_path)):
+            ids.append(adapter_id)
+    return ids
+
+
+def cmd_hooks(args, *, home=None, out=sys.stdout) -> int:
+    """`omhc hooks install|uninstall`. status 의 `<adapter-id> hooks` 행이
+    가리키는 그 설치를 실제로 한다. 코어는 벤더 이름을 모른다 — 대상은
+    `hook_config()` 를 구현한, 이 머신에 감지됐거나 설정 디렉터리가 있는
+    어댑터들이다."""
+    if not getattr(args, "hooks_action", None):
+        out.write("usage: omhc hooks install|uninstall [--harness ID]\n")
+        return 0
+
+    targets = [args.harness] if args.harness else hook_config_targets(home)
+    if not targets:
+        known = _adapters_with_hook_config(home)
+        out.write("no harness found -- run with --harness <id> ({})\n".format(
+            ", ".join(known) if known else "no adapter declares a hook config"))
+        return 1
+
+    had_error = False
+    for adapter_id in targets:
+        try:
+            inst = adapters.get(adapter_id, home=home)
+        except AdapterUnavailable as exc:
+            out.write("{}\n".format(exc))
+            had_error = True
+            continue
+
+        hc = getattr(inst, "hook_config", lambda: None)()
+        if hc is None:
+            if args.harness:
+                out.write("{}: no hook config for this harness\n".format(adapter_id))
+            continue
+
+        try:
+            if args.hooks_action == "install":
+                fragment = hookconf.load_fragment(hc.fragment_name)
+                had_backup = os.path.exists(hc.config_path)
+                changed = hookconf.merge(hc.config_path, fragment, inst.home)
+                if changed:
+                    out.write("{}: installed -> {}\n".format(adapter_id, hc.config_path))
+                    if had_backup:
+                        out.write("{}: backup {}\n".format(
+                            adapter_id, hc.config_path + ".omhc-bak"))
+                    if hc.post_write_note:
+                        out.write("{}: {}\n".format(adapter_id, hc.post_write_note))
+                else:
+                    out.write("{}: already up to date\n".format(adapter_id))
+                ok, detail = hookconf.inspect(hc.config_path, fragment, inst.home)
+                out.write("{}: {} -- {}\n".format(
+                    adapter_id, "PASS" if ok else "FAIL", detail))
+                if not ok:
+                    # 파일은 이미 (다시) 쓰였다 — 그런데도 재검사가 FAIL 이면
+                    # (예: 바이너리를 아직 못 찾음) 사람이 고쳐야 할 문제가
+                    # 남아 있다는 뜻이므로 exit code 로도 알린다(#7 리뷰 2).
+                    had_error = True
+            else:
+                changed = hookconf.strip(hc.config_path)
+                if changed:
+                    out.write("{}: removed from {}\n".format(adapter_id, hc.config_path))
+                    out.write("{}: backup {}\n".format(
+                        adapter_id, hc.config_path + ".omhc-bak"))
+                else:
+                    out.write("{}: nothing to remove\n".format(adapter_id))
+        except hookconf.HookConfigError as exc:
+            out.write("{}: {}\n".format(adapter_id, exc))
+            had_error = True
+        except Exception as exc:  # 트레이스백은 절대 안 보여준다 — 훅 경로는 아니지만 이 명령도 사람용이다.
+            out.write("{}: unexpected error ({})\n".format(adapter_id, exc))
+            had_error = True
+
+    return 1 if had_error else 0
+
+
 # --- clear ------------------------------------------------------------------
 
 
@@ -630,6 +754,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("clear", help="설치된 표식을 제거")
     p.set_defaults(func=cmd_clear)
+
+    p = sub.add_parser("hooks", help="omhc 자신의 SessionStart 훅을 설치/제거")
+    p.set_defaults(func=cmd_hooks, hooks_action=None)
+    hooks_sub = p.add_subparsers(dest="hooks_action")
+    p_install = hooks_sub.add_parser("install", help="감지된 하네스에 훅을 병합")
+    p_install.add_argument("--harness", default=None)
+    p_install.set_defaults(func=cmd_hooks)
+    p_uninstall = hooks_sub.add_parser("uninstall", help="omhc 자신의 훅만 제거")
+    p_uninstall.add_argument("--harness", default=None)
+    p_uninstall.set_defaults(func=cmd_hooks)
 
     return parser
 

@@ -193,14 +193,48 @@ ln -s "$PWD/bin/omhc" ~/.local/bin/omhc
 
 </details>
 
-훅 배선은 조각 파일을 각자 설정에 **병합**하십시오(덮어쓰지 말 것).
+훅 배선은:
+
+```bash
+omhc hooks install
+```
+
+`--harness` 없이 부르면 이미 감지됐거나(`~/.claude/projects`,
+`~/.codex/sessions` 가 있다) 설정 *디렉터리* 자체가 있는(`~/.claude`,
+`~/.codex`) 등록된 하네스 전부가 대상입니다 — 후자는 어느 하네스도 아직
+한 번도 세션을 시작하지 않아 `projects`/`sessions` 디렉터리가 없는, 설치
+직후의 흔한 상태를 덮습니다. 둘 다 없으면(예: Codex 자체를 안 깔았다면)
+기본 대상이 아닙니다 — `omhc hooks install --harness claude-code`(또는
+`--harness codex-cli`)로 직접 지정하십시오. 아무것도 못 찾으면 등록된
+하네스 id 목록을 보여주고 조용히 아무 일도 안 하는 대신 exit 1 로 끝납니다.
+
+조각을 그 하네스 자신의 설정(Claude Code 는 `~/.claude/settings.json`,
+Codex 는 `~/.codex/hooks.json`)에 병합합니다 — 파일을 덮어쓰지 않고, 먼저
+기존 omhc 훅만 지운 뒤 다시 붙이므로(`hooks/*.json` 이 바뀐 뒤 등) 다시
+실행해도 중복되지 않고, 이미 통과하는 설치(`omhc status` 의 `<adapter-id>
+hooks` 행이 PASS)는 손으로 병합하며 필드를 더 얹었거나 그룹 순서가 달라도
+건드리지 않습니다. 멱등적입니다 — 바꿀 게 없으면 아무것도 쓰지 않고 백업도
+만들지 않습니다. 실제로 바뀌어 처음 쓸 때 JSON 형식(2칸 들여쓰기)도
+정규화됩니다. `omhc hooks uninstall [--harness ID]` 는 같은 방식으로,
+구조적으로(문자열 정규식이 아니라 argv 로 판정) omhc 자신의 `SessionStart`
+훅만 제거합니다 — `install.sh --uninstall` 과 대체로 같지만 드문 명령
+꼴에서는 갈릴 수 있습니다(실측 사례는 `omhc/hookconf.py` 상단 주석 참고).
+두 명령 모두 기존 파일을 실제로 바꾸기 직전에 `<파일>.omhc-bak` 로 먼저
+백업합니다.
+
+<details>
+<summary>조각 파일을 손으로 병합하려면</summary>
+
 `curl \| sh` 로 설치했다면 `~/.local/share/omhc/current/hooks/` 아래,
-git 체크아웃이라면 레포의 `hooks/` 아래에 있습니다.
+git 체크아웃이라면 레포의 `hooks/` 아래에 있습니다. 조각의 `hooks` 키를
+각자 설정에 병합하십시오(덮어쓰지 말 것).
 
 | 하네스 | 파일 | 대상 |
 |---|---|---|
 | Claude Code | `claude-settings.fragment.json` | `~/.claude/settings.json` 의 `hooks` |
 | Codex CLI | `codex-hooks.json` | `~/.codex/hooks.json` |
+
+</details>
 
 > [!WARNING]
 > 실측(codex-cli 0.155.1): 손으로 떨어뜨린 `hooks.json`은 기본적으로
@@ -424,5 +458,6 @@ bash tests/smoke.sh                             # 적대적 입력 7종
 | `omhc brief --harness X [--wire claude\|cursor\|sdk]` | 표식 출력 (훅이 부른다) |
 | `omhc clear` | 설치된 표식 제거 |
 | `omhc watch [--stop\|--once]` | 가속기 데몬(선택, 없어도 결과는 같다) |
+| `omhc hooks install\|uninstall [--harness ID]` | omhc 자신의 `SessionStart` 훅을 병합/제거 (설치 항목 참고) |
 
 </details>
