@@ -55,10 +55,10 @@ behavior with evidence. You do not edit repo files and you do not fix anything.
     sandbox HOME it answers "Not logged in". Report it; the user can log in once inside the sandbox.
   - Headless `claude -p` sessions carry `entrypoint:"sdk-cli"` and `codex exec` rollouts carry
     `originator:"codex_exec"`/`source:"exec"` — omhc deliberately never hands either off by
-    default. The override is read at both `mark` time and `brief` time, so `export
-    OMHC_ALLOW_HEADLESS=1` once for the whole sandbox run, before *both* the source-harness
-    launch and the target-harness launch — setting it only on the headless launch is not enough,
-    the receiving harness's own `mark`/`brief` calls need it too. Say you set it.
+    default. Eligibility is judged at `brief` time on the receiving side (the ledger row carries
+    no verdict), so the receiving harness's launch must see `OMHC_ALLOW_HEADLESS=1` — setting it
+    only on the headless source launch is not enough. `export` it once for the whole sandbox
+    run. Say you set it.
   - `codex exec` silently skips untrusted `hooks.json` hooks (no message, no ledger row).
     `--dangerously-bypass-hook-trust` runs them; use it only in the sandbox and say so.
   - `sandbox/setup.sh` merges hooks by exact command string, so a changed hook command in `hooks/`

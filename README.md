@@ -328,8 +328,9 @@ Turn it off: `OMHC_OFF=1`, or an `~/.omhc/<repo-key>/off` file.
 
 By default, headless sessions (`claude -p`, `codex exec`, app-server clients) and
 Codex subagent threads are never handoff sources. To treat headless sessions as real
-ones in a sandbox, export `OMHC_ALLOW_HEADLESS=1` with the same value for both the
-source and the receiving launch (both `mark` and `brief` read it). Subagents and
+ones in a sandbox, export `OMHC_ALLOW_HEADLESS=1` for the receiving launch: eligibility
+is judged when the receiving session starts, so it also admits headless sessions that
+ran before you set it. Exporting it once for the whole run is simplest. Subagents and
 sidechains stay excluded even then.
 
 ## When not to use it

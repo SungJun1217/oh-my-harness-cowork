@@ -680,11 +680,14 @@ class CodexCliAdapter:
     def classify(self, source_path: str) -> bool:
         """Codex rollout 에 사람이 시작한 세션인가.
 
-        session_meta 를 읽을 수 있어야 하고, 서브에이전트·헤드리스 exec 가
-        아니어야 한다(`_is_interactive`).
+        False 는 서브에이전트·헤드리스 exec 라고 **확실할 때만** 낸다
+        (`_is_interactive`). session_meta 를 못 읽으면(빈 파일, 모르는 첫 줄)
+        판단할 수 없으므로 True 다 — brief 는 False 인 행만 건너뛰므로, 여기서
+        False 를 내면 포맷이 바뀐 날부터 새 rollout 이 전부 건너뛰어지고 그 전의
+        낡은 세션이 나간다(#21). 여는 판정은 ref_for_path 가 따로 한다.
         """
         meta = session_meta(source_path)
-        return meta is not None and _is_interactive(meta)
+        return meta is None or _is_interactive(meta)
 
     def ref_for_path(self, source_path: str, session_id: str,
                      cwd: Optional[str] = None) -> Optional[SessionRef]:
