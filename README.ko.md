@@ -153,6 +153,10 @@ curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/ma
 omhc status          # 모든 행이 PASS/FAIL/---- 중 하나(+ codex hook, 감지 시 <adapter-id> hooks). SKIP 은 없다
 ```
 
+git 이 아닌 프로젝트라면 최상위 디렉터리에서 `touch .omhc-root` 를 한 번
+해두세요 — `.git` 도 `.omhc-root` 도 없으면 omhc 를 돌린 모든 서브디렉터리가
+각각 별개 프로젝트가 됩니다.
+
 최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
 심링크합니다. pip·pipx 를 쓰지 않습니다(의존성이 0 이라 소스 트리가 곧
 설치물입니다). 다시 실행하면 업데이트(`~/.local/share/omhc` 아래 구버전은
@@ -297,8 +301,8 @@ outbox 가 대신 받는 게 아니라 Codex 쪽 `brief` 호출 자체가 없어
 | 명령 | 역할 |
 |---|---|
 | `omhc status [--json]` | 유일한 사람용 대시보드. 아카이브 지연(`lag_bytes`, `tail=…B`)과 인출률 포함 |
-| `omhc log [--last N] [--grep P] [--verb V] [--file P]` | 색인된 이벤트를 한 줄씩 |
-| `omhc show <E1\|#137> [--full]` | **원본 바이트를 오프셋으로 조회** (tier (b) 진입점) |
+| `omhc log [--last N] [--grep P] [--verb V] [--file P]` | 색인된 이벤트를 한 줄씩. 각 줄은 `<session>#N` 참조로 시작하며 그대로 `show`에 넘길 수 있음 |
+| `omhc show <E1\|#137\|abcdef01#137> [--full]` | **원본 바이트를 오프셋으로 조회** (tier (b) 진입점). 맨 `#N`은 가장 최근 전달된 세션 기준(`log`의 인출률 회계와 같은 규칙)이고, `<prefix>#N`은 세션을 직접 지정함 — 접두사가 모호하면 후보를 나열함 |
 | `omhc note "<text>"` | 메모. 두 하네스의 에이전트가 맨 명령줄로 호출 가능 |
 
 **인출률**("pulled X of N injections")은 omhc 의 부담이 값을 하는지 판단할
@@ -347,7 +351,7 @@ v1은 어댑터 2개만 구현합니다. 3번째를 붙이는 비용은 **파일
 
 ```bash
 python3 -m unittest discover -s tests -t . -q   # 약 12초, 하네스를 띄우지 않는다
-bash tests/smoke.sh                             # 적대적 입력 7종
+bash tests/smoke.sh                             # 적대적 입력 8종
 ```
 
 적합성 스위트(`tests/conformance/test_suite.py`)의 불변식 22개는 `REGISTRY` 위에
@@ -410,6 +414,13 @@ bash tests/smoke.sh                             # 적대적 입력 7종
   전제로 설계했습니다. 아카이브가 포인터인 이유가 이것입니다.
 
   </details>
+
+- **git 이 아닌 프로젝트는 마커가 필요합니다.** 레포 루트는 `.git` 또는
+  `.omhc-root` 를 가진 가장 가까운 조상입니다. 둘 다 없으면 omhc 를 돌린 모든
+  서브디렉터리가 각각 별개 프로젝트가 됩니다(키도, `~/.omhc/` 아래 상태도
+  따로). git 레포가 아니라면 최상위에서 한 번 `touch .omhc-root` 하세요.
+  omhc 는 `/` 에서는 아예 거부합니다(`status` 는 `FAIL root`, 훅 경로는
+  invariant 2 대로 조용히 아무것도 안 합니다) — `$HOME` 은 정상 루트입니다.
 
 - **동시 사용은 v1 범위 밖입니다.**
   <details>

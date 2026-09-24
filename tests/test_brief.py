@@ -219,6 +219,17 @@ class TestRunHostileInputs(unittest.TestCase):
         code, text = self._run(json.dumps({"cwd": self.h.repo_root}), harness="")
         self.assertEqual((code, text), (0, ""))
 
+    def test_refused_root_yields_empty_stdout_and_exit_0(self):
+        """비어 있지 않아야 의미가 있다 — repo_key("/") 로 실제 세션을 심어,
+        거부가 없었다면 compute() 가 진짜 핸드오프를 만들었을 상황을 재현한다.
+        원장에 아무것도 없어 무조건 빈 손인 상태에서는 이 테스트가 거부
+        분기를 지우고도 통과한다(리뷰 결함)."""
+        self.h.t.plant_codex(cwd="/", session_id="cx-root",
+                             human="루트 세션은 절대 새면 안 된다",
+                             ledger_home=self.h.home, when=NOW)
+        code, text = self._run(json.dumps({"cwd": "/", "session_id": "me1"}))
+        self.assertEqual((code, text), (0, ""))
+
     def test_unwritable_home_does_not_raise(self):
         self.h.plant_codex_session()
         out = io.StringIO()

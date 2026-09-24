@@ -195,6 +195,8 @@ def emit(
         payload = gate.hook_payload(stdin_text)
         session_id = gate.session_id_from_payload(payload) or ""
         repo_root = locate.resolve_repo_root(str(payload.get("cwd") or "") or None)
+        if locate.refused_root(repo_root):
+            return 0
         body = compute(
             my_harness=harness,
             my_session_id=session_id,

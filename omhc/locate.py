@@ -5,8 +5,21 @@ import os
 from typing import Optional
 
 
+# `.git` 은 파일(워크트리·서브모듈)일 수도, 디렉터리일 수도 있다. `.omhc-root`
+# 는 non-git 프로젝트(#12)를 위한 명시적 마커 — 파일이든 디렉터리든 상관없다.
+#
+# `AGENTS.md`, `.omhc/`, `CLAUDE.md`, `.claude/`, `.codex/` 는 절대 마커가 아니다:
+# 앞의 둘은 omhc 자신이 대상 레포에 써 넣는 파일이라 마커로 쓰면 첫 실행 이후 키가
+# 흔들리고, 뒤의 셋은 `$HOME` 에도 존재해서(`~/.omhc`, `~/.claude`, `~/.codex`) 그걸
+# 마커로 인정하면 `.git` 없는 홈 아래 모든 디렉터리가 `$HOME` 하나로 뭉개진다.
+# 또한 core 는 벤더 이름을 모른다 — `.claude`/`.codex` 를 core 가 알면 그 자체가
+# 계약 위반이다.
+ROOT_MARKERS = (".git", ".omhc-root")
+
+
 def resolve_repo_root(start: Optional[str] = None) -> str:
-    """레포 루트의 THE 정의. `.git` 을 만나는 첫 조상, 없으면 realpath(cwd).
+    """레포 루트의 THE 정의. `ROOT_MARKERS` 중 하나를 만나는 첫 조상,
+    없으면 realpath(cwd).
 
     호출 지점마다 다르게 정의하면 서브디렉터리에서 세션 목록이 조용히 0건이
     된다. Codex 는 rollout 에 레포 루트를 기록하므로 equal-or-descendant 판정과
@@ -14,18 +27,32 @@ def resolve_repo_root(start: Optional[str] = None) -> str:
 
     `git rev-parse --show-toplevel` 을 쓰지 않는다. 훅 경로에서 프로세스당 한 번
     이상 불리는데 fork/exec 가 약 2.7ms 이고 subprocess import 가 약 3.7ms 라
-    합쳐서 예산의 4% 를 먹는다. 상향 탐색은 stat 몇 번이고 워크트리·서브모듈처럼
-    `.git` 이 파일인 경우도 같이 잡는다.
+    합쳐서 예산의 4% 를 먹는다. 상향 탐색은 stat 몇 번이다(실측: 16단계 x 마커
+    2개 ≈ 1ms).
     """
     base = os.path.realpath(start or os.getcwd())
     current = base
     while True:
-        if os.path.exists(os.path.join(current, ".git")):
+        if any(os.path.exists(os.path.join(current, marker)) for marker in ROOT_MARKERS):
             return current
         parent = os.path.dirname(current)
         if parent == current:
             return base
         current = parent
+
+
+def refused_root(root: str) -> Optional[str]:
+    """이 루트에서 omhc 를 도는 게 실수인 이유, 없으면 None.
+
+    `resolve_repo_root` 자체에는 두지 않는다 — mint.relativize 등은 어떤
+    루트에서도 계속 동작해야 하므로, 거부는 별도 술어로 호출자가 직접 검사한다.
+    지금은 `/` 하나만 거부한다(오너 결정) — `$HOME` 은 거부하지 않는다: `~` 에서
+    세션을 시작하는 것도 실사용이고, `~/.git` 처럼 홈에 dotfile 레포를 두는
+    사람들이 계속 동작해야 한다."""
+    if os.path.realpath(root) == "/":
+        return "{} is not a project root — run omhc from a project directory " \
+            "(or touch .omhc-root there)".format(root)
+    return None
 
 
 def repo_key(repo_root: str) -> str:
