@@ -44,5 +44,5 @@
 <text x="200.0" y="502.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13" fill="#2E2A28" text-anchor="start">TSV offset index, ~115 B per event</text>
 <text x="200.0" y="524.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13" fill="#2E2A28" text-anchor="start">omhc show E1 reads the original bytes back by offset</text>
 <text x="520.0" y="590.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12.5" fill="#A3968C" text-anchor="middle">the same path runs in reverse</text>
-<text x="520.0" y="612.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#A3968C" text-anchor="middle">Codex→Claude and Claude→Codex both need the Codex SessionStart hook trusted: its mark is what records Codex sessions.</text>
+<text x="520.0" y="612.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#A3968C" text-anchor="middle">Claude→Codex needs the Codex SessionStart hook trusted; Codex→Claude works either way (Claude's mark backfills Codex sessions).</text>
 </svg>

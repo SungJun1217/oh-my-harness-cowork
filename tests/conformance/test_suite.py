@@ -358,6 +358,26 @@ class AdapterContract(unittest.TestCase):
                     self.assertIsInstance(ok, bool)
                     self.assertIsInstance(detail, str)
 
+    def test_28_discover_is_an_iterable_of_session_refs_and_never_raises(self):
+        """discover 는 mark 백필 전용 선택 메서드다(fallback_channels/health 와
+        같은 패턴). 빈 홈에서도 절대 던지지 않고, 준 게 있다면 SessionRef 여야
+        한다 — Claude 는 (일부러) 항상 빈 튜플이다(discover 의 docstring 참고).
+
+        `deadline` 은 키워드 전용이 아니라 위치로도 받아들여야 cmd_mark 의
+        호출(`discover(root, deadline=deadline)`)이 모든 어댑터에서 통한다 —
+        이미 지난 deadline 을 줘도 던지지 않아야 한다."""
+        import time
+
+        for adapter_id in adapter_ids():
+            with self.subTest(adapter=adapter_id):
+                with tempfile.TemporaryDirectory() as home:
+                    inst = adapters.get(adapter_id, home=home)
+                    refs = tuple(inst.discover(REPO))
+                    expired = tuple(inst.discover(REPO, deadline=time.time() - 1))
+                for got in (refs, expired):
+                    for ref in got:
+                        self.assertIsInstance(ref, A.SessionRef)
+
 
 if __name__ == "__main__":
     unittest.main()
