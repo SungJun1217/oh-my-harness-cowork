@@ -157,6 +157,10 @@ curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/ma
 omhc status          # every check gets PASS/FAIL/---- (+ codex hook, <adapter-id> hooks when detected). Not SKIP
 ```
 
+For a non-git project, `touch .omhc-root` at its top-level directory — without
+either `.git` or `.omhc-root`, every subdirectory you run omhc from becomes
+its own project.
+
 This unpacks the latest release into `~/.local/share/omhc/<version>` and
 symlinks `~/.local/bin/omhc` — no pip, no pipx (zero dependencies, so the
 source tree *is* the install). Re-run to update (old versions under
@@ -346,7 +350,7 @@ against the system prompt and preceding messages.
 
 ```bash
 python3 -m unittest discover -s tests -t . -q   # ~12s, never launches a harness
-bash tests/smoke.sh                             # 7 adversarial inputs
+bash tests/smoke.sh                             # 8 adversarial inputs
 ```
 
 v1 ships exactly 2 adapters. Adding a third costs **one file + one
@@ -369,7 +373,7 @@ receives nothing.
 
 ```bash
 python3 -m unittest discover -s tests -t . -q   # ~12s, never launches a harness
-bash tests/smoke.sh                             # 7 adversarial inputs
+bash tests/smoke.sh                             # 8 adversarial inputs
 ```
 
 The conformance suite (`tests/conformance/test_suite.py`) parameterizes 22
@@ -438,6 +442,13 @@ committed). Generate them from real sessions on your own machine with
   designed assuming it will break. That's why the archive is a pointer.
 
   </details>
+
+- **Non-git projects need a marker.** The repo root is the nearest ancestor
+  holding `.git` *or* `.omhc-root`. Without either, every subdirectory you run
+  omhc from becomes its own project (its own key, its own state under
+  `~/.omhc/`). If your project isn't a git repo, run `touch .omhc-root` at
+  its top once. `omhc` itself refuses to run at `/` (`status` shows `FAIL
+  root`; the hook path stays silent, per invariant 2) — `$HOME` is fine.
 
 - **Concurrent use is out of scope for v1.**
   <details>

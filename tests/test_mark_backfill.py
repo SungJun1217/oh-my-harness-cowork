@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import tempfile
 import time
 import unittest
 from unittest import mock
@@ -206,6 +207,56 @@ class TestEndToEnd(unittest.TestCase):
         leaked = [r for r in rows if r.get("session") == "cx-child"
                  and r.get("via") == "scan"]
         self.assertEqual(leaked, [], rows)
+
+    def test_backfill_accepts_a_subdirectory_session_under_an_omhc_root_parent(self):
+        """#12: git 이 아닌 프로젝트도 `.omhc-root` 마커로 서브디렉터리 세션을
+        같은 레포로 백필한다."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "proj")
+            sub = os.path.join(root, "sub")
+            os.makedirs(sub)
+            open(os.path.join(root, ".omhc-root"), "w").close()
+            now = time.time()
+            _repo.plant_codex(self.h.home, cwd=sub, session_id="cx-sub",
+                              when=now - 600,
+                              meta_extra={"timestamp": _iso(now - 600)})
+
+            stdin = json.dumps({"cwd": root, "session_id": "me1"})
+            args = cli.build_parser().parse_args(
+                ["mark", "--harness", "claude-code", "--stdin", stdin])
+            out = io.StringIO()
+            code = cli.cmd_mark(args, home=self.h.home, out=out)
+            self.assertEqual(code, 0)
+
+            key = locate.repo_key(os.path.realpath(root))
+            rows = [r for r in ledger.read(repo_key=key, home=self.h.home)
+                   if r.get("harness") == "codex-cli" and r.get("via") == "scan"]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["session"], "cx-sub")
+
+    def test_backfill_still_rejects_a_nested_git_child_under_an_omhc_root_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "proj")
+            child = os.path.join(root, "child")
+            os.makedirs(child)
+            open(os.path.join(root, ".omhc-root"), "w").close()
+            _repo.git(child, "init", "-q")
+            now = time.time()
+            _repo.plant_codex(self.h.home, cwd=child, session_id="cx-child",
+                              when=now - 600,
+                              meta_extra={"timestamp": _iso(now - 600)})
+
+            stdin = json.dumps({"cwd": root, "session_id": "me1"})
+            args = cli.build_parser().parse_args(
+                ["mark", "--harness", "claude-code", "--stdin", stdin])
+            out = io.StringIO()
+            code = cli.cmd_mark(args, home=self.h.home, out=out)
+            self.assertEqual(code, 0)
+
+            key = locate.repo_key(os.path.realpath(root))
+            rows = [r for r in ledger.read(repo_key=key, home=self.h.home)
+                   if r.get("session") == "cx-child"]
+            self.assertEqual(rows, [])
 
     def test_already_delivered_session_is_not_redelivered_after_a_backfill(self):
         now = time.time()

@@ -77,6 +77,41 @@ class TestLocate(unittest.TestCase):
             self.assertNotEqual(locate.owning_repo_key(child),
                                 locate.repo_key(os.path.realpath(parent)))
 
+    def test_omhc_root_marker_in_a_parent_wins_over_the_cwd_fallback(self):
+        with tempfile.TemporaryDirectory() as parent:
+            open(os.path.join(parent, ".omhc-root"), "w").close()
+            sub = os.path.join(parent, "a", "b")
+            os.makedirs(sub)
+            self.assertEqual(locate.resolve_repo_root(sub), os.path.realpath(parent))
+
+    def test_omhc_root_marker_may_be_a_directory(self):
+        with tempfile.TemporaryDirectory() as parent:
+            os.makedirs(os.path.join(parent, ".omhc-root"))
+            self.assertEqual(locate.resolve_repo_root(parent), os.path.realpath(parent))
+
+    def test_nested_git_beats_a_parent_omhc_root_marker(self):
+        """가장 가까운 조상이 이긴다 — .omhc-root 가 상위에 있어도 자기 .git 을
+        가진 자식이 우선."""
+        with tempfile.TemporaryDirectory() as parent:
+            open(os.path.join(parent, ".omhc-root"), "w").close()
+            child = os.path.join(parent, "child")
+            os.makedirs(child)
+            _repo.git(child, "init", "-q")
+            self.assertEqual(locate.resolve_repo_root(child), os.path.realpath(child))
+
+    def test_agents_md_and_omhc_dir_in_a_parent_are_not_markers(self):
+        with tempfile.TemporaryDirectory() as parent:
+            open(os.path.join(parent, "AGENTS.md"), "w").close()
+            os.makedirs(os.path.join(parent, ".omhc"))
+            sub = os.path.join(parent, "sub")
+            os.makedirs(sub)
+            self.assertEqual(locate.resolve_repo_root(sub), os.path.realpath(sub))
+
+    def test_refused_root_rejects_only_slash(self):
+        self.assertIsNotNone(locate.refused_root("/"))
+        self.assertIsNone(locate.refused_root(os.path.expanduser("~")))
+        self.assertIsNone(locate.refused_root(REPO))
+
 
 if __name__ == "__main__":
     unittest.main()

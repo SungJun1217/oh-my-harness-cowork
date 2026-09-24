@@ -85,5 +85,10 @@ setup
 check "stdin is empty" ""
 teardown
 
+# 8) cwd 가 "/" (거부된 루트)
+setup
+check "cwd is /" '{"cwd":"/","session_id":"smoke-1"}'
+teardown
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
