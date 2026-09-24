@@ -143,19 +143,10 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
         "path": str(payload.get("transcript_path") or ""),
         "cwd": root,
     }
-    # 사람이 대화한 세션인지 **여기서** 판정해 기록한다. 훅 stdin 페이로드에는
-    # 그 정보가 없으므로 어댑터가 트랜스크립트를 보고 판단한다. 기록하지 않으면
-    # due() 의 비대화형 차단이 프로덕션에서 죽은 코드가 된다 — 테스트만 그 필드를
-    # 손으로 넣어 통과하고, 실제로는 남의 도구가 남긴 sdk 세션이 핸드오프된다.
-    #
-    # 판정은 하네스별 지식이므로 어댑터가 소유한다. 코어가 어휘를 들고 있으면
-    # 새 하네스를 붙일 때 코어를 고쳐야 한다.
-    if row["path"]:
-        try:
-            if not adapters.get(args.harness, home=home).classify(row["path"]):
-                row["interactive"] = False
-        except Exception:
-            pass
+    # 사람이 대화한 세션인지는 여기서 판정하지 않는다(#21). SessionStart 시점에는
+    # Claude 트랜스크립트가 아직 쓰이지 않아 판정이 늘 fail-open 했고, Codex 는
+    # rollout 이 없으면 영구히 비대화형으로 적힐 수 있었다. 판정은 brief 시점에
+    # 어댑터가 실제 파일을 보고 내린다(brief.compute 가 due 에 넘기는 eligible).
     ledger.append(row, home=home)
     # 다른 하네스의 세션을 원장에 백필한다(위 주석). 훅 경로이므로 실패해도
     # mark 자체는 항상 exit 0, 빈 stdout 이어야 한다(invariant 2).

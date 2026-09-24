@@ -157,6 +157,98 @@ class TestCompute(unittest.TestCase):
         self.assertEqual(body, "")
 
 
+class TestEligibilityAtBriefTime(unittest.TestCase):
+    """사람이 대화한 세션인지는 brief 시점에 어댑터가 판정한다(#21)."""
+
+    EXEC = {"source": "exec", "originator": "codex_exec"}
+
+    def setUp(self):
+        self.h = Harness()
+        self._backup = os.environ.pop("OMHC_ALLOW_HEADLESS", None)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._backup is not None:
+            os.environ["OMHC_ALLOW_HEADLESS"] = self._backup
+        else:
+            os.environ.pop("OMHC_ALLOW_HEADLESS", None)
+
+    def tearDown(self):
+        self.h.close()
+
+    def compute(self):
+        return brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+
+    def test_a_later_headless_session_does_not_block_the_interactive_one(self):
+        self.h.t.plant_codex(session_id="cx1", human="사람이 한 말",
+                             ledger_home=self.h.home, when=NOW)
+        self.h.t.plant_codex(session_id="cx2", human="exec 가 받은 프롬프트",
+                             ledger_home=self.h.home, when=NOW,
+                             meta_extra=self.EXEC)
+        body = self.compute()
+        self.assertIn("사람이 한 말", body)
+        self.assertNotIn("exec 가 받은 프롬프트", body)
+
+    def test_a_newer_session_whose_file_is_gone_stops_the_search(self):
+        """사라진 파일은 헤드리스가 아니다. 건너뛰면 사용자가 이어서 작업한 세션을
+        두고 그 전날 세션이 방금 일처럼 나간다 — 낡은 표식은 없는 표식보다 나쁘다."""
+        self.h.t.plant_codex(session_id="cx1", human="월요일에 하던 옛 작업",
+                             ledger_home=self.h.home, when=NOW)
+        cx2 = self.h.t.plant_codex(session_id="cx2", human="화요일에 이어서 한 작업",
+                                   ledger_home=self.h.home, when=NOW)
+        os.remove(cx2)
+        self.assertEqual(self.compute(), "")
+
+    def test_a_newer_session_in_an_unknown_shape_stops_the_search(self):
+        """빈 파일이나 포맷이 바뀐 rollout 은 헤드리스라는 증거가 아니다. 건너뛰면
+        포맷이 바뀐 날부터 새 세션이 전부 건너뛰어지고 낡은 세션이 나간다
+        (invariant 7: fail open)."""
+        for content in ("", '{"type": "session_start_v2", "payload": {}}\n'):
+            with self.subTest(content=content):
+                self.h.close()
+                self.h = Harness()
+                self.h.t.plant_codex(session_id="cx1", human="월요일에 하던 옛 작업",
+                                     ledger_home=self.h.home, when=NOW)
+                cx2 = self.h.t.plant_codex(session_id="cx2", human="x",
+                                           ledger_home=self.h.home, when=NOW)
+                with open(cx2, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                self.assertEqual(self.compute(), "")
+
+    def test_rows_with_missing_files_cost_at_most_one_scan(self):
+        from omhc.adapters import codex_cli
+        self.h.t.plant_codex(session_id="cx1", human="사람이 한 말",
+                             ledger_home=self.h.home, when=NOW)
+        for sid in ("gone1", "gone2", "gone3"):
+            os.remove(self.h.t.plant_codex(session_id=sid, human="x",
+                                           ledger_home=self.h.home, when=NOW))
+        with mock.patch.object(codex_cli.CodexCliAdapter, "list_sessions",
+                               autospec=True, return_value=[]) as scan:
+            self.assertEqual(self.compute(), "")
+        self.assertLessEqual(scan.call_count, 1)
+
+    def test_the_override_applies_to_sessions_marked_before_it_was_set(self):
+        self.h.t.plant_codex(session_id="cx2", human="exec 가 받은 프롬프트",
+                             ledger_home=self.h.home, when=NOW,
+                             meta_extra=self.EXEC)
+        self.assertEqual(self.compute(), "")
+        os.environ["OMHC_ALLOW_HEADLESS"] = "1"
+        self.assertIn("exec 가 받은 프롬프트", self.compute())
+
+    def test_mark_records_no_verdict_even_before_the_rollout_exists(self):
+        """rollout 이 mark 시점에 아직 없어도 원장에 비대화형으로 굳지 않는다."""
+        from omhc import cli
+        path = os.path.join(self.h.home, ".codex", "sessions", "rollout-cx1.jsonl")
+        stdin = json.dumps({"cwd": self.h.repo_root, "session_id": "cx1",
+                            "transcript_path": path})
+        cli.cmd_mark(cli.build_parser().parse_args(
+            ["mark", "--harness", "codex-cli", "--stdin", stdin]), home=self.h.home)
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        self.assertTrue(rows)
+        self.assertNotIn("interactive", rows[-1])
+
+
 class TestRunHostileInputs(unittest.TestCase):
     """스펙 §16-5: 적대적 입력 5종에서 빈 stdout + exit 0."""
 

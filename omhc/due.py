@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import collections
 import os
-from typing import Optional
+from typing import Callable, Optional
 
 from . import fsio, ledger, locate
 
@@ -87,6 +87,7 @@ def due(
     now: float,
     *,
     home: Optional[str] = None,
+    eligible: Optional[Callable[[Watermark], bool]] = None,
 ) -> Optional[Watermark]:
     """이 세션에 알려줄 외래 세션이 있는가. **여기가 동시성 seam이다.**
 
@@ -122,12 +123,6 @@ def due(
             continue
         if session == my_session_id:
             continue
-        # 비대화형 판정은 mark 시점에 어댑터가 내려 기록한다. 여기서 entrypoint
-        # 어휘를 다시 들고 있으면 같은 규칙이 두 모듈에 살면서 한쪽만 갱신되는
-        # 반쪽 필터가 된다 — 어휘는 그것을 아는 어댑터에만 있어야 한다.
-        if row.get("interactive") is False:
-            continue
-
         # **가장 최근 외래 세션에서 멈춘다.** 이미 전달했다면 None 이다.
         #
         # 계속 거슬러 올라가면 어제 세션을 "방금 일어난 일"처럼 주입한다 —
@@ -141,7 +136,7 @@ def due(
             # 너무 오래된 것은 이어갈 작업이 아니다.
             return None
 
-        return Watermark(
+        mark = Watermark(
             repo_key=repo_key,
             harness=str(harness),
             session_id=str(session),
@@ -149,4 +144,13 @@ def due(
             event="start",
             epoch=epoch,
         )
+        # 사람이 대화한 세션인지는 호출자가 어댑터에게 물어 판정한다(#21). 여기서
+        # entrypoint 어휘를 들고 있으면 같은 규칙이 두 모듈에 살면서 한쪽만
+        # 갱신되는 반쪽 필터가 된다. 판정을 mark 시점에 원장에 적던 때는 Claude
+        # 트랜스크립트가 아직 쓰이기 전이라 거의 기록되지 않았고, 그러면 헤드리스
+        # 세션 하나가 가장 최근 외래 세션 자리를 차지해 그 앞의 진짜 세션까지
+        # 막았다. 부적격이면 멈추지 않고 그 앞 행으로 간다.
+        if eligible is not None and not eligible(mark):
+            continue
+        return mark
     return None

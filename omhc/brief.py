@@ -60,6 +60,11 @@ def _ref_for(adapter, watermark, repo_root: str):
         ref = adapter.ref_for_path(watermark.path, watermark.session_id, repo_root)
         if ref is not None:
             return [ref]
+        if os.path.exists(watermark.path):
+            # 파일이 있는데 어댑터가 거절했다 — 헤드리스·서브에이전트 세션이다.
+            # 스캔으로 떨어지면 결론은 같은데 249ms 를 쓴다. due 가 원장의 부적격
+            # 행마다 이 함수를 부르므로 여기서 멈춰야 한다.
+            return []
     # 원장에 경로가 없거나 그 파일이 사라졌을 때만 전체 스캔으로 떨어진다.
     return [r for r in adapter.list_sessions(repo_root)
             if r.session_id == watermark.session_id]
@@ -113,12 +118,30 @@ def compute(
     key = locate.repo_key(repo_root)
     state = locate.state_dir(key, home=home)
 
-    watermark = due.due(key, my_harness, my_session_id, stamp, home=home)
+    # 적격성은 brief 시점에 어댑터가 판정한다(#21). 세션을 고르는 판정이 곧
+    # 여는 판정이므로 결과를 받아 두었다가 그대로 쓴다.
+    found = {}
+
+    def eligible(mark) -> bool:
+        adapter = adapters.get(mark.harness, home=home)
+        refs = _ref_for(adapter, mark, repo_root)
+        found[mark.session_id] = (adapter, refs)
+        if refs:
+            return True
+        # 건너뛰는 것은 어댑터가 헤드리스·서브에이전트라고 확실히 판정한 경우
+        # 뿐이다. 파일이 사라졌거나, 비었거나, 모르는 모양이면 여기서 멈춘다 —
+        # 그 앞으로 가면 사용자가 이어서 작업한 세션을 두고 그 전날 세션이
+        # "방금 일"로 나가고, 그런 행마다 전체 스캔(249ms)이 돈다.
+        if not (mark.path and os.path.exists(mark.path)):
+            return True
+        return adapter.classify(mark.path)
+
+    watermark = due.due(key, my_harness, my_session_id, stamp, home=home,
+                        eligible=eligible)
     if watermark is None:
         return ""
 
-    adapter = adapters.get(watermark.harness, home=home)
-    refs = _ref_for(adapter, watermark, repo_root)
+    adapter, refs = found[watermark.session_id]
     if not refs:
         return ""
 

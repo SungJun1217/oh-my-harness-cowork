@@ -63,15 +63,37 @@ class TestDue(unittest.TestCase):
         again = due.due(REPO_KEY, "gajae-code", "g1", 101.0, home=self.home)
         self.assertIsNotNone(again)
 
-    def test_non_interactive_sessions_are_ignored(self):
-        """판정은 mark 시점에 어댑터가 내려 원장에 기록한다.
-
-        due 가 entrypoint 어휘를 들고 있으면 같은 규칙이 두 모듈에 살면서 한쪽만
-        갱신되는 반쪽 필터가 된다 — 어휘는 그것을 아는 어댑터에만 있어야 한다.
-        """
-        self.start("claude-code", "sdk1", 50.0, interactive=False)
+    def test_an_ineligible_row_is_skipped_for_the_one_before_it(self):
+        """판정은 호출자가 어댑터에게 묻는다(#21). due 가 entrypoint 어휘를 들고
+        있으면 같은 규칙이 두 모듈에 살면서 한쪽만 갱신되는 반쪽 필터가 된다.
+        부적격 행에서 멈추면 헤드리스 세션 하나가 그 앞의 진짜 세션을 막는다."""
         self.start("codex-cli", "cx1", 10.0)
-        got = due.due(REPO_KEY, "gajae-code", "g1", 100.0, home=self.home)
+        self.start("claude-code", "sdk1", 50.0)
+        got = due.due(REPO_KEY, "gajae-code", "g1", 100.0, home=self.home,
+                      eligible=lambda mark: mark.session_id != "sdk1")
+        self.assertEqual(got.session_id, "cx1")
+
+    def test_nothing_eligible_yields_none(self):
+        self.start("codex-cli", "cx1", 10.0)
+        self.assertIsNone(due.due(REPO_KEY, "claude-code", "s2", 100.0,
+                                  home=self.home, eligible=lambda mark: False))
+
+    def test_eligibility_is_not_asked_for_delivered_or_stale_rows(self):
+        """이미 전달했거나 너무 오래된 행에서는 그대로 멈춘다 — 판정은 파일을
+        여는 일이라 비싸고, 그 앞 행은 더 낡았다."""
+        asked = []
+        self.start("codex-cli", "cx1", 10.0)
+        self.assertIsNone(due.due(
+            REPO_KEY, "claude-code", "s2", 10.0 + due.MAX_AGE_SECONDS + 1,
+            home=self.home, eligible=lambda mark: asked.append(mark) or True))
+        self.assertEqual(asked, [])
+
+    def test_a_legacy_interactive_false_row_is_rechecked(self):
+        """예전 mark 가 적은 `interactive:false` 는 더 이상 보지 않는다. 그 행은
+        mark 시점에 굳어 OMHC_ALLOW_HEADLESS 를 나중에 켜도 되살릴 수 없었다."""
+        self.start("codex-cli", "cx1", 10.0, interactive=False)
+        got = due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home,
+                      eligible=lambda mark: True)
         self.assertEqual(got.session_id, "cx1")
 
     def test_a_row_without_a_verdict_is_treated_as_interactive(self):
