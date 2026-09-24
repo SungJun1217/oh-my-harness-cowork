@@ -27,6 +27,19 @@ def is_off(state_dir: str) -> bool:
     return os.path.exists(os.path.join(state_dir, OFF_MARKER))
 
 
+def off_reason(state_dir: str) -> Optional[str]:
+    """켜져 있으면 None, 꺼져 있으면 무엇이 껐는지. is_off 와 같은 순서로 확인한다
+    — `omhc status` 가 "off" 를 FAIL 로 보이지 않으면서도 왜 꺼졌는지는 보여줘야
+    한다(끔은 사람이 의도한 상태일 수 있다)."""
+    val = os.environ.get(OFF_ENV, "").strip()
+    if val not in ("", "0", "false", "False"):
+        return "{}={}".format(OFF_ENV, val)
+    marker = os.path.join(state_dir, OFF_MARKER)
+    if os.path.exists(marker):
+        return "marker {}".format(marker)
+    return None
+
+
 def _delivered_path(state_dir: str) -> str:
     return os.path.join(state_dir, DELIVERED_NAME)
 
@@ -41,6 +54,20 @@ def already_delivered(state_dir: str, session_id: str, to_harness: str) -> bool:
     except OSError:
         return False
     return False
+
+
+def last_delivered(state_dir: str) -> Optional[str]:
+    """이 레포에 가장 최근 전달된 세션 id — delivered.tsv 의 마지막 줄. append
+    순서를 쓴다(invariant 6, 타임스탬프 아님). 아무것도 전달된 적 없으면 None."""
+    try:
+        with open(_delivered_path(state_dir), encoding="utf-8", errors="replace") as fh:
+            lines = [line for line in fh if line.strip()]
+    except OSError:
+        return None
+    if not lines:
+        return None
+    parts = lines[-1].rstrip("\n").split("\t")
+    return parts[0] if parts and parts[0] else None
 
 
 def mark_delivered(state_dir: str, watermark, *, to_harness: str, epoch: float) -> None:

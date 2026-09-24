@@ -167,7 +167,7 @@ class HarnessAdapter:
         """
         return ()
 
-    def health(self, repo_root: Optional[str], ledger_rows) -> Tuple[Tuple[str, bool, str], ...]:
+    def health(self, repo_root: Optional[str], ledger_rows) -> Tuple[Tuple[str, Optional[bool], str], ...]:
         """선택적 진단. 기본은 빈 튜플 — 모든 어댑터가 구현할 의무는 없다.
 
         실측(codex-cli 0.155.1): 신뢰되지 않은 `~/.codex/hooks.json` 훅은 메시지도
@@ -177,8 +177,11 @@ class HarnessAdapter:
 
         `fallback_channels` 처럼 선택 메서드 패턴을 따른다 — 구현하지 않는
         어댑터는 이 기본값으로 충분하고, `cmd_status` 가 단정하는 `(label, ok,
-        detail)` 형태만 지키면 된다. 절대 예외를 던지지 않는다 — status 는
-        진단 도구이고, 진단이 죽으면 열화를 보고할 방법이 없어진다.
+        detail)` 형태만 지키면 된다. `ok` 는 `True`/`False`/`None` 이다 — 실제
+        판정이 되는 경우만 `True`/`False`(게이팅), 아직 판단할 근거가 없는
+        정보성 진단은 `None`(`----`, 게이팅 안 함)을 돌려준다. 절대 예외를
+        던지지 않는다 — status 는 진단 도구이고, 진단이 죽으면 열화를 보고할
+        방법이 없어진다.
 
         `ledger_rows` 는 **레포로 거르지 않은** 원장이다 — 세션 id 는 전역
         유일하므로, 호출자가 이 레포 키로 미리 거르면 자기 `.git` 을 가진 중첩
@@ -186,6 +189,21 @@ class HarnessAdapter:
         돈 것"으로 보인다.
         """
         return ()
+
+    def hook_config(self):
+        """이 하네스의 SessionStart 훅 설정 위치. 선택 메서드 — `health`/
+        `fallback_channels`/`discover` 와 같은 패턴이다. 기본은 None(훅 개념이
+        없는 하네스, 또는 아직 지원하지 않는 하네스).
+
+        구현하면 `omhc.hookconf.HookConfig`(또는 그와 같은 3개 필드짜리 레코드)를
+        돌려준다: `config_path`(그 조각이 병합될 하네스 설정의 절대 경로),
+        `fragment_name`(`hooks/` 아래 그 하네스 조각 파일명), `post_write_note`
+        (설치 직후 사용자가 봐야 할 안내 — 예: Codex 의 훅 신뢰 재승인 경고;
+        없으면 빈 문자열). `omhc status` 의 `<adapter-id> hooks` 행과 `omhc
+        hooks install` 이 이 레코드 하나로 두 하네스를 동일하게 다룬다 — 코어에
+        벤더 이름이 들어가지 않는다.
+        """
+        return None
 
     def ref_for_path(self, source_path: str, session_id: str,
                      cwd: Optional[str] = None) -> Optional[SessionRef]:

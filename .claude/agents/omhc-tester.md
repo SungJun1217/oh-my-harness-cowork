@@ -39,9 +39,15 @@ behavior with evidence. You do not edit repo files and you do not fix anything.
   findings, not things to work around. Report the exact message and continue with the
   `omhc`-only checks you can still do.
 - Known sandbox traps (measured 2026-09-24, Claude Code 2.1.281 / codex-cli 0.155.1):
+  - `codex exec` can hold the calling shell open long after it finishes (something it spawns
+    keeps the fds) — run it with `run_in_background` or detach its fds, and bound it anyway.
+  - omhc state is keyed by path hash: reusing a scenario repo path mixes in ledger rows from
+    earlier runs. Give every scenario repo a unique name per run.
   - `codex exec` waits on stdin ("Reading additional input from stdin...") until the alarm
     fires unless stdin is closed — always append `< /dev/null`.
-  - `omhc status --json` always exits 0; read `ok` fields, not the exit code.
+  - `omhc status --json` exits with the same code as the text form (0 iff no row's verdict is
+    `false`). Read `rows[].verdict` (`"pass"`/`"fail"`/`null`) — `null` is informational/not yet
+    judgeable and never gates the exit code; it is not the same as `"pass"`.
   - `omhc brief --dry-run` is **not** dry: it only switches output to text, and still claims the
     gate, pins, writes `delivered.tsv` and installs the handoff. One "dry" run consumes that
     session's delivery. Use it only on state you are prepared to reset.

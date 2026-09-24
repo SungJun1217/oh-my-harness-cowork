@@ -150,7 +150,7 @@ Codex 자신의 훅이 신뢰된 적이 없어도 그 세션이 원장에 남습
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
-omhc status          # 게이트된 검사 5개(+ 설치 시 codex hook) 전부 PASS/FAIL. SKIP 은 없다
+omhc status          # 모든 행이 PASS/FAIL/---- 중 하나(+ codex hook, 감지 시 <adapter-id> hooks). SKIP 은 없다
 ```
 
 최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
@@ -193,14 +193,48 @@ ln -s "$PWD/bin/omhc" ~/.local/bin/omhc
 
 </details>
 
-훅 배선은 조각 파일을 각자 설정에 **병합**하십시오(덮어쓰지 말 것).
+훅 배선은:
+
+```bash
+omhc hooks install
+```
+
+`--harness` 없이 부르면 이미 감지됐거나(`~/.claude/projects`,
+`~/.codex/sessions` 가 있다) 설정 *디렉터리* 자체가 있는(`~/.claude`,
+`~/.codex`) 등록된 하네스 전부가 대상입니다 — 후자는 어느 하네스도 아직
+한 번도 세션을 시작하지 않아 `projects`/`sessions` 디렉터리가 없는, 설치
+직후의 흔한 상태를 덮습니다. 둘 다 없으면(예: Codex 자체를 안 깔았다면)
+기본 대상이 아닙니다 — `omhc hooks install --harness claude-code`(또는
+`--harness codex-cli`)로 직접 지정하십시오. 아무것도 못 찾으면 등록된
+하네스 id 목록을 보여주고 조용히 아무 일도 안 하는 대신 exit 1 로 끝납니다.
+
+조각을 그 하네스 자신의 설정(Claude Code 는 `~/.claude/settings.json`,
+Codex 는 `~/.codex/hooks.json`)에 병합합니다 — 파일을 덮어쓰지 않고, 먼저
+기존 omhc 훅만 지운 뒤 다시 붙이므로(`hooks/*.json` 이 바뀐 뒤 등) 다시
+실행해도 중복되지 않고, 이미 통과하는 설치(`omhc status` 의 `<adapter-id>
+hooks` 행이 PASS)는 손으로 병합하며 필드를 더 얹었거나 그룹 순서가 달라도
+건드리지 않습니다. 멱등적입니다 — 바꿀 게 없으면 아무것도 쓰지 않고 백업도
+만들지 않습니다. 실제로 바뀌어 처음 쓸 때 JSON 형식(2칸 들여쓰기)도
+정규화됩니다. `omhc hooks uninstall [--harness ID]` 는 같은 방식으로,
+구조적으로(문자열 정규식이 아니라 argv 로 판정) omhc 자신의 `SessionStart`
+훅만 제거합니다 — `install.sh --uninstall` 과 대체로 같지만 드문 명령
+꼴에서는 갈릴 수 있습니다(실측 사례는 `omhc/hookconf.py` 상단 주석 참고).
+두 명령 모두 기존 파일을 실제로 바꾸기 직전에 `<파일>.omhc-bak` 로 먼저
+백업합니다.
+
+<details>
+<summary>조각 파일을 손으로 병합하려면</summary>
+
 `curl \| sh` 로 설치했다면 `~/.local/share/omhc/current/hooks/` 아래,
-git 체크아웃이라면 레포의 `hooks/` 아래에 있습니다.
+git 체크아웃이라면 레포의 `hooks/` 아래에 있습니다. 조각의 `hooks` 키를
+각자 설정에 병합하십시오(덮어쓰지 말 것).
 
 | 하네스 | 파일 | 대상 |
 |---|---|---|
 | Claude Code | `claude-settings.fragment.json` | `~/.claude/settings.json` 의 `hooks` |
 | Codex CLI | `codex-hooks.json` | `~/.codex/hooks.json` |
+
+</details>
 
 > [!WARNING]
 > 실측(codex-cli 0.155.1): 손으로 떨어뜨린 `hooks.json`은 기본적으로
@@ -214,11 +248,31 @@ git 체크아웃이라면 레포의 `hooks/` 아래에 있습니다.
 > `additionalContext`)는 codex-cli 0.155.1에서 `hook: SessionStart Failed`로
 > 거부되고 아무것도 주입되지 않습니다.
 
-`omhc status`는 게이트된 검사 5개(adapters/ledger/archive/off switch/
-instruction files, 전부 PASS/FAIL)와 정보성 행 2개(pull rate, watcher)를
-보여줍니다. omhc Codex 훅이 설치돼 있으면 `codex hook` 행이 붙습니다. 훅 설치 뒤
-이 레포의 가장 최근 Codex 세션이 훅을 한 번도 돌리지 않았으면(신뢰되지 않은 훅)
-FAIL 이고, 그 세션의 originator 를 함께 보여줍니다.
+`omhc status`의 모든 행은 세 라벨 중 하나입니다: 실제로 판정되어 exit code 를
+게이팅할 수 있는 **PASS**/**FAIL**(adapters, archive, instruction files,
+`codex hook` 같은 어댑터 health 행), 그리고 정보성이거나 아직 판단할 근거가
+없는 행을 위한 **`----`**(ledger, off switch, pull rate, watcher) — `----`
+는 게이팅하지 않습니다. omhc Codex 훅이 설치돼 있으면 `codex hook` 행이
+붙습니다. `hooks.json`이 마지막으로 바뀐 뒤 이 레포의 가장 최근 대화형 Codex
+세션이 훅을 돌리지 않았으면(신뢰되지 않은 훅) FAIL 이고, 그 세션의 originator 를
+함께 보여줍니다. 이때 Claude→Codex 는 전달되지 않지만 Codex→Claude 는 Claude 쪽
+`mark` 의 채우기로 계속 동작합니다. 아직 판정할 수 없으면 `----` 입니다:
+`hooks.json`이 바뀐 뒤 이 레포에 대화형 Codex 세션이 없을 때(날짜 표시), 헤드리스
+`codex exec` 세션만 있을 때(판정에 세지 않습니다 — 여기서 대화형 `codex` 를 한 번
+여십시오), 알 수 없는 오류일 때.
+
+감지된 하네스마다 `<adapter-id> hooks` 행(예: `claude-code hooks`,
+`codex-cli hooks`)도 붙습니다 — 하네스 디렉터리가 존재한다는 것만이 아니라
+omhc 의 SessionStart 훅이 그 하네스 자신의 설정에 실제로 병합돼 있는지를
+봅니다. 판정은 구조적입니다(바이트 단위 문자열 비교가 아니라 argv 로 쪼개
+비교합니다) — 절대경로, `~`, `${HOME}`, 따옴표로 감싼 명령, `PATH` 상의
+bare `omhc` 모두 설치된 것으로 인정됩니다. 설정 파일이 없으면(`omhc hooks
+install` 을 처방으로 보여줍니다) 또는 파싱이 안 되면, `mark`/`brief` 명령이
+배포된 조각이 기대하는 순서·플래그대로 있지 않으면(낡은 `--wire sdk`,
+`mark` 누락, `mark` 보다 앞선 `brief` 등 — 역시 `omhc hooks install` 을
+처방으로 보여줍니다), 또는 훅의 바이너리를 찾을 수 없거나 실행 가능하지
+않으면 FAIL(게이팅)입니다. 설치된 명령이 배포된 조각과 구조적으로 일치하고
+바이너리가 실행 가능하면 PASS 입니다.
 
 ### AGENTS.md 를 Claude Code 와 공유하는 레포
 
@@ -246,6 +300,11 @@ outbox 가 대신 받는 게 아니라 Codex 쪽 `brief` 호출 자체가 없어
 | `omhc log [--last N] [--grep P] [--verb V] [--file P]` | 색인된 이벤트를 한 줄씩 |
 | `omhc show <E1\|#137> [--full]` | **원본 바이트를 오프셋으로 조회** (tier (b) 진입점) |
 | `omhc note "<text>"` | 메모. 두 하네스의 에이전트가 맨 명령줄로 호출 가능 |
+
+**인출률**("pulled X of N injections")은 omhc 의 부담이 값을 하는지 판단할
+유일한 숫자입니다. N 은 전달된 세션 수, X 는 그중 `omhc show`나 `omhc log`로
+실제로 파본 세션 수입니다(같은 세션을 여러 번 파봐도 한 번만 셉니다) — 사람이
+손으로 `omhc log`를 돌려도 셈에 들어갑니다, 에이전트뿐 아니라.
 
 끄기: `OMHC_OFF=1` 또는 `~/.omhc/<repo-key>/off` 파일.
 
@@ -399,5 +458,6 @@ bash tests/smoke.sh                             # 적대적 입력 7종
 | `omhc brief --harness X [--wire claude\|cursor\|sdk]` | 표식 출력 (훅이 부른다) |
 | `omhc clear` | 설치된 표식 제거 |
 | `omhc watch [--stop\|--once]` | 가속기 데몬(선택, 없어도 결과는 같다) |
+| `omhc hooks install\|uninstall [--harness ID]` | omhc 자신의 `SessionStart` 훅을 병합/제거 (설치 항목 참고) |
 
 </details>

@@ -122,6 +122,30 @@ class TestSweep(Base):
         self.assertTrue(os.path.exists(pinned))
         self.assertEqual(os.stat(path).st_ino, os.stat(pinned).st_ino)
 
+    def test_lag_reports_pinned_false_when_indexed_but_never_pinned(self):
+        """omhc status 의 archive 행이 이 필드로 "고정 안 됨"과 "고정됐지만
+        꼬리가 0바이트"를 구분한다(리뷰 결함) — 색인만 있고 핀이 없으면 size 도
+        lag_bytes 도 0 이라 `pinned` 없이는 구분할 방법이 없었다."""
+        idx_dir = os.path.join(self.state, "index")
+        os.makedirs(idx_dir, exist_ok=True)
+        from omhc.event import Event
+
+        ev = Event(seq=1, epoch=1700000000.0, author="human", verb="said",
+                  ok=True, text="hi", arg="hi", paths=(), offset=0, length=10)
+        index.append_rows(os.path.join(idx_dir, "s1.idx"), [ev])
+
+        rows = watch.lag(self.state)
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["pinned"])
+        self.assertEqual(rows[0]["size"], 0)
+
+    def test_lag_reports_pinned_true_once_sweep_has_pinned_it(self):
+        self.plant_codex()
+        watch.sweep(self.root, self.state, home=self.home)
+        rows = watch.lag(self.state)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["pinned"])
+
     def test_sweep_with_nothing_to_do_returns_zero(self):
         self.assertEqual(watch.sweep(self.root, self.state, home=self.home), 0)
 

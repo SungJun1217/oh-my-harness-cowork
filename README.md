@@ -154,7 +154,7 @@ in the Claude → Codex direction.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
-omhc status          # 5 gated checks (+ codex hook when installed), all PASS/FAIL. No SKIP
+omhc status          # every check gets PASS/FAIL/---- (+ codex hook, <adapter-id> hooks when detected). Not SKIP
 ```
 
 This unpacks the latest release into `~/.local/share/omhc/<version>` and
@@ -199,15 +199,51 @@ ln -s "$PWD/bin/omhc" ~/.local/bin/omhc
 
 </details>
 
-Wire up the hooks by **merging** the fragment files into your own config
-(don't overwrite it). From a `curl \| sh` install they live under
-`~/.local/share/omhc/current/hooks/`; from a git checkout, under `hooks/`
-in the repo.
+Wire up the hooks with:
+
+```bash
+omhc hooks install
+```
+
+With no `--harness`, it targets every registered harness that's either
+already detected (`~/.claude/projects`, `~/.codex/sessions` exist) or whose
+config *directory* exists (`~/.claude`, `~/.codex`) — the latter covers the
+common case of installing before either harness has run a first session, so
+there's no `projects`/`sessions` directory yet. If neither exists for a
+harness (e.g. you haven't installed Codex at all), it isn't targeted by
+default; point at it explicitly with `omhc hooks install --harness
+claude-code` (or `--harness codex-cli`). If nothing at all is found, the
+command prints the registered harness ids and exits 1 instead of silently
+doing nothing.
+
+It merges the fragment into that harness's own config
+(`~/.claude/settings.json`, `~/.codex/hooks.json`) — it never overwrites the
+file, only strips any prior omhc hooks first so re-running (e.g. after a
+`hooks/*.json` change) doesn't duplicate them, and leaves an install that
+already passes (`omhc status`'s `<adapter-id> hooks` row is PASS) untouched
+even if it was hand-merged with extra fields or in a different group order.
+It's idempotent: a run with nothing to change writes nothing and makes no
+backup — the first change that does write also normalizes the file's JSON
+formatting (2-space indent). `omhc hooks uninstall [--harness ID]` removes
+only omhc's own `SessionStart` hooks the same way, structurally (parsed as
+argv, not `install.sh --uninstall`'s string regex — the two can diverge on
+unusual commands; see `omhc/hookconf.py`'s module comment for the measured
+cases). Either command backs up the config to `<file>.omhc-bak` first
+whenever it's about to change an existing file.
+
+<details>
+<summary>Merging the fragment files by hand instead</summary>
+
+They live under `~/.local/share/omhc/current/hooks/` (`curl \| sh` install)
+or `hooks/` in the repo (git checkout). Merge the fragment's `hooks` key into
+your own config — don't overwrite it.
 
 | Harness | File | Target |
 |---|---|---|
 | Claude Code | `claude-settings.fragment.json` | `hooks` in `~/.claude/settings.json` |
 | Codex CLI | `codex-hooks.json` | `~/.codex/hooks.json` |
+
+</details>
 
 > [!WARNING]
 > Measured (codex-cli 0.155.1): a hand-dropped `hooks.json` is **not trusted
@@ -221,11 +257,33 @@ in the repo.
 > (top-level `additionalContext`) is rejected by codex-cli 0.155.1 with
 > `hook: SessionStart Failed` and nothing gets injected.
 
-`omhc status` shows 5 gated checks (adapters/ledger/archive/off switch/
-instruction files, all PASS/FAIL) plus 2 informational rows (pull rate,
-watcher). When the omhc Codex hook is installed, a `codex hook` row is added: it
-FAILs when the newest Codex session for this repo since the hook was installed never
-ran it — the untrusted-hook case — and names that session's originator.
+`omhc status` gives every row one of three labels: **PASS** or **FAIL** for
+checks that were actually judged and can gate the exit code (adapters,
+archive, instruction files, and adapter health rows such as `codex hook`),
+and **`----`** for rows that are informational or not judgeable yet (ledger,
+off switch, pull rate, watcher) — `----` never gates. When the omhc Codex
+hook is installed, a `codex hook` row is added. It FAILs when the newest
+interactive Codex session for this repo since `hooks.json` last changed never
+ran the hook — the untrusted-hook case — and names that session's originator;
+Claude→Codex is then not delivered, while Codex→Claude still works through
+Claude's `mark` backfill. It shows `----` while it cannot judge yet: no
+interactive Codex session here since `hooks.json` changed (the date is shown),
+only headless `codex exec` sessions (they never count — open an interactive
+`codex` here once), or an unknown error.
+
+For every detected harness, status also adds a `<adapter-id> hooks` row
+(e.g. `claude-code hooks`, `codex-cli hooks`) that checks whether omhc's
+SessionStart hooks are actually merged into that harness's own config, not
+just that the harness directory exists. Matching is structural (parsed as
+argv, not a byte-for-byte string compare), so an absolute path, `~`,
+`${HOME}`, a quoted command, or a bare `omhc` found on `PATH` all still
+count as installed. It FAILs (and gates) when the config file is missing
+(pointing at `omhc hooks install`) or unparseable, when the `mark`/`brief`
+commands aren't there in the order and with the flags the shipped fragment
+expects (a stale `--wire sdk`, a missing `mark`, `brief` before `mark`, …
+also pointing at `omhc hooks install`), or when the hook's binary can't be
+found or isn't executable. It PASSes once the installed commands match the
+shipped fragment structurally and the binary is executable.
 
 ### Repos that share AGENTS.md with Claude Code
 
@@ -255,6 +313,12 @@ this layout.
 | `omhc log [--last N] [--grep P] [--verb V] [--file P]` | Indexed events, one per line |
 | `omhc show <E1\|#137> [--full]` | **Looks up the original bytes by offset** (tier (b) entry point) |
 | `omhc note "<text>"` | Leave a note. Either harness's agent can call it from the plain command line |
+
+**Pull rate** ("pulled X of N injections") is the one number for judging
+whether omhc's overhead is worth it: X is how many of the N delivered
+sessions were actually dug into via `omhc show` or `omhc log` (each session
+counts once, no matter how many times it's pulled) — a human running
+`omhc log` by hand counts too, not just an agent.
 
 Turn it off: `OMHC_OFF=1`, or an `~/.omhc/<repo-key>/off` file.
 
@@ -423,5 +487,6 @@ committed). Generate them from real sessions on your own machine with
 | `omhc brief --harness X [--wire claude\|cursor\|sdk]` | Prints the handoff (called by the hook) |
 | `omhc clear` | Removes installed markers |
 | `omhc watch [--stop\|--once]` | Optional accelerator daemon (results are identical without it) |
+| `omhc hooks install\|uninstall [--harness ID]` | Merges/strips omhc's own `SessionStart` hooks (see Install) |
 
 </details>

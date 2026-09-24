@@ -8,8 +8,8 @@ import time
 from typing import List, Optional
 
 from . import (
-    adapters, agents_md, brief, due, gate, index, ledger, locate, managed_block, pin,
-    watch,
+    adapters, agents_md, brief, due, gate, hookconf, index, ledger, locate,
+    managed_block, pin, watch,
 )
 from .adapter import AdapterUnavailable
 
@@ -49,18 +49,9 @@ BACKFILL_TIME_BUDGET = 0.08
 
 
 def _ref_repo_key(ref) -> Optional[str]:
-    """이 ref 가 실제로 속한 레포 키. cmd_mark 가 자기 세션에 쓰는 것과 같은
-    해석(`locate.resolve_repo_root` → `locate.repo_key`)을 그대로 쓴다.
-
-    discover() 의 cwd 일치는 "root 아래(equal-or-descendant)"라서, `.git`
-    없는 부모 디렉터리에서 mark 가 불리면 그 밑의 **다른** 레포(자기 `.git`을
-    가진 자식, 예: 중첩 워크트리·서브모듈)에서 시작한 세션까지 통과한다.
-    거기서 온 세션을 그 부모의 repo 키로 원장에 적으면 다른 레포의 GOAL 이
-    이 레포의 브리핑에 새어든다 — repo 키를 다시 계산해 걸러야 한다.
-    """
-    if not ref.cwd:
-        return None
-    return locate.repo_key(locate.resolve_repo_root(ref.cwd))
+    """이 ref 가 실제로 속한 레포 키. `locate.owning_repo_key` 로 위임한다
+    (원래 이 함수에 있던 로직 — codex_cli.health() 도 같은 필터를 쓴다)."""
+    return locate.owning_repo_key(ref.cwd)
 
 
 def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
@@ -199,6 +190,35 @@ def cmd_note(args, *, home=None, out=sys.stdout) -> int:
     return 0
 
 
+# --- pull rate ---------------------------------------------------------------
+
+
+def _record_pull(key: str, state: str, via: str, home, session: Optional[str] = None,
+                 tag: Optional[str] = None) -> None:
+    """`show`/`log` 로 산출물을 인출했다는 행을 원장에 남긴다. §9 인출률 회계.
+
+    `harness` 키를 절대 넣지 않는다 — due() 는 event=="start" 만 보고,
+    backfill 은 harness+start 로 own_rows 를 거르고, codex health() 도
+    event=="start" 만 "훅이 돌았다"는 증거로 센다. 이 세 곳 중 어디에도
+    pull 행이 섞여 들면 안 된다. 실패는 show/log 의 결과에 영향을 주면
+    안 되므로 통째로 삼킨다(훅 경로는 아니지만 fail-open 을 유지한다).
+
+    show 는 실제로 읽은 세션을 넘긴다. `#N` 은 옛 세션의 색인에 떨어질 수 있어
+    "가장 최근 전달" 로 두면 보지 않은 세션의 인출률이 오른다. 대상이 하나로
+    정해지지 않는 log 만 가장 최근 전달 세션(delivered.tsv 마지막 줄)에 돌린다."""
+    try:
+        session = session or due.last_delivered(state)
+        if not session:
+            return
+        row = {"repo": key, "event": "pull", "via": via, "session": session,
+               "epoch": round(time.time(), 0)}
+        if tag:
+            row["tag"] = tag
+        ledger.append(row, home=home)
+    except Exception:
+        pass
+
+
 # --- log --------------------------------------------------------------------
 
 
@@ -212,7 +232,8 @@ def _index_files(state: str) -> List[str]:
 
 
 def cmd_log(args, *, home=None, out=sys.stdout) -> int:
-    _root, _key, state = _state_for(home)
+    _root, key, state = _state_for(home)
+    _record_pull(key, state, "log", home)
     rows = []
     for path in _index_files(state):
         session = os.path.basename(path)[: -len(".idx")]
@@ -256,7 +277,7 @@ def _pinned_path(state: str, session_id: str, fallback: str) -> str:
 
 
 def cmd_show(args, *, home=None, out=sys.stdout) -> int:
-    _root, _key, state = _state_for(home)
+    _root, key, state = _state_for(home)
     target = args.target.strip()
     refs = index.read_refs(state)
 
@@ -289,15 +310,26 @@ def cmd_show(args, *, home=None, out=sys.stdout) -> int:
     out.write(raw.decode("utf-8", "replace"))
     if not raw.endswith(b"\n"):
         out.write("\n")
+    _record_pull(key, state, "show", home, session=entry["session_id"], tag=target)
     return 0
 
 
 # --- status -----------------------------------------------------------------
 
 
-def _check(out, label: str, ok: bool, detail: str) -> bool:
-    out.write("{:<4} {:<22} {}\n".format("PASS" if ok else "FAIL", label, detail))
-    return ok
+# 세 값만 쓴다: True(PASS, 게이팅), False(FAIL, 게이팅), None(`----`, 게이팅
+# 안 함). SKIP 이 아니다 — "아직 아무 일도 안 일어났다"를 실패로도 성공으로도
+# 위장하지 않고 그대로 보여주려는 세 번째 라벨이다(#8).
+def _verdict_word(verdict: Optional[bool]) -> str:
+    if verdict is True:
+        return "PASS"
+    if verdict is False:
+        return "FAIL"
+    return "----"
+
+
+def _check(out, label: str, verdict: Optional[bool], detail: str) -> None:
+    out.write("{:<4} {:<22} {}\n".format(_verdict_word(verdict), label, detail))
 
 
 def cmd_status(args, *, home=None, out=sys.stdout) -> int:
@@ -313,12 +345,24 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     # 바뀔 때 한쪽만 고쳐진다.
     lag_rows = watch.lag(state)
 
-    pulls = len([r for r in rows if r.get("event") == "pull"])
+    # X = 최소 한 번 인출된 "전달받은 세션"의 수(중복 제거), N = 전달 횟수.
+    # 같은 세션을 두 번 show 해도 X 는 한 번만 세고, injections 는 delivered.tsv
+    # 줄 수 그대로 둔다(§9 "pulled X of N injections" — N 은 전달 횟수다).
+    pull_sessions = {r.get("session") for r in rows
+                      if r.get("event") == "pull" and r.get("session")}
     injections = 0
+    delivered_sessions = set()
     delivered = os.path.join(state, due.DELIVERED_NAME)
     if os.path.exists(delivered):
         with open(delivered, encoding="utf-8", errors="replace") as fh:
-            injections = len([line for line in fh if line.strip()])
+            for line in fh:
+                if not line.strip():
+                    continue
+                injections += 1
+                session = line.split("\t", 1)[0]
+                if session:
+                    delivered_sessions.add(session)
+    pulls = len(delivered_sessions & pull_sessions)
 
     # AGENTS.md 가 CLAUDE.md 와 공유되면 Codex Path B 는 절대 쓰면 안 된다 —
     # 그 파일을 공유 배선 만들기 *전에* 심어 둔 낡은 관리 구간만 실패 사유다.
@@ -338,56 +382,127 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     for adapter_id in installed:
         try:
             inst = adapters.get(adapter_id, home=home)
+        except Exception:
+            # 어댑터 생성 자체가 안 되면 health 를 판정할 근거가 없다.
+            continue
+        try:
             health_rows.extend(getattr(inst, "health", lambda *a: ())(root, all_rows))
         except Exception:
-            continue
+            pass
+
+    # hooks 행은 `installed`(detect() 로 감지된 것)보다 넓다 — curl 설치
+    # 직후, 하네스가 한 번도 안 돌아 detect() 가 보는 세션 디렉터리가 아직
+    # 없어도 설정 디렉터리(~/.claude, ~/.codex)는 있을 수 있고, 그 경우도
+    # "설치됐는지" 는 여전히 보여줘야 한다(hook_config_targets, #7 리뷰 1).
+    # health 와 독립이다 — 한쪽이 죽어도 다른 쪽 행은 여전히 나와야 한다
+    # (리뷰 결함: 예전엔 health 의 예외가 hooks 판정 자체를 건너뛰었다).
+    hook_rows = []
+    for adapter_id in hook_config_targets(home):
+        try:
+            inst = adapters.get(adapter_id, home=home)
+            hc = getattr(inst, "hook_config", lambda: None)()
+            if hc is not None:
+                fragment = hookconf.load_fragment(hc.fragment_name)
+                ok, detail = hookconf.inspect(hc.config_path, fragment, inst.home)
+                hook_rows.append(("{} hooks".format(adapter_id), ok, detail))
+        except Exception as exc:
+            # 조용히 버리지 않는다 — 판정이 죽었다는 사실 자체가 FAIL 행이다
+            # (예: hooks/ 디렉터리가 없어 load_fragment 가 실패한 경우).
+            hook_rows.append(("{} hooks".format(adapter_id), False,
+                              "cannot check hooks ({})".format(exc)))
+    watcher = watch.read_lock(state)
+
+    # 행을 한 번만 만들고 텍스트·JSON 이 같은 목록을 렌더한다 — 따로 만들면
+    # 한쪽만 고쳐질 수 있다(#8, status --json 이 항상 exit 0 이던 결함).
+    checks = []
+    checks.append(("adapters", bool(installed), ", ".join(installed) or "none found"))
+    checks.append(("ledger", None,
+                   "{} rows for this repo".format(len(rows)) if rows
+                   else "no sessions recorded here yet — start either harness in this repo"))
+
+    # lag_rows 의 size/lag_bytes 는 pinned/<sid>/source.jsonl 이 없어도 0 으로
+    # 나온다 — "size 0" 과 "고정 성공, 꼬리 0바이트" 를 구분 못 하면 고정이
+    # 실패한 세션도 archive PASS 로 보인다(리뷰 결함). watch.lag 의 `pinned` 로
+    # 실제 존재 여부를 본다.
+    pinned_rows = [r for r in lag_rows if r.get("pinned")]
+    unpinned_rows = [r for r in lag_rows if not r.get("pinned")]
+    if pinned_rows:
+        archive_verdict = True
+        archive_detail = "; ".join(
+            "{} tail={}B".format(r["session"][:8], r["lag_bytes"]) for r in pinned_rows)
+        if unpinned_rows:
+            archive_detail += "; unpinned: " + ", ".join(
+                r["session"][:8] for r in unpinned_rows)
+    elif injections:
+        # 핀은 brief.compute 가 전달 *후에만* 만든다(brief.py) — 원장 행은
+        # 있지만 아직 한 번도 전달받지 못한 사람에게 archive 를 영영 FAIL 로
+        # 두면 안 되지만, 전달은 됐는데(injections>0) 핀이 하나도 없다면
+        # 진짜 결함이다.
+        archive_verdict = False
+        archive_detail = "{} injections but nothing pinned".format(injections)
+        log_path = os.path.join(locate.omhc_root(home), brief.GUARD_LOG)
+        if os.path.exists(log_path):
+            archive_detail += "; details may be in {}".format(log_path)
+    else:
+        archive_verdict = None
+        archive_detail = "nothing handed off to this repo yet"
+    checks.append(("archive", archive_verdict, archive_detail))
+
+    off_reason = due.off_reason(state)
+    checks.append(("off switch", None,
+                   "on" if off_reason is None else "off ({})".format(off_reason)))
+
+    if leaked:
+        checks.append(("instruction files", False,
+                       "{}; stale omhc block in AGENTS.md would leak into Claude — "
+                       "run `omhc clear`".format(shared)))
+    elif shared:
+        checks.append(("instruction files", True,
+                       "{} -> Codex Path B disabled, falls to .omhc/outbox".format(shared)))
+    else:
+        checks.append(("instruction files", True,
+                       "AGENTS.md not shared with CLAUDE.md"
+                       if os.path.exists(agents_md.path_for(root))
+                       else "no AGENTS.md"))
+
+    for label, health_ok, detail in health_rows:
+        checks.append((label, health_ok, detail))
+    for label, hook_ok, detail in hook_rows:
+        checks.append((label, hook_ok, detail))
+
+    checks.append(("pull rate", None,
+                   "pulled {} of {} injections".format(pulls, injections)))
+    checks.append(("watcher (optional)", None,
+                   "running pid {}".format(watcher) if watcher
+                   else "not running — brief falls back to inline parsing"))
+
+    code = 1 if any(verdict is False for _label, verdict, _detail in checks) else 0
 
     if args.json:
+        def _verdict_json(verdict: Optional[bool]) -> Optional[str]:
+            if verdict is True:
+                return "pass"
+            if verdict is False:
+                return "fail"
+            return None
+
         out.write(json.dumps({
             "repo_root": root, "repo_key": key, "state_dir": state,
             "adapters": installed, "ledger_rows": len(rows),
             "archive": lag_rows,
             "injections": injections, "pulls": pulls,
-            "off": due.is_off(state), "watcher_pid": watch.read_lock(state),
+            "off": due.is_off(state), "watcher_pid": watcher,
             "instruction_files": {"shared": shared, "stale_block": leaked},
             "health": [{"label": label, "ok": ok, "detail": detail}
                        for label, ok, detail in health_rows],
+            "rows": [{"label": label, "verdict": _verdict_json(verdict), "detail": detail}
+                     for label, verdict, detail in checks],
         }, ensure_ascii=False, indent=2) + "\n")
-        return 0
+        return code
 
     out.write("repo   {}\nkey    {}\nstate  {}\n\n".format(root, key, state))
-    ok = True
-    ok &= _check(out, "adapters", bool(installed), ", ".join(installed) or "none found")
-    ok &= _check(out, "ledger", bool(rows),
-                 "{} rows for this repo".format(len(rows)))
-    ok &= _check(out, "archive", bool(lag_rows),
-                 "; ".join("{} tail={}B".format(r["session"][:8], r["lag_bytes"])
-                           for r in lag_rows)
-                 or "nothing pinned yet")
-    ok &= _check(out, "off switch", not due.is_off(state),
-                 "off" if due.is_off(state) else "on")
-    if leaked:
-        ok &= _check(out, "instruction files", False,
-                     "{}; stale omhc block in AGENTS.md would leak into Claude — "
-                     "run `omhc clear`".format(shared))
-    elif shared:
-        ok &= _check(out, "instruction files", True,
-                     "{} -> Codex Path B disabled, falls to .omhc/outbox".format(shared))
-    else:
-        ok &= _check(out, "instruction files", True,
-                     "AGENTS.md not shared with CLAUDE.md"
-                     if os.path.exists(agents_md.path_for(root))
-                     else "no AGENTS.md")
-    for label, health_ok, detail in health_rows:
-        ok &= _check(out, label, health_ok, detail)
-    # 항상 참인 항목을 ok 에 접으면 독자가 리터럴 True 를 추적해야 안다.
-    # watcher 줄처럼 정보로만 출력한다.
-    _check(out, "pull rate", True,
-           "pulled {} of {} injections".format(pulls, injections))
-    watcher = watch.read_lock(state)
-    _check(out, "watcher (optional)", True,
-           "running pid {}".format(watcher) if watcher
-           else "not running — brief falls back to inline parsing")
+    for label, verdict, detail in checks:
+        _check(out, label, verdict, detail)
     verbs = {}
     for path in _index_files(state):
         for row in index.rows(path):
@@ -398,7 +513,7 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     out.write("artifact {}\n".format(
         "{}B".format(os.path.getsize(artifact)) if os.path.exists(artifact)
         else "none"))
-    return 0 if ok else 1
+    return code
 
 
 # --- brief ------------------------------------------------------------------
@@ -415,6 +530,124 @@ def cmd_brief(args, *, home=None, out=sys.stdout) -> int:
         home=home,
         out=out,
     )
+
+
+# --- hooks --------------------------------------------------------------
+
+
+def _adapters_with_hook_config(home) -> List[str]:
+    """`hook_config()` 를 구현한(=SessionStart 훅 개념이 있는) 등록된 어댑터
+    id 전부. 감지 여부와 무관하다 — `--harness` 없이 아무 대상도 못 찾았을 때
+    "이 중에서 골라라" 로 보여줄 목록이다."""
+    ids = []
+    for adapter_id in sorted(adapters.REGISTRY):
+        try:
+            inst = adapters.get(adapter_id, home=home)
+        except Exception:
+            continue
+        if getattr(inst, "hook_config", lambda: None)() is not None:
+            ids.append(adapter_id)
+    return ids
+
+
+def hook_config_targets(home) -> List[str]:
+    """`hook_config()` 가 있고, 이 머신에서 그 하네스가 감지됐거나(`detect()`)
+    설정 디렉터리가 이미 있는 어댑터 id 들. `omhc status` 의 `<adapter-id>
+    hooks` 행과 `omhc hooks install` 의 기본 대상이 이 규칙을 공유한다.
+
+    curl 설치 직후, 어느 하네스도 아직 한 번도 안 돈 시점에는 `detect()` 가
+    보는 세션 디렉터리(`~/.claude/projects`, `~/.codex/sessions`)가 없다 —
+    하지만 하네스 자신의 설정 디렉터리(`~/.claude`, `~/.codex`)는 그 하네스를
+    한 번이라도 실행했거나 사람이 미리 만들어 뒀다면 존재할 수 있다. 이 규칙이
+    없으면 첫 사용자에게 `hooks install` 이 "찾은 게 없다"며 조용히 아무 일도
+    안 하고, `status` 도 훅 행 자체를 안 보여준다(#7 리뷰 1)."""
+    ids = []
+    for adapter_id in sorted(adapters.REGISTRY):
+        try:
+            inst = adapters.get(adapter_id, home=home)
+        except Exception:
+            continue
+        hc = getattr(inst, "hook_config", lambda: None)()
+        if hc is None:
+            continue
+        try:
+            detected = inst.detect().present
+        except Exception:
+            detected = False
+        if detected or os.path.isdir(os.path.dirname(hc.config_path)):
+            ids.append(adapter_id)
+    return ids
+
+
+def cmd_hooks(args, *, home=None, out=sys.stdout) -> int:
+    """`omhc hooks install|uninstall`. status 의 `<adapter-id> hooks` 행이
+    가리키는 그 설치를 실제로 한다. 코어는 벤더 이름을 모른다 — 대상은
+    `hook_config()` 를 구현한, 이 머신에 감지됐거나 설정 디렉터리가 있는
+    어댑터들이다."""
+    if not getattr(args, "hooks_action", None):
+        out.write("usage: omhc hooks install|uninstall [--harness ID]\n")
+        return 0
+
+    targets = [args.harness] if args.harness else hook_config_targets(home)
+    if not targets:
+        known = _adapters_with_hook_config(home)
+        out.write("no harness found -- run with --harness <id> ({})\n".format(
+            ", ".join(known) if known else "no adapter declares a hook config"))
+        return 1
+
+    had_error = False
+    for adapter_id in targets:
+        try:
+            inst = adapters.get(adapter_id, home=home)
+        except AdapterUnavailable as exc:
+            out.write("{}\n".format(exc))
+            had_error = True
+            continue
+
+        hc = getattr(inst, "hook_config", lambda: None)()
+        if hc is None:
+            if args.harness:
+                out.write("{}: no hook config for this harness\n".format(adapter_id))
+            continue
+
+        try:
+            if args.hooks_action == "install":
+                fragment = hookconf.load_fragment(hc.fragment_name)
+                had_backup = os.path.exists(hc.config_path)
+                changed = hookconf.merge(hc.config_path, fragment, inst.home)
+                if changed:
+                    out.write("{}: installed -> {}\n".format(adapter_id, hc.config_path))
+                    if had_backup:
+                        out.write("{}: backup {}\n".format(
+                            adapter_id, hc.config_path + ".omhc-bak"))
+                    if hc.post_write_note:
+                        out.write("{}: {}\n".format(adapter_id, hc.post_write_note))
+                else:
+                    out.write("{}: already up to date\n".format(adapter_id))
+                ok, detail = hookconf.inspect(hc.config_path, fragment, inst.home)
+                out.write("{}: {} -- {}\n".format(
+                    adapter_id, "PASS" if ok else "FAIL", detail))
+                if not ok:
+                    # 파일은 이미 (다시) 쓰였다 — 그런데도 재검사가 FAIL 이면
+                    # (예: 바이너리를 아직 못 찾음) 사람이 고쳐야 할 문제가
+                    # 남아 있다는 뜻이므로 exit code 로도 알린다(#7 리뷰 2).
+                    had_error = True
+            else:
+                changed = hookconf.strip(hc.config_path)
+                if changed:
+                    out.write("{}: removed from {}\n".format(adapter_id, hc.config_path))
+                    out.write("{}: backup {}\n".format(
+                        adapter_id, hc.config_path + ".omhc-bak"))
+                else:
+                    out.write("{}: nothing to remove\n".format(adapter_id))
+        except hookconf.HookConfigError as exc:
+            out.write("{}: {}\n".format(adapter_id, exc))
+            had_error = True
+        except Exception as exc:  # 트레이스백은 절대 안 보여준다 — 훅 경로는 아니지만 이 명령도 사람용이다.
+            out.write("{}: unexpected error ({})\n".format(adapter_id, exc))
+            had_error = True
+
+    return 1 if had_error else 0
 
 
 # --- clear ------------------------------------------------------------------
@@ -521,6 +754,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("clear", help="설치된 표식을 제거")
     p.set_defaults(func=cmd_clear)
+
+    p = sub.add_parser("hooks", help="omhc 자신의 SessionStart 훅을 설치/제거")
+    p.set_defaults(func=cmd_hooks, hooks_action=None)
+    hooks_sub = p.add_subparsers(dest="hooks_action")
+    p_install = hooks_sub.add_parser("install", help="감지된 하네스에 훅을 병합")
+    p_install.add_argument("--harness", default=None)
+    p_install.set_defaults(func=cmd_hooks)
+    p_uninstall = hooks_sub.add_parser("uninstall", help="omhc 자신의 훅만 제거")
+    p_uninstall.add_argument("--harness", default=None)
+    p_uninstall.set_defaults(func=cmd_hooks)
 
     return parser
 

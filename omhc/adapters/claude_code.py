@@ -8,7 +8,7 @@ import re
 import time
 from typing import Dict, List, Optional, Tuple
 
-from .. import fsio, guard, locate
+from .. import fsio, guard, hookconf, locate
 from ..adapter import (
     Capability,
     HandoffBundle,
@@ -442,3 +442,10 @@ class ClaudeCodeAdapter:
         생략이 없다 — 진단할 행태 결함이 없으므로 빈 튜플이다.
         """
         return ()
+
+    def hook_config(self):
+        return hookconf.HookConfig(
+            config_path=os.path.join(self.home, ".claude", "settings.json"),
+            fragment_name="claude-settings.fragment.json",
+            post_write_note="",
+        )

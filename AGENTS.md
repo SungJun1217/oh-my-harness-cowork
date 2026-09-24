@@ -18,7 +18,7 @@ python3 -m unittest tests.test_mint                   # one module
 python3 -m unittest tests.test_mint.TestBudget.test_output_never_exceeds_the_budget   # one test
 bash tests/smoke.sh                                   # 7 adversarial inputs: hook path must give empty stdout + exit 0
 python3 tests/harvest.py [--force]                    # regenerate fixtures from this machine's real sessions
-bin/omhc status                                       # the one human dashboard (all checks PASS/FAIL, no SKIP)
+bin/omhc status                                       # the one human dashboard: every check gets PASS/FAIL/`----` (never SKIP)
 ```
 
 - ~60 tests skip without fixtures. Fixtures (`tests/fixtures/`) are real conversations and are **never committed**; run `harvest.py` locally to enable them.
@@ -47,7 +47,7 @@ Entry: `bin/omhc` → `omhc/cli.py` (subcommands `mark`, `brief`, `note`, `log`,
 5. Archive: `pin.py` hardlinks (`os.link`) the original session file into `~/.omhc/<repo-key>/`, and `index.py` appends a ~115 B/event TSV offset index. The archive *is* the original bytes; `omhc show E1` reads them back by offset.
 6. `deliver.deliver()` routes: adapter's `install_handoff` → adapter's `fallback_channels` (Codex: `AGENTS.md` managed block via `agents_md.py`/`managed_block.py`) → universal floor `<repo>/.omhc/outbox/`. The router has no vendor strings.
 
-State lives in `~/.omhc/<repo-key>/` (`locate.py`); `fsio.py` owns atomic writes/appends. `watch.py` is an optional accelerator daemon; correctness never depends on it.
+State lives in `~/.omhc/<repo-key>/` (`locate.py`); `fsio.py` owns atomic writes/appends. `watch.py` is an optional accelerator daemon; correctness never depends on it. `hookconf.py` owns the shared `hooks.<Event>[].hooks[].command` schema both harnesses' SessionStart fragments use, so `cmd_status`'s `<adapter-id> hooks` row and `omhc hooks install` judge installs the same way without vendor names in the core.
 
 **Adapters** (`omhc/adapter.py` contract, `omhc/adapters/`): a new harness = one file implementing `detect`, `list_sessions`, `read_session`, `native_resume_hint`, `install_handoff` with `@_register`, one import line in `adapters/__init__.py`, one fixture. No core changes — needing one is a contract defect. `tests/conformance/test_suite.py` parameterizes 22 invariants over the registry, so every adapter gets them automatically. Read-only adapters are a normal state.
 

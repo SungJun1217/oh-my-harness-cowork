@@ -811,7 +811,7 @@ class TestHealth(unittest.TestCase):
             self._install_hook(home)
             self._rollout(home, "s1", "2023-11-15T00:00:00.000Z")
             rows = CX.CodexCliAdapter(home=home).health(
-                REPO, [{"harness": "codex-cli", "session": "s1"}])
+                REPO, [{"harness": "codex-cli", "session": "s1", "event": "start"}])
             self.assertTrue(rows[0][1])
             self.assertIn("ran for the latest session", rows[0][2])
 
@@ -824,7 +824,7 @@ class TestHealth(unittest.TestCase):
             self._rollout(home, "before-trust", "2023-11-15T00:00:00.000Z")
             self._rollout(home, "after-trust", "2023-11-16T00:00:00.000Z")
             rows = CX.CodexCliAdapter(home=home).health(
-                REPO, [{"harness": "codex-cli", "session": "after-trust"}])
+                REPO, [{"harness": "codex-cli", "session": "after-trust", "event": "start"}])
             self.assertTrue(rows[0][1])
             self.assertIn("ran for the latest session", rows[0][2])
 
@@ -837,25 +837,36 @@ class TestHealth(unittest.TestCase):
             self._rollout(home, "newest", "2023-11-16T00:00:00.000Z",
                           extra_meta={"originator": "codex_work_desktop"})
             rows = CX.CodexCliAdapter(home=home).health(
-                REPO, [{"harness": "codex-cli", "session": "ran"}])
+                REPO, [{"harness": "codex-cli", "session": "ran", "event": "start"}])
             self.assertFalse(rows[0][1])
             self.assertIn("1 consecutive Codex session", rows[0][2])
             self.assertIn("newest: codex_work_desktop", rows[0][2])
+            self.assertIn("Claude→Codex is not delivered; Codex→Claude still works",
+                          rows[0][2])
 
-    def test_pass_when_the_rollout_predates_the_hook_install(self):
+    def test_not_judged_when_the_rollout_predates_the_hook_install(self):
         with tempfile.TemporaryDirectory() as home:
             self._install_hook(home)
             self._rollout(home, "s1", "2020-01-01T00:00:00.000Z")
             rows = CX.CodexCliAdapter(home=home).health(REPO, [])
-            self.assertTrue(rows[0][1])
-            self.assertIn("no Codex sessions", rows[0][2])
+            self.assertIsNone(rows[0][1])
+            self.assertIn("not judged yet", rows[0][2])
 
     def test_a_scan_backfilled_ledger_row_does_not_count_as_ran(self):
         with tempfile.TemporaryDirectory() as home:
             self._install_hook(home)
             self._rollout(home, "s1", "2023-11-15T00:00:00.000Z")
             rows = CX.CodexCliAdapter(home=home).health(
-                REPO, [{"harness": "codex-cli", "session": "s1", "via": "scan"}])
+                REPO, [{"harness": "codex-cli", "session": "s1", "via": "scan",
+                       "event": "start"}])
+            self.assertFalse(rows[0][1])
+
+    def test_a_non_start_ledger_row_does_not_count_as_ran(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z")
+            rows = CX.CodexCliAdapter(home=home).health(
+                REPO, [{"harness": "codex-cli", "session": "s1", "event": "pull"}])
             self.assertFalse(rows[0][1])
 
     def test_a_subagent_rollout_is_ignored(self):
@@ -864,8 +875,54 @@ class TestHealth(unittest.TestCase):
             self._rollout(home, "s1", "2023-11-15T00:00:00.000Z",
                           extra_meta={"thread_source": "subagent"})
             rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertIsNone(rows[0][1])
+            self.assertIn("not judged yet", rows[0][2])
+
+    def test_no_sessions_at_all_reports_the_install_date(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertIsNone(rows[0][1])
+            self.assertIn("not judged yet", rows[0][2])
+            self.assertIn(
+                time.strftime("%Y-%m-%d", time.localtime(self.INSTALL_EPOCH)), rows[0][2])
+
+    def test_only_headless_sessions_are_not_judged_but_named(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z",
+                          extra_meta={"originator": "codex_exec"})
+            rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertIsNone(rows[0][1])
+            self.assertIn("only headless", rows[0][2])
+
+    def test_headless_sessions_are_judged_normally_under_the_override(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z",
+                          extra_meta={"originator": "codex_exec"})
+            with mock.patch.dict(os.environ, {"OMHC_ALLOW_HEADLESS": "1"}):
+                rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertFalse(rows[0][1])
+            self.assertIn("1 consecutive Codex session", rows[0][2])
+
+            with mock.patch.dict(os.environ, {"OMHC_ALLOW_HEADLESS": "1"}):
+                rows = CX.CodexCliAdapter(home=home).health(
+                    REPO, [{"harness": "codex-cli", "session": "s1", "event": "start"}])
             self.assertTrue(rows[0][1])
-            self.assertIn("no Codex sessions", rows[0][2])
+
+    def test_a_child_repo_under_a_non_git_parent_is_ignored(self):
+        with tempfile.TemporaryDirectory() as home, \
+             tempfile.TemporaryDirectory() as parent:
+            self._install_hook(home)
+            child = os.path.join(parent, "child")
+            os.makedirs(child)
+            _repo.git(child, "init", "-q")
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z",
+                          extra_meta={"cwd": child})
+            rows = CX.CodexCliAdapter(home=home).health(parent, [])
+            self.assertIsNone(rows[0][1])
+            self.assertIn("not judged yet", rows[0][2])
 
     def test_garbage_rollout_and_config_do_not_raise(self):
         with tempfile.TemporaryDirectory() as home:
@@ -876,6 +933,23 @@ class TestHealth(unittest.TestCase):
                 fh.write(b"\xff\xfe garbage \x80\x81")
             rows = CX.CodexCliAdapter(home=home).health(REPO, [])
             self.assertIsInstance(rows, tuple)
+
+    def test_getmtime_failure_is_not_judged_unknown(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            with mock.patch.object(CX.os.path, "getmtime", side_effect=OSError("boom")):
+                rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertIsNone(rows[0][1])
+            self.assertIn("unknown", rows[0][2])
+
+    def test_an_unexpected_exception_is_not_judged_unknown(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z")
+            with mock.patch.object(CX, "session_meta", side_effect=RuntimeError("boom")):
+                rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertIsNone(rows[0][1])
+            self.assertIn("unknown", rows[0][2])
 
     def test_config_trust_entry_drops_the_static_hint(self):
         with tempfile.TemporaryDirectory() as home:
@@ -905,12 +979,13 @@ class TestStatusIntegration(unittest.TestCase):
         _repo.git(self.repo, "init", "-q")
         self.root = os.path.realpath(self.repo)
 
-        hooks_dir = os.path.join(self.home, ".codex")
-        os.makedirs(hooks_dir)
-        hooks_path = os.path.join(hooks_dir, "hooks.json")
-        with open(hooks_path, "w", encoding="utf-8") as fh:
-            json.dump({"hooks": {"SessionStart": [
-                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+        # 실제 배포 조각 그대로 심는다(+ 실행 가능한 더미 바이너리) — `codex-cli
+        # hooks` 행이 PASS 여야 아래 exit code 단정이 순수하게 health(`codex
+        # hook`) 행만 증명한다(리뷰 결함: 예전엔 `omhc brief` 한 줄뿐이라 hooks
+        # 행도 함께 FAIL 해서 어느 쪽이 code=1 을 냈는지 이 테스트가 증명하지
+        # 못했다).
+        _repo.plant_hook_install(self.home, "codex-cli")
+        hooks_path = os.path.join(self.home, ".codex", "hooks.json")
         os.utime(hooks_path, (1700000000.0, 1700000000.0))
 
         sessions_dir = os.path.join(

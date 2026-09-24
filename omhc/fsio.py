@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from typing import Optional
 
 # PIPE_BUF(4096) 이하의 단일 write(2) 는 O_APPEND 에서 원자적이다. 줄 단위로
@@ -30,6 +31,35 @@ def write_atomic(path: str, text: str, *, fsync: bool = True,
         if fsync:
             os.fsync(fh.fileno())
     os.replace(tmp, path)
+
+
+def replace_preserving(path: str, text: str) -> None:
+    """사람이 손으로 관리하는 설정 파일(hooks.json/settings.json)을 원자적으로
+    갈아끼운다. `path` 가 심링크면 심링크 자체는 그대로 두고 실물만 바꾼다 —
+    install.sh 의 uninstall 경로가 이미 같은 규칙을 쓰고 있었다(#7, hookconf.merge/strip).
+
+    권한은 realpath 의 현재 mode 를 그대로 물려받는다. 파일이 아직 없으면(예:
+    Codex 는 원래 hooks.json 이 없다) 0644 로 새로 만든다 — mkstemp 의 기본
+    0600 을 그대로 두면 새로 만든 설정 파일만 유독 접근 권한이 좁아진다.
+    """
+    real_target = os.path.realpath(path)
+    directory = os.path.dirname(real_target) or "."
+    os.makedirs(directory, exist_ok=True)
+    try:
+        mode = os.stat(real_target).st_mode & 0o777
+    except OSError:
+        mode = 0o644
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".omhc-tmp-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, real_target)
+    except Exception:
+        unlink_quiet(tmp_path)
+        raise
 
 
 def append_line(path: str, line: str, *, mode: int = 0o600) -> None:
