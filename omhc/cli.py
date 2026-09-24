@@ -18,6 +18,10 @@ PROG = "omhc"
 NOTES_NAME = "notes.txt"
 ARTIFACT_NAME = "omhc.txt"
 
+# pull rate 가 보는 "최근 전달" 창(§9, #25). 분모를 delivered.tsv 전체로 두면
+# 오래된 전달이 영원히 분모에 남아 인출률이 서서히 낮아 보인다.
+PULL_RATE_WINDOW = 20
+
 
 def _stdin_text() -> str:
     try:
@@ -467,34 +471,51 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
                 out.write("orphaned state dir: {}\n".format(orphaned))
         return 1
     installed = adapters.present(now=time.time)
-    # repo_key= 를 쓴다 — read() 는 limit(기본 2000, 머신 전체 공유)보다 먼저
-    # repo 필터를 적용하므로, 여러 레포를 오가는 사람에게서 이 레포의 행이
-    # 슬라이스 밖으로 밀려나지 않는다(ledger.read 문서 참고).
-    rows = ledger.read(home=home, repo_key=key)
+    # 원장은 아래 health_rows 를 위해 어차피 무제한으로 한 번 더 읽어야 한다
+    # (전역 세션 id 때문에 레포로 못 거름) — 10만 행에서 파싱만 약 0.5초라
+    # 두 번 읽으면 배가된다(#25). 한 번 무제한으로 읽고, 이 레포용 rows 는
+    # read(repo_key=key) 가 하던 것과 같은 규칙(필터 먼저, limit 은 나중에)을
+    # 메모리에서 재현한다 — 안 그러면 여러 레포를 오가는 사람에게서 이 레포의
+    # 행이 다른 레포 행들에 밀려 슬라이스 밖으로 나간다.
+    all_rows = ledger.read(home=home, limit=0)
+    rows = [r for r in all_rows if r.get("repo") == key][-ledger.DEFAULT_LIMIT:]
     artifact = os.path.join(state, ARTIFACT_NAME)
 
     # watch.lag 가 정확히 이 계산을 소유한다. 두 벌로 두면 고정 레이아웃이
     # 바뀔 때 한쪽만 고쳐진다.
     lag_rows = watch.lag(state)
 
-    # X = 최소 한 번 인출된 "전달받은 세션"의 수(중복 제거), N = 전달 횟수.
-    # 같은 세션을 두 번 show 해도 X 는 한 번만 세고, injections 는 delivered.tsv
-    # 줄 수 그대로 둔다(§9 "pulled X of N injections" — N 은 전달 횟수다).
+    # X = 최근 PULL_RATE_WINDOW 번 전달 중 최소 한 번 인출된 세션 수(중복
+    # 제거), N = 그 창의 전달 횟수(§9 "pulled X of N injections"). injections
+    # 는 별도로 delivered.tsv 전체 줄 수(archive 행 판정용)를 유지한다.
     pull_sessions = {r.get("session") for r in rows
                       if r.get("event") == "pull" and r.get("session")}
-    injections = 0
-    delivered_sessions = set()
     delivered = os.path.join(state, due.DELIVERED_NAME)
+    # append 순서 그대로 모은다 — delivered.tsv 의 epoch 필드는 타임스탬프라
+    # 거꾸로 갈 수 있으므로(불변식 6) 정렬 기준이 아니라 줄 순서 자체를 쓴다.
+    delivered_order: List[str] = []
     if os.path.exists(delivered):
         with open(delivered, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if not line.strip():
                     continue
-                injections += 1
-                session = line.split("\t", 1)[0]
-                if session:
-                    delivered_sessions.add(session)
-    pulls = len(delivered_sessions & pull_sessions)
+                delivered_order.append(line.split("\t", 1)[0])
+    injections = len(delivered_order)
+
+    # pull rate 의 분모를 delivered.tsv 전체로 두면, 한 레포를 오래 쓸수록
+    # 분모만 무한정 자라 인출률이 서서히 낮아 보인다(#25) — 오래된 전달의
+    # pull 행은 이미 원장 창(rows, DEFAULT_LIMIT) 밖으로 밀려났는데 분모는
+    # 안 줄기 때문이다. 그래서 "최근 N번 전달 중 몇 번 인출됐는가"로 분모
+    # 자체를 최근 N 개로 묶는다. 세션 id 로 맞춘다 — pull 행이 session 필드를
+    # 이미 들고 있어(위 pull_sessions) 위치 기반 근사가 필요 없다.
+    recent_window = delivered_order[-PULL_RATE_WINDOW:]
+    recent_injections = len(recent_window)
+    recent_sessions = {s for s in recent_window if s}
+    recent_pulls = len(recent_sessions & pull_sessions)
+    # JSON 의 `pulls` 는 예전 뜻(전체 전달 중 인출된 세션 수)을 유지한다 —
+    # `pulls / injections` 로 비율을 내는 소비자가 창 도입으로 조용히 틀리지
+    # 않게, 창 안의 값은 `recent_pulls` / `recent_injections` 짝으로 따로 낸다.
+    pulls = len({s for s in delivered_order if s} & pull_sessions)
 
     # AGENTS.md 가 CLAUDE.md 와 공유되면 Codex Path B 는 절대 쓰면 안 된다 —
     # 그 파일을 공유 배선 만들기 *전에* 심어 둔 낡은 관리 구간만 실패 사유다.
@@ -503,13 +524,13 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         agents_md.path_for(root)) is not None
 
     # 선택적 어댑터 진단(예: codex 신뢰 안 된 훅). 세션 id 는 전역 유일이므로
-    # 레포로 거르지 않은 원장을 넘긴다 — 위 rows 처럼 이 레포로 미리 거르면
-    # 자기 .git 을 가진 중첩 워크트리·서브모듈에서 시작한 세션이 다른 repo 키로
-    # 기록돼 여기서 영원히 "안 돈 것"으로 보인다. limit(기본 2000, 머신 전체
-    # 공유)이 14일 창을 못 덮을 수 있다는 게 알려진 한계다 — 개인용 도구고
-    # status 는 훅 경로가 아니므로 필요하면 여기서만 무제한으로 읽는다.
-    # 한 어댑터가 죽어도 나머지 status 가 죽으면 안 되므로 어댑터별로 감싼다.
-    all_rows = ledger.read(home=home, limit=0)
+    # 레포로 거르지 않은 all_rows(위에서 이미 무제한으로 읽어 둔 것)를 그대로
+    # 넘긴다 — 위 rows 처럼 이 레포로 미리 거르면 자기 .git 을 가진 중첩
+    # 워크트리·서브모듈에서 시작한 세션이 다른 repo 키로 기록돼 여기서 영원히
+    # "안 돈 것"으로 보인다. limit(기본 2000, 머신 전체 공유)이 14일 창을 못
+    # 덮을 수 있다는 게 알려진 한계다 — 개인용 도구고 status 는 훅 경로가
+    # 아니므로 필요하면 여기서만 무제한으로 읽는다. 한 어댑터가 죽어도 나머지
+    # status 가 죽으면 안 되므로 어댑터별로 감싼다.
     health_rows = []
     for adapter_id in installed:
         try:
@@ -607,7 +628,8 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         checks.append((label, hook_ok, detail))
 
     checks.append(("pull rate", None,
-                   "pulled {} of {} injections".format(pulls, injections)))
+                   "pulled {} of {} recent injections (window {})".format(
+                       recent_pulls, recent_injections, PULL_RATE_WINDOW)))
     checks.append(("watcher (optional)", None,
                    "running pid {}".format(watcher) if watcher
                    else "not running — brief falls back to inline parsing"))
@@ -627,6 +649,8 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
             "adapters": installed, "ledger_rows": len(rows),
             "archive": lag_rows,
             "injections": injections, "pulls": pulls,
+            "pull_rate_window": PULL_RATE_WINDOW,
+            "recent_injections": recent_injections, "recent_pulls": recent_pulls,
             "off": due.is_off(state), "watcher_pid": watcher,
             "instruction_files": {"shared": shared, "stale_block": leaked},
             "health": [{"label": label, "ok": ok, "detail": detail}
