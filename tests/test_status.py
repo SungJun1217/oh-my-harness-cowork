@@ -180,6 +180,23 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(payload["recent_injections"], 2)
         self.assertEqual(payload["pull_rate_window"], cli.PULL_RATE_WINDOW)
 
+    def test_a_reopen_line_does_not_count_as_an_injection(self):
+        """resume 이 남긴 reopen 줄(#22)은 전달이 아니다 — injections/pull rate
+        분모에 끼면 안 된다."""
+        os.makedirs(self.t.state, exist_ok=True)
+        with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",
+                  encoding="utf-8") as fh:
+            fh.write("s1\tclaude-code\tcodex-cli\t1700000000\n")
+            fh.write("s1\treopen\tcodex-cli\t1700000005\n")
+
+        code, text = self.run_status()
+        word, detail = _find_row(text, "pull rate")
+        self.assertEqual(word, "----")
+        self.assertIn("pulled 0 of 1 recent injections", detail)
+
+        code_json, payload = self.run_status_json()
+        self.assertEqual(payload["injections"], 1)
+
     def test_pull_rate_windows_the_denominator_to_the_most_recent_injections(self):
         """#25: 분모를 delivered.tsv 전체로 두면 한 레포를 오래 쓸수록 옛
         전달이 영원히 분모에 남아 인출률이 서서히 낮아 보인다. 최근

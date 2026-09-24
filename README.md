@@ -450,7 +450,11 @@ committed). Generate them from real sessions on your own machine with
   than 7 days (`due.MAX_AGE_SECONDS`), the backfill's own age check skips it
   too. A correct fix needs an ordering source other than session-start epoch
   (e.g. last-record timestamp or file mtime), which invariant 6 rules out —
-  not fixed.
+  not fixed. This gap is on the backfill path only: when the Codex hook is
+  trusted, `codex exec resume` (measured: it appends to the same rollout)
+  fires SessionStart with `source:"resume"`, `mark` records a fresh start and
+  a `reopen` line in `delivered.tsv`, so the resumed session is handed off
+  again even if it was delivered before. `source:"compact"` never reopens.
 
   </details>
 

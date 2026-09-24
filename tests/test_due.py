@@ -227,5 +227,68 @@ class TestSessionIdFromHookPayload(unittest.TestCase):
         self.assertIsNone(gate.session_id_from_hook_payload(""))
 
 
+class TestReopen(unittest.TestCase):
+    """resume 이 delivered.tsv 에 남기는 reopen 줄(#22). `codex exec resume` 은
+    같은 rollout 에 이어붙고, 그 세션이 이미 전달됐었다면 already_delivered()
+    가 due() 를 멈춰 resumed 턴이 영영 안 나갔다."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = self.tmp.name
+        self.state = os.path.join(self.home, ".omhc", REPO_KEY)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_reopen_after_delivery_undoes_already_delivered(self):
+        wm = due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id="cx1",
+                           path="/p", event="start", epoch=10.0)
+        due.mark_delivered(self.state, wm, to_harness="claude-code", epoch=20.0)
+        self.assertTrue(due.already_delivered(self.state, "cx1", "claude-code"))
+        due.mark_reopened(self.state, "cx1", "codex-cli", 30.0)
+        self.assertFalse(due.already_delivered(self.state, "cx1", "claude-code"))
+
+    def test_a_fresh_delivery_after_reopen_wins_again(self):
+        wm = due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id="cx1",
+                           path="/p", event="start", epoch=10.0)
+        due.mark_delivered(self.state, wm, to_harness="claude-code", epoch=20.0)
+        due.mark_reopened(self.state, "cx1", "codex-cli", 30.0)
+        due.mark_delivered(self.state, wm, to_harness="claude-code", epoch=40.0)
+        self.assertTrue(due.already_delivered(self.state, "cx1", "claude-code"))
+
+    def test_reopen_without_a_prior_delivery_is_a_no_op(self):
+        due.mark_reopened(self.state, "cx1", "codex-cli", 30.0)
+        self.assertFalse(due.already_delivered(self.state, "cx1", "claude-code"))
+
+    def test_reopen_does_not_gate_a_different_target_harness(self):
+        wm = due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id="cx1",
+                           path="/p", event="start", epoch=10.0)
+        due.mark_delivered(self.state, wm, to_harness="claude-code", epoch=20.0)
+        due.mark_reopened(self.state, "cx1", "codex-cli", 30.0)
+        # gajae-code 는 애초에 전달받은 적이 없다 — reopen 여부와 무관하게 False.
+        self.assertFalse(due.already_delivered(self.state, "cx1", "gajae-code"))
+
+    def test_last_delivered_skips_a_trailing_reopen(self):
+        wm = due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id="cx1",
+                           path="/p", event="start", epoch=10.0)
+        due.mark_delivered(self.state, wm, to_harness="claude-code", epoch=20.0)
+        due.mark_reopened(self.state, "cx1", "codex-cli", 30.0)
+        self.assertEqual(due.last_delivered(self.state), "cx1")
+
+    def test_last_delivered_ignores_a_reopen_with_no_delivery_at_all(self):
+        due.mark_reopened(self.state, "cx1", "codex-cli", 30.0)
+        self.assertIsNone(due.last_delivered(self.state))
+
+    def test_delivered_order_ignores_reopen_lines(self):
+        wm1 = due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id="cx1",
+                            path="/p", event="start", epoch=10.0)
+        wm2 = due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id="cx2",
+                            path="/p", event="start", epoch=15.0)
+        due.mark_delivered(self.state, wm1, to_harness="claude-code", epoch=20.0)
+        due.mark_delivered(self.state, wm2, to_harness="claude-code", epoch=25.0)
+        due.mark_reopened(self.state, "cx1", "codex-cli", 30.0)
+        self.assertEqual(due.delivered_order(self.state), ["cx1", "cx2"])
+
+
 if __name__ == "__main__":
     unittest.main()
