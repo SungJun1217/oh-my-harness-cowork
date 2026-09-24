@@ -113,7 +113,7 @@ def codex_item_row(item: dict, ordinal: int) -> dict:
 
 
 def codex_shell_rows(command, ordinal: int = 2, failed: bool = False, cwd: str = REPO):
-    """실측 모양(codex-cli 0.156.1). 한 번의 셸 실행은 레코드 두 개를 남긴다.
+    """실측 모양(codex-cli 0.150.1–0.155.1, era B). 한 번의 셸 실행은 레코드 두 개를 남긴다.
 
     response_item/custom_tool_call(name="exec") 은 모델이 쓴 JS 래퍼라 명령도
     종료 코드도 없다. 사실은 event_msg/item_completed 의 CommandExecution 에 있다.
@@ -136,6 +136,94 @@ def codex_shell_rows(command, ordinal: int = 2, failed: bool = False, cwd: str =
             "stdout": "3 failed" if failed else "", "stderr": "",
         }, ordinal + 1),
     ]
+
+
+# --- era A (codex-cli 0.141–0.142) 픽스처 --------------------------------
+# 셸은 function_call, 출력은 평문(JSON 아님) — 위 codex_shell_rows(era B) 와는
+# 봉투가 다르다.
+
+
+def _exec_output_text(status_line: str, output_body: str = "") -> str:
+    return ("Chunk ID: c-abc\nWall time: 0.5 seconds\n{}\n"
+            "Original token count: 10\nOutput:\n{}".format(status_line, output_body))
+
+
+def codex_exec_command_rows(cmd, code=None, running_sid=None, workdir=None,
+                            ordinal: int = 2):
+    """function_call name=exec_command + 평문 function_call_output 한 쌍.
+
+    code 와 running_sid 가 둘 다 None 이면 abort(출력 없음) 를 뜻한다 —
+    실측: exec_command 한 건은 출력이 아예 없었다(abort).
+    """
+    call_id = "ec{}".format(ordinal)
+    line = " ".join(cmd) if isinstance(cmd, list) else cmd
+    args = {"cmd": line}
+    if workdir:
+        args["workdir"] = workdir
+    rows = [{"timestamp": "2026-09-22T16:30:02.000Z", "ordinal": ordinal,
+             "type": "response_item",
+             "payload": {"type": "function_call", "name": "exec_command",
+                        "call_id": call_id, "arguments": json.dumps(args)}}]
+    if code is not None:
+        status_line = "Process exited with code {}".format(code)
+    elif running_sid is not None:
+        status_line = "Process running with session ID {}".format(running_sid)
+    else:
+        return rows  # abort: 출력 레코드가 없다.
+    rows.append({"timestamp": "2026-09-22T16:30:03.000Z", "ordinal": ordinal + 1,
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": call_id,
+                           "output": _exec_output_text(status_line)}})
+    return rows
+
+
+def codex_write_stdin_rows(sid, code, ordinal: int = 10):
+    """백그라운드로 돌던 exec_command(session ID sid) 로 입력을 보내고 그
+    결과(exit code)를 돌려받는 한 쌍."""
+    call_id = "ws{}".format(ordinal)
+    return [
+        {"timestamp": "2026-09-22T16:30:10.000Z", "ordinal": ordinal,
+         "type": "response_item",
+         "payload": {"type": "function_call", "name": "write_stdin",
+                    "call_id": call_id,
+                    "arguments": json.dumps({"session_id": sid, "chars": "\n"})}},
+        {"timestamp": "2026-09-22T16:30:11.000Z", "ordinal": ordinal + 1,
+         "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": call_id,
+                    "output": _exec_output_text(
+                        "Process exited with code {}".format(code))}},
+    ]
+
+
+def codex_apply_patch_rows(headers, with_filechange: bool = True, workdir=None,
+                           ordinal: int = 20):
+    """custom_tool_call name=apply_patch(최상위 input=원본 패치 텍스트) +
+    선택적으로 같은 id 의 FileChange item_completed."""
+    call_id = "ap{}".format(ordinal)
+    payload = {"type": "custom_tool_call", "name": "apply_patch", "call_id": call_id,
+              "input": "\n".join(headers)}
+    if workdir:
+        payload["workdir"] = workdir
+    rows = [{"timestamp": "2026-09-22T16:30:20.000Z", "ordinal": ordinal,
+             "type": "response_item", "payload": payload}]
+    if with_filechange:
+        changes = {h.split(": ", 1)[1]: {"type": "update", "unified_diff": ""}
+                  for h in headers if ": " in h}
+        rows.append(codex_item_row({
+            "type": "FileChange", "id": call_id, "status": "completed",
+            "changes": changes,
+        }, ordinal + 1))
+    return rows
+
+
+def codex_spawn_agent_row(task_name: str, message: str, ordinal: int = 30) -> dict:
+    return {"timestamp": "2026-09-22T16:30:30.000Z", "ordinal": ordinal,
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "spawn_agent",
+                       "call_id": "sa{}".format(ordinal),
+                       "arguments": json.dumps({
+                           "task_name": task_name, "agent_type": "worker",
+                           "message": message, "fork_turns": []})}}
 
 
 def plant_codex(
