@@ -7,3 +7,6 @@ __pycache__/
 # 커밋하지 않는다. tests/harvest.py 로 이 머신에서 재생성하고, 골든 카운트만
 # tests/fixtures/expected.json 으로 커밋한다.
 tests/fixtures/
+
+# 개발용 샌드박스 스크립트(sandbox/setup.sh, run.sh). 로컬 전용.
+sandbox/
