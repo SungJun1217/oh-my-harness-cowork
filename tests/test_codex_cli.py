@@ -1102,6 +1102,64 @@ class TestHealthMatchesAcrossNestedGitRoots(unittest.TestCase):
         self.assertTrue(line.startswith("PASS"), out.getvalue())
 
 
+class TestHealthMatchesAcrossOmhcRootMarker(unittest.TestCase):
+    """#12: git 이 아닌 프로젝트(`.omhc-root`)에서도 서브디렉터리에서 시작한
+    세션이 `codex hook` 행에서 "안 돈 것"으로 사라지면 안 된다."""
+
+    def setUp(self):
+        self.base = tempfile.TemporaryDirectory()
+        self.addCleanup(self.base.cleanup)
+        self.home = os.path.join(self.base.name, "home")
+        self.root = os.path.join(self.base.name, "proj")
+        os.makedirs(self.home)
+        os.makedirs(self.root)
+        open(os.path.join(self.root, ".omhc-root"), "w").close()
+        self.sub = os.path.join(self.root, "sub")
+        os.makedirs(self.sub)
+
+        hooks_dir = os.path.join(self.home, ".codex")
+        os.makedirs(hooks_dir)
+        hooks_path = os.path.join(hooks_dir, "hooks.json")
+        with open(hooks_path, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+        os.utime(hooks_path, (1700000000.0, 1700000000.0))
+
+        sessions_dir = os.path.join(
+            self.home, ".codex", "sessions", time.strftime("%Y/%m/%d", time.gmtime()))
+        os.makedirs(sessions_dir)
+        self.rollout_path = os.path.join(sessions_dir, "rollout-s1.jsonl")
+        with open(self.rollout_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "timestamp": "2023-11-15T00:00:00.000Z", "ordinal": 0,
+                "type": "session_meta",
+                "payload": {"session_id": "s1", "cwd": self.sub,
+                           "timestamp": "2023-11-15T00:00:00.000Z"},
+            }) + "\n")
+
+        self._cwd = os.getcwd()
+        self.addCleanup(os.chdir, self._cwd)
+
+    def test_a_subdirectory_session_still_counts_as_ran(self):
+        os.chdir(self.sub)
+        stdin = json.dumps({"cwd": self.sub, "transcript_path": self.rollout_path,
+                            "session_id": "s1"})
+        out = io.StringIO()
+        code = cli.cmd_mark(
+            cli.build_parser().parse_args(
+                ["mark", "--harness", "codex-cli", "--stdin", stdin]),
+            home=self.home, out=out)
+        self.assertEqual(code, 0)
+
+        os.chdir(self.root)
+        out = io.StringIO()
+        with mock.patch.object(cli.adapters, "present", return_value=["codex-cli"]):
+            code = cli.cmd_status(
+                cli.build_parser().parse_args(["status"]), home=self.home, out=out)
+        line = next(l for l in out.getvalue().splitlines() if "codex hook" in l)
+        self.assertTrue(line.startswith("PASS"), out.getvalue())
+
+
 class TestHealthLedgerWindow(unittest.TestCase):
     """리뷰 결함: ledger.read 의 기본 limit(2000, 머신 전체 공유)이 다른 레포의
     행으로 채워지면 이 레포/세션의 행이 창 밖으로 밀려날 수 있다. health 에

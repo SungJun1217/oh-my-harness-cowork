@@ -130,6 +130,9 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
             payload = {}
     start = str(payload.get("cwd") or "") or None
     root, key, state = _state_for(home, start)
+    if locate.refused_root(root):
+        # 훅 경로다 — 원장에 아무것도 남기지 않고 조용히 나간다(invariant 2).
+        return 0
     session = gate.session_id_from_hook_payload(raw) or ""
     row = {
         "repo": key,
@@ -175,8 +178,12 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
 # --- note -------------------------------------------------------------------
 
 
-def cmd_note(args, *, home=None, out=sys.stdout) -> int:
-    _root, _key, state = _state_for(home)
+def cmd_note(args, *, home=None, out=sys.stdout, err=sys.stderr) -> int:
+    root, _key, state = _state_for(home)
+    reason = locate.refused_root(root)
+    if reason:
+        err.write("{}\n".format(reason))
+        return 2
     os.makedirs(state, exist_ok=True)
     path = os.path.join(state, NOTES_NAME)
     text = " ".join(args.text).strip()
@@ -413,6 +420,25 @@ def _check(out, label: str, verdict: Optional[bool], detail: str) -> None:
 
 def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     root, key, state = _state_for(home)
+    reason = locate.refused_root(root)
+    if reason:
+        # `/` 에서의 status 는 오사용이다 — SKIP 이 아니라 게이팅되는 FAIL 로
+        # 보여준다. state 가 이미 있다면(예전에 잘못 돈 흔적) 고아라고 알린다.
+        # 정상 경로의 나머지 진단(ledger.read, adapters.present, health, ...)은
+        # 전부 `root` 에 걸려 있어 `/` 에서 의미가 없다 — text/json 이 여기서만
+        # 갈라지는 최소한의 필드(refused, orphaned_state)를 덧붙인다.
+        orphaned = state if os.path.isdir(state) else None
+        if args.json:
+            out.write(json.dumps({
+                "repo_root": root, "repo_key": key, "state_dir": state,
+                "refused": reason, "orphaned_state": orphaned,
+                "rows": [{"label": "root", "verdict": "fail", "detail": reason}],
+            }, ensure_ascii=False, indent=2) + "\n")
+        else:
+            _check(out, "root", False, reason)
+            if orphaned:
+                out.write("orphaned state dir: {}\n".format(orphaned))
+        return 1
     installed = adapters.present(now=time.time)
     # repo_key= 를 쓴다 — read() 는 limit(기본 2000, 머신 전체 공유)보다 먼저
     # repo 필터를 적용하므로, 여러 레포를 오가는 사람에게서 이 레포의 행이
@@ -755,6 +781,10 @@ def cmd_clear(args, *, home=None, out=sys.stdout) -> int:
 def cmd_watch(args, *, home=None, out=sys.stdout) -> int:
     """가속기 데몬. 정확성을 담당하지 않으므로 죽어도 결과가 바뀌지 않는다."""
     root, _key, state = _state_for(home)
+    reason = locate.refused_root(root)
+    if reason:
+        out.write("{}\n".format(reason))
+        return 1
     if args.stop:
         pid = watch.read_lock(state)
         if pid is None:

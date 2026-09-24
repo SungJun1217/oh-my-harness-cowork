@@ -16,7 +16,7 @@ README.md (English) and README.ko.md (Korean) carry the same facts — change bo
 python3 -m unittest discover -s tests -t . -q        # full suite, ~12s, never launches a harness
 python3 -m unittest tests.test_mint                   # one module
 python3 -m unittest tests.test_mint.TestBudget.test_output_never_exceeds_the_budget   # one test
-bash tests/smoke.sh                                   # 7 adversarial inputs: hook path must give empty stdout + exit 0
+bash tests/smoke.sh                                   # 8 adversarial inputs: hook path must give empty stdout + exit 0
 python3 tests/harvest.py [--force]                    # regenerate fixtures from this machine's real sessions
 bin/omhc status                                       # the one human dashboard: every check gets PASS/FAIL/`----` (never SKIP)
 ```

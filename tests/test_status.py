@@ -225,6 +225,41 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(word, "FAIL")
         self.assertIn("cannot check hooks", detail)
 
+    def test_status_at_slash_shows_fail_root_and_gates(self):
+        cwd = os.getcwd()
+        os.chdir("/")
+        self.addCleanup(os.chdir, cwd)
+        code, text = self.run_status()
+        self.assertEqual(code, 1)
+        word, detail = _find_row(text, "root")
+        self.assertEqual(word, "FAIL")
+        self.assertIn("is not a project root", detail)
+        self.assertNotIn("orphaned state dir", text)
+
+        code_json, payload = self.run_status_json()
+        self.assertEqual(code_json, 1)
+        row = next(r for r in payload["rows"] if r["label"] == "root")
+        self.assertEqual(row["verdict"], "fail")
+        self.assertIn("is not a project root", payload["refused"])
+        self.assertIsNone(payload["orphaned_state"])
+
+    def test_status_at_slash_reports_an_orphaned_state_dir_in_text_and_json(self):
+        from omhc import locate
+
+        orphan_state = locate.state_dir(locate.repo_key("/"), home=self.t.home)
+        os.makedirs(orphan_state, exist_ok=True)
+        cwd = os.getcwd()
+        os.chdir("/")
+        self.addCleanup(os.chdir, cwd)
+
+        code, text = self.run_status()
+        self.assertEqual(code, 1)
+        self.assertIn("orphaned state dir: {}".format(orphan_state), text)
+
+        code_json, payload = self.run_status_json()
+        self.assertEqual(code_json, 1)
+        self.assertEqual(payload["orphaned_state"], orphan_state)
+
     def test_health_row_with_ok_none_is_uninformative_and_never_gates(self):
         fake = mock.Mock()
         fake.health.return_value = (("custom diag", None, "not judgeable yet"),)
