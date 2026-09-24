@@ -200,7 +200,10 @@ outbox 가 대신 받는 게 아니라 Codex 쪽 `brief` 호출 자체가 없어
 | `omhc show <E1\|#137> [--full]` | **원본 바이트를 오프셋으로 조회** (tier (b) 진입점) |
 | `omhc note "<text>"` | 메모. 두 하네스의 에이전트가 맨 명령줄로 호출 가능 |
 
-끄기: `OMHC_OFF=1` 또는 `~/.omhc/<repo-key>/off` 파일.
+끄기: `OMHC_OFF=1` 또는 `~/.omhc/<repo-key>/off` 파일. 헤드리스 세션(`claude -p`,
+`codex exec`)을 샌드박스에서 실제 세션으로 취급하려면 `OMHC_ALLOW_HEADLESS=1`
+(서브에이전트·사이드체인은 이걸로도 풀리지 않는다) — mark 시점과 brief 시점 둘 다
+이 값을 보므로, 원천과 수신 양쪽 하네스 실행에 **같은 값으로 export** 해야 한다.
 
 <details>
 <summary>훅과 내부 명령</summary>

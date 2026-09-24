@@ -293,6 +293,157 @@ class TestLegacyToolCallShapes(unittest.TestCase):
         self.assertEqual([e.verb for e in read.events if e.arg], ["ran"])
 
 
+class TestInteractiveFilter(unittest.TestCase):
+    """서브에이전트/헤드리스 exec/프로그래매틱 앱서버 클라이언트는 절대 핸드오프
+    원천이 되면 안 된다.
+
+    실물 모양(codex-cli 0.155.1, 이 머신 실측): source={"subagent": {...}},
+    thread_source="subagent", parent_thread_id=<uuid> (서브에이전트) /
+    originator="codex_exec", source="exec" (헤드리스 exec, 샌드박스 rollout 5개) /
+    originator="applecider"(36개)·"splitlane*"(3개), 둘 다 source="vscode" 지만
+    role=user 턴이 "User goal: … Current browser URL: …" 형태의 기계 템플릿이다.
+    """
+
+    def setUp(self):
+        self._env_backup = os.environ.pop("OMHC_ALLOW_HEADLESS", None)
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        if self._env_backup is not None:
+            os.environ["OMHC_ALLOW_HEADLESS"] = self._env_backup
+        else:
+            os.environ.pop("OMHC_ALLOW_HEADLESS", None)
+
+    SUBAGENT_SOURCE_DICT = {"source": {"subagent": {"thread_spawn": {
+        "parent_thread_id": "p1", "depth": 1, "agent_path": "/root/x",
+        "agent_nickname": "n", "agent_role": "worker"}}}}
+    SUBAGENT_THREAD_SOURCE = {"thread_source": "subagent"}
+    SUBAGENT_PARENT_ID = {"parent_thread_id": "01a0b927-c7b8-7660-a9e2-81e739a81db6"}
+    EXEC_SOURCE = {"originator": "codex_exec", "source": "exec"}
+    APPLECIDER_SOURCE = {"originator": "applecider", "source": "vscode"}
+    SPLITLANE_SOURCE = {"originator": "splitlane-worker", "source": "vscode"}
+    INTERACTIVE_CLI = {"originator": "codex-tui", "source": "cli"}
+    INTERACTIVE_VSCODE = {"originator": "Codex Desktop", "source": "vscode"}
+    INTERACTIVE_STRING_SOURCE = {"originator": "codex-tui", "source": "cli"}
+    GARBAGE_SOURCE = {"source": 12345, "thread_source": ["not", "a", "string"]}
+
+    def _meta(self, extra):
+        meta = {"session_id": "s", "cwd": REPO}
+        meta.update(extra)
+        return meta
+
+    def test_subagent_source_dict_is_not_interactive(self):
+        self.assertFalse(CX._is_interactive(self._meta(self.SUBAGENT_SOURCE_DICT)))
+
+    def test_subagent_thread_source_is_not_interactive(self):
+        self.assertFalse(CX._is_interactive(self._meta(self.SUBAGENT_THREAD_SOURCE)))
+
+    def test_parent_thread_id_alone_is_not_interactive(self):
+        self.assertFalse(CX._is_interactive(self._meta(self.SUBAGENT_PARENT_ID)))
+
+    def test_exec_originator_is_not_interactive_by_default(self):
+        self.assertFalse(CX._is_interactive(self._meta(self.EXEC_SOURCE)))
+
+    def test_exec_becomes_interactive_under_the_override(self):
+        os.environ["OMHC_ALLOW_HEADLESS"] = "1"
+        self.assertTrue(CX._is_interactive(self._meta(self.EXEC_SOURCE)))
+
+    def test_applecider_is_not_interactive_by_default(self):
+        """앱서버가 얹은 프로그래매틱 클라이언트다 — role=user 턴은 사람이 아니라
+        "User goal: … Current browser URL: …" 템플릿이다."""
+        self.assertFalse(CX._is_interactive(self._meta(self.APPLECIDER_SOURCE)))
+
+    def test_applecider_becomes_interactive_under_the_override(self):
+        os.environ["OMHC_ALLOW_HEADLESS"] = "1"
+        self.assertTrue(CX._is_interactive(self._meta(self.APPLECIDER_SOURCE)))
+
+    def test_splitlane_prefixed_originator_is_not_interactive_by_default(self):
+        self.assertFalse(CX._is_interactive(self._meta(self.SPLITLANE_SOURCE)))
+
+    def test_splitlane_prefixed_originator_becomes_interactive_under_the_override(self):
+        os.environ["OMHC_ALLOW_HEADLESS"] = "1"
+        self.assertTrue(CX._is_interactive(self._meta(self.SPLITLANE_SOURCE)))
+
+    def test_subagent_is_never_admitted_even_under_the_override(self):
+        os.environ["OMHC_ALLOW_HEADLESS"] = "1"
+        self.assertFalse(CX._is_interactive(self._meta(self.SUBAGENT_SOURCE_DICT)))
+        self.assertFalse(CX._is_interactive(self._meta(self.SUBAGENT_THREAD_SOURCE)))
+        self.assertFalse(CX._is_interactive(self._meta(self.SUBAGENT_PARENT_ID)))
+
+    def test_cli_and_vscode_sources_stay_interactive(self):
+        self.assertTrue(CX._is_interactive(self._meta(self.INTERACTIVE_CLI)))
+        self.assertTrue(CX._is_interactive(self._meta(self.INTERACTIVE_VSCODE)))
+
+    def test_string_vs_dict_source_is_handled_defensively(self):
+        self.assertTrue(CX._is_interactive(self._meta(self.INTERACTIVE_STRING_SOURCE)))
+        self.assertFalse(CX._is_interactive(self._meta(self.SUBAGENT_SOURCE_DICT)))
+
+    def test_garbage_metadata_fails_open_to_interactive(self):
+        """블록리스트라 모르는/이상한 모양은 대화형으로 남는다."""
+        self.assertTrue(CX._is_interactive(self._meta(self.GARBAGE_SOURCE)))
+
+    def test_classify_rejects_a_subagent_rollout(self):
+        path = write_rollout([
+            {"type": "session_meta",
+             "payload": self._meta(self.SUBAGENT_THREAD_SOURCE)},
+        ])
+        try:
+            self.assertFalse(CX.CodexCliAdapter().classify(path))
+        finally:
+            os.unlink(path)
+
+    def test_classify_rejects_exec_by_default_and_admits_it_under_override(self):
+        path = write_rollout([
+            {"type": "session_meta", "payload": self._meta(self.EXEC_SOURCE)},
+        ])
+        try:
+            self.assertFalse(CX.CodexCliAdapter().classify(path))
+            os.environ["OMHC_ALLOW_HEADLESS"] = "1"
+            self.assertTrue(CX.CodexCliAdapter().classify(path))
+        finally:
+            os.unlink(path)
+
+    def test_list_sessions_skips_a_subagent_rollout(self):
+        with tempfile.TemporaryDirectory() as home:
+            directory = os.path.join(home, ".codex", "sessions",
+                                     time.strftime("%Y/%m/%d", time.gmtime()))
+            os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, "rollout-sub.jsonl")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "type": "session_meta",
+                    "payload": self._meta(dict(self.SUBAGENT_THREAD_SOURCE, cwd=REPO)),
+                }) + "\n")
+            refs = CX.CodexCliAdapter(home=home).list_sessions(REPO)
+            self.assertEqual(refs, [])
+
+    def test_list_sessions_admits_exec_only_under_override(self):
+        with tempfile.TemporaryDirectory() as home:
+            directory = os.path.join(home, ".codex", "sessions",
+                                     time.strftime("%Y/%m/%d", time.gmtime()))
+            os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, "rollout-exec.jsonl")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "type": "session_meta",
+                    "payload": self._meta(dict(self.EXEC_SOURCE, cwd=REPO)),
+                }) + "\n")
+            self.assertEqual(CX.CodexCliAdapter(home=home).list_sessions(REPO), [])
+            os.environ["OMHC_ALLOW_HEADLESS"] = "1"
+            self.assertEqual(len(CX.CodexCliAdapter(home=home).list_sessions(REPO)), 1)
+
+    def test_ref_for_path_rejects_a_subagent_rollout(self):
+        path = write_rollout([
+            {"type": "session_meta",
+             "payload": self._meta(dict(self.SUBAGENT_THREAD_SOURCE, cwd=REPO))},
+        ])
+        try:
+            ref = CX.CodexCliAdapter().ref_for_path(path, "s")
+            self.assertIsNone(ref)
+        finally:
+            os.unlink(path)
+
+
 class TestDefensiveDegradation(unittest.TestCase):
     def test_unknown_response_item_type_is_counted_not_raised(self):
         path = write_rollout([

@@ -319,6 +319,22 @@ class AdapterContract(unittest.TestCase):
                 self.assertIsInstance(receipt, A.InstallReceipt)
                 self.assertTrue(receipt.channel)
 
+    def test_26_classify_never_raises_on_garbage(self):
+        for adapter_id in adapter_ids():
+            with self.subTest(adapter=adapter_id):
+                with tempfile.NamedTemporaryFile("wb", suffix=".jsonl",
+                                                 delete=False) as fh:
+                    fh.write(b"\x00\xff{not json\n\n\x80\x81")
+                    path = fh.name
+                try:
+                    got = adapters.get(adapter_id).classify(path)
+                    self.assertIsInstance(got, bool)
+                finally:
+                    os.unlink(path)
+                # 없는 파일도 던지지 않는다(반환값은 fail-open 정책이라 어댑터마다
+                # 다를 수 있다 — 여기서는 예외가 없다는 것만 본다).
+                adapters.get(adapter_id).classify("/nope/missing.jsonl")
+
 
 if __name__ == "__main__":
     unittest.main()

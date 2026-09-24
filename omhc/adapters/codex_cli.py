@@ -17,7 +17,7 @@ from ..adapter import (
     SessionRef,
 )
 from ..event import ARG_LIMIT, Event
-from . import _register, install_state_artifact, iso_epoch
+from . import _register, allow_headless, install_state_artifact, iso_epoch
 
 ARTIFACT_NAME = "omhc.txt"
 
@@ -106,6 +106,54 @@ def session_meta(path: str) -> Optional[dict]:
         return None
     payload = row.get("payload")
     return payload if isinstance(payload, dict) else None
+
+
+# 프로그래매틱 앱서버 클라이언트의 originator. 전부 source="vscode" 로 오므로
+# source 값으로는 구분이 안 된다. 실측(이 머신, 2026-09-24): applecider 36개,
+# splitlane* 3개 — 전부 role=user 턴이 "User goal: … Current browser URL: …
+# Active project file: …" 형태의 기계 템플릿이다(사람이 타이핑한 문장이 아니다).
+# thread_source="user" 를 허용목록으로 쓰지 않는다: 실측상 진짜 대화형 39개 중
+# 38개가 이 필드를 갖지만 1개(Codex Desktop 0.146.0-alpha.3.1)는 없다. 문서화되지
+# 않은 필드라 언제든 사라질 수 있고, 허용목록이면 그때 진짜 세션을 조용히 잃는다.
+# 대신 새 프로그래매틱 originator 는 여기에 손으로 더해야 한다.
+_PROGRAMMATIC_ORIGINATORS = frozenset({"applecider", "codex_exec"})
+_PROGRAMMATIC_ORIGINATOR_PREFIXES = ("splitlane",)
+
+
+def _is_headless_originator(originator) -> bool:
+    if not isinstance(originator, str):
+        return False
+    if originator in _PROGRAMMATIC_ORIGINATORS:
+        return True
+    return originator.startswith(_PROGRAMMATIC_ORIGINATOR_PREFIXES)
+
+
+def _is_interactive(meta: dict) -> bool:
+    """서브에이전트·헤드리스 실행을 걸러낸다. 차단목록이며 허용목록이 아니다 —
+    모르는 source/originator 는 여전히 대화형으로 남는다.
+
+    실측(이 머신, 2026-09-24): host rollout 194개 중 116개가 서브에이전트
+    스레드다. 부모 에이전트의 role=user 프롬프트가 content_item_kinds=
+    ['user.text'] 로 오기 때문에 사람 화이트리스트를 그대로 통과해 GOAL/NEXT 로
+    둔갑한다(invariant 3 위반). 실물 모양(codex-cli 0.155.1):
+    source={"subagent": {"thread_spawn": {...}}}, thread_source="subagent",
+    parent_thread_id=<uuid> — 셋 중 하나만 있어도 서브에이전트이고, 이건
+    OMHC_ALLOW_HEADLESS 로도 절대 풀리지 않는다(발화자가 다른 문제라서).
+    `codex exec` 는 originator="codex_exec", source="exec" (샌드박스 rollout
+    5개 전부 실측). applecider/splitlane* 은 vscode 확장 안에 얹힌 프로그래매틱
+    클라이언트다(위 주석) — 셋 다 헤드리스이고 오버라이드가 켜졌을 때만
+    대화형이다.
+    """
+    source = meta.get("source")
+    if isinstance(source, dict) and "subagent" in source:
+        return False
+    if meta.get("thread_source") == "subagent":
+        return False
+    if meta.get("parent_thread_id"):
+        return False
+    if source == "exec" or _is_headless_originator(meta.get("originator")):
+        return allow_headless()
+    return True
 
 
 def _recent_date_dirs(root: str, days: int, now) -> List[str]:
@@ -267,7 +315,7 @@ class CodexCliAdapter:
         for directory in _recent_date_dirs(self.sessions_root(), SCAN_DAYS, self._now):
             for path in glob.glob(os.path.join(directory, "rollout-*.jsonl")):
                 meta = session_meta(path)
-                if not meta:
+                if not meta or not _is_interactive(meta):
                     continue
                 cwd = meta.get("cwd")
                 # Codex 는 rollout 에 레포 루트를 기록한다. equal-or-descendant 로
@@ -418,18 +466,18 @@ class CodexCliAdapter:
                            dropped=dropped)
 
     def classify(self, source_path: str) -> bool:
-        """Codex rollout 에는 비대화형 표식이 없다.
+        """Codex rollout 에 사람이 시작한 세션인가.
 
-        session_meta 를 읽을 수 있으면 사람이 시작한 세션으로 본다. Claude 의
-        entrypoint 어휘를 여기서 찾는 것은 무의미하고(필드가 없다) 실제로 그렇게
-        하면 필터가 조용히 no-op 가 된다.
+        session_meta 를 읽을 수 있어야 하고, 서브에이전트·헤드리스 exec 가
+        아니어야 한다(`_is_interactive`).
         """
-        return session_meta(source_path) is not None
+        meta = session_meta(source_path)
+        return meta is not None and _is_interactive(meta)
 
     def ref_for_path(self, source_path: str, session_id: str,
                      cwd: Optional[str] = None) -> Optional[SessionRef]:
         meta = session_meta(source_path)
-        if meta is None:
+        if meta is None or not _is_interactive(meta):
             return None
         try:
             stat = os.stat(source_path)

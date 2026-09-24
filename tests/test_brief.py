@@ -63,6 +63,35 @@ class TestCompute(unittest.TestCase):
                              repo_root=self.h.repo_root, home=self.h.home, now=NOW)
         self.assertEqual(body, "")
 
+    def test_a_subagent_codex_session_never_becomes_a_handoff(self):
+        """부모 에이전트의 프롬프트가 사람의 말로 둔갑해 GOAL/NEXT 가 되면 안 된다
+        (invariant 3). ref_for_path 와 list_sessions 폴백 둘 다 걸러야 due 가
+        빈 몸으로 돌아온다."""
+        self.h.t.plant_codex(
+            session_id="sub1", human="부모 에이전트가 시킨 일",
+            ledger_home=self.h.home, when=NOW,
+            meta_extra={"thread_source": "subagent",
+                       "parent_thread_id": "parent-thread-id"},
+        )
+        body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertEqual(body, "")
+
+    def test_an_applecider_templated_turn_never_reaches_goal(self):
+        """originator=applecider 는 source=vscode 라 서브에이전트 표식이 없다.
+
+        걸러지지 않으면 앱서버가 채운 기계 템플릿이 사람의 GOAL 로 둔갑한다.
+        """
+        self.h.t.plant_codex(
+            session_id="app1",
+            human="User goal: 브라우저 자동화 작업 Current browser URL: about:blank",
+            ledger_home=self.h.home, when=NOW,
+            meta_extra={"originator": "applecider", "source": "vscode"},
+        )
+        body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertEqual(body, "")
+
     def test_second_call_in_the_same_session_yields_empty(self):
         """SessionStart 훅은 한 세션에서 여러 번 발동한다."""
         self.h.plant_codex_session()
