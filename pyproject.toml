@@ -1,0 +1,38 @@
+# 의존성 0 이라 표준 setuptools 만으로 충분하다. 버전은 omhc/__init__.py 한 곳에서만
+# 관리한다(릴리스 워크플로가 태그와 이 값이 같은지 검사한다).
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omhc"
+dynamic = ["version"]
+description = "Carry context across Claude Code and Codex when you switch harnesses"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "SungJun1217" }]
+keywords = ["claude-code", "codex", "ai-agents", "handoff", "cli"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/SungJun1217/oh-my-harness-cowork"
+Issues = "https://github.com/SungJun1217/oh-my-harness-cowork/issues"
+
+[project.scripts]
+omhc = "omhc.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "omhc.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["omhc*"]
