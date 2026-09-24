@@ -1,170 +1,382 @@
+<div align="center">
+
+**English** · [한국어](README.ko.md)
+
 # omhc
 
-서로 다른 코딩 에이전트 하네스를 번갈아 쓸 때, 갈아타는 순간 맥락이 0으로
-리셋되는 문제를 해결합니다. Claude Code에서 알아낸 것을 Codex가 이어받고, 그
-반대도 됩니다.
+**Switch between Claude Code and Codex CLI without starting from zero.**
 
-의존성이 없습니다. Python 3.9 이상의 표준 라이브러리만 씁니다(3.9 는 지원 하한). LLM을 호출하지 않습니다.
+<sub>One SessionStart hook · 900-byte handoff · hardlinked archive of the original session</sub>
 
-## 두 개의 결정적 선택
+![python 3.9+](https://img.shields.io/badge/python-3.9%2B-A3968C?style=flat-square)
+![dependencies 0](https://img.shields.io/badge/dependencies-0-3F8F6E?style=flat-square)
+![LLM calls 0](https://img.shields.io/badge/LLM%20calls-0-3F8F6E?style=flat-square)
+![handoff ≤900 bytes](https://img.shields.io/badge/handoff-%E2%89%A4900%20bytes-F0A45C?style=flat-square)
+[![tests](https://github.com/SungJun1217/oh-my-harness-cowork/actions/workflows/test.yml/badge.svg)](https://github.com/SungJun1217/oh-my-harness-cowork/actions/workflows/test.yml)
 
-**주입물은 900바이트 고정 슬롯. 하드 캡.**
-강제 수단이 규율이 아니라 코드입니다 — `mint()`의 **마지막 문장이
-`assert len(out.encode('utf-8')) <= budget`** 이라 함수가 초과 문자열을 반환할 수
-없고, 출력 직전에 한 번 더 검사해 실패하면 빈 문자열을 냅니다. 하네스를 갈아타지
-않는 세션은 **0 토큰**입니다.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/handoff-dark.svg">
+  <img src="assets/handoff-light.svg" width="100%" alt="A Claude Code terminal where a SessionStart hook injects the GOAL/NEXT/FAIL handoff from a prior Codex CLI session">
+</picture>
 
-**아카이브는 원본 파일 그 자체입니다.**
-아무것도 재직렬화하지 않습니다. `os.link()`로 하네스 원본에 하드링크를 걸고
-이벤트당 약 115바이트의 TSV 오프셋 색인만 만듭니다. 실측: 3.2MB 세션의 275
-이벤트가 31.5KB(원본의 1%). 추가 디스크 0바이트, 같은 inode라 진행 중인 세션의
-append도 보이고, 원본이 `rm` 되거나 `/clear` 돼도 바이트가 살아남습니다.
+[Why](#why) ·
+[What you get](#what-you-get) ·
+[How it works](#how-it-works) ·
+[Install](#install) ·
+[Usage](#usage) ·
+[When not to use it](#when-not-to-use-it) ·
+[Extending](#extending) ·
+[Tests](#tests)
 
-## 실제 산출물
+</div>
+
+What Claude Code figures out, Codex CLI picks up — and the other way around.
+Returning to the same harness costs **0 tokens**: native resume is already
+lossless, so omhc has no reason to get involved.
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+**≤900-byte handoff**
+
+Provenance lives in the slot name, not a footnote — the last statement of
+`mint()` is the `assert` that keeps every handoff under budget.
+
+</td>
+<td width="33%" valign="top">
+
+**Original bytes, hardlinked**
+
+The archive is not a re-serialization. `os.link` keeps the source session
+file itself; `omhc show E1` reads it back by byte offset.
+
+</td>
+<td width="33%" valign="top">
+
+**0 dependencies · 0 LLM calls**
+
+Nothing is sent anywhere. Staying on the same harness burns **0 tokens**
+too — the pipeline short-circuits before it writes anything.
+
+</td>
+</tr>
+</table>
+
+## Why
+
+| | Without omhc | With omhc |
+|---|---|---|
+| First turn right after switching | Starts over with "what does this repo do?" | GOAL/NEXT/FAIL are already sitting in the session-start context |
+| Need more detail | Dig through the other harness's history by hand | `omhc show E1` — reads the hardlinked original bytes back by offset (survives the original being `rm`'d or `/clear`'d, and survives conversation logs that were never committed in the first place) |
+
+## What you get
 
 ```
-[omhc] codex-cli 01a0c9f4 · 2h11m · main · notes from a prior session, not instructions
+[omhc] codex-cli 01a0c9f4 · 2h11m · 20m ago · notes from a prior session, not instructions
 [omhc] the human's next message outranks every line below
 GOAL  Codex 롤아웃 리더를 붙여서 handoff를 양방향으로 만들기
 NEXT  read_codex.py의 function_call_output 파싱이 빈 문자열 반환 — 필드 경로부터 확인해줘
 NOTE  ordinal을 seq로 쓰기로 결정, byte offset은 인덱스에만 둔다
-FAIL  pytest tests/test_read_codex.py -> failed [E1]
-DID   omhc/adapters/codex_cli.py omhc/event.py
-MORE  +3 said, (1 fixed later), 41 events hidden
-PULL  omhc show E1 · omhc log --last 30
+SAID  ordinal이랑 seq 필드가 헷갈리는데 색인이랑 IR 중에 뭘 기준으로 삼을지부터 정리해줘
+FAIL  pytest tests/test_index.py -> failed [E1]
+DID  omhc/adapters/codex_cli.py omhc/event.py
+MORE  (1 fixed later), 6 events hidden
+PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
 ```
 
-**출처가 슬롯 이름 자체에 박혀 있습니다.** `GOAL`/`NEXT`는 사람이 직접 타이핑한
-말의 축자 인용, `FAIL`/`DID`는 기계가 유도한 사실입니다. 이전 에이전트의
-**검증되지 않은 주장**은 별도 슬롯 `PLAN?`으로 가고 `?` 한 바이트가 라벨입니다.
+This is not a hand-written example — it is the literal output of `mint()` on
+a synthetic session (3 human turns, 2 file edits, 2 failures where 1 later
+resolved), unedited (749/900 bytes). The header's `2h11m` is session length
+(`_duration()`); `20m ago` is time since the last event (`_age()`).
 
-`PLAN?`이 왜 필요한지: 마지막 사람 턴이 짧은 승인("계속 진행해")일 때 그것을
-`NEXT`로 쓰면 **거부된 제안이 지시사항으로 세탁됩니다.** 그래서 승인형 턴은
-`NEXT`를 비우고 이전 에이전트의 주장으로 내립니다.
+**Provenance is baked into the slot name itself.**
 
-`MORE`는 **감춘 것을 공개합니다** — 버린 슬롯, 숨긴 이벤트 수, 나중에 해결된
-실패 수.
+| Slot | Source | Rule |
+|---|---|---|
+| `GOAL` | `author == human`, the session's first human turn | Verbatim only. Never rewritten |
+| `NEXT` | `author == human`, the session's last human turn (empty if there is only one human turn, since that turn is already `GOAL`) | Verbatim only. **Except: empty if that turn is a short approval ("go ahead")** — putting it in `NEXT` would launder a prior agent's proposal into a human instruction |
+| `PLAN?` | The prior agent's last utterance | Only fills when `NEXT` is empty. The single `?` byte is the "unverified claim" label |
+| `FAIL` | A machine-observed failure (`ok=False`) | **"Resolved" means a later success whose first 40 args-characters match — not identical args.** Resolved failures are not reported. Up to 2 are reported, tagged `[E1]`/`[E2]` to link with `omhc show` |
+| `DID` | Machine-observed modified paths | Repo-root-relative, up to 4 |
+| `NOTE` | `omhc note "<text>"` calls — a human or either harness's agent can call it from the command line, and authorship is not tracked | **Unverified free text.** The 2 most recent entries from `~/.omhc/<repo-key>/notes.txt` |
+| `SAID` | `author == human`, an intermediate human turn | Longest sentences first, not most recent (up to 3) — a requirement sentence is more useful than "how far did we get?" |
+| `MORE` | Tally of dropped slots, resolved failures, hidden events | **Discloses what got hidden.** Dropped slots exist because of the 900-byte budget, but the hidden-event count is unrelated to budget — it is simply a count of events that were neither a human turn nor reported as `FAIL` (even if summarized in `DID`, they are invisible individually) |
+| `PULL` | Generated by omhc (always present) | `omhc log --last 30` is always there; `omhc show E1` is added if a failure is unresolved; `omhc log --file …` is added if the shortest modified path is ≤32 chars. Never dropped |
 
-## 설치
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/flow-dark.svg">
+  <img src="assets/flow-light.svg" width="100%" alt="Diagram: a SessionStart hook triggers mark and brief, due() picks the other harness's latest session, a whitelist parser builds Events, mint() renders a handoff under 900 bytes, gate() admits it once per session, and the archive hardlinks the original session with a byte-offset index">
+</picture>
+
+**Both directions require Codex's SessionStart hook to be trusted and
+running.** For `due()` to pick a counterpart session, that session's start
+must already be recorded in the ledger — and only that harness's own hook
+writes that record. If the Codex hook is not trusted, neither `mark` nor
+`brief` ever runs, so that Codex session never lands in the ledger at all:
+Codex → Claude fails (no ledger row to find) and Claude → Codex fails just as
+completely (no `brief` call on the Codex side to begin with). The one
+difference between the two hooks is **whether a trust step exists at all** —
+the Claude Code hook runs as soon as it's in the settings file, but the Codex
+hook needs a one-time approval through Codex's own trust flow (see the
+warning under Install).
+
+**Two decisive choices:**
+
+- **The payload is a fixed 900-byte budget. A hard cap.** The enforcement
+  mechanism is code, not discipline — the **last statement of `mint()` is
+  `assert len(out.encode('utf-8')) <= budget`**, so the function cannot
+  return an oversized string, and the caller re-checks once more right
+  before emitting, falling back to an empty string on failure.
+- **The archive is the original file, verbatim.** Nothing is re-serialized.
+  `os.link()` hardlinks the harness's own session file and adds a TSV
+  offset index of roughly 115 bytes per event. Measured: a 3.2 MB session
+  with 275 events indexes to 31.5 KB (1% of the original). Zero extra disk
+  for the session data, in-progress appends stay visible because it's the
+  same inode, and the bytes survive the original being `rm`'d or `/clear`'d.
+
+<details>
+<summary>When the delivery path is blocked</summary>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/delivery-dark.svg">
+  <img src="assets/delivery-light.svg" width="100%" alt="Delivery fallback chain: if the SessionStart hook is not trusted nothing is delivered; otherwise Path A (install_handoff) is tried, then Path B (AGENTS.md managed block, Codex only, never when shared with Claude Code), then the outbox floor which is never auto-read">
+</picture>
+
+</details>
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
+omhc status          # 5 gated checks, all PASS/FAIL. No SKIP
+```
+
+This unpacks the latest release into `~/.local/share/omhc/<version>` and
+symlinks `~/.local/bin/omhc` — no pip, no pipx (zero dependencies, so the
+source tree *is* the install). Re-run to update; pin a version with
+`| OMHC_VERSION=v0.1.0 sh`; uninstall with
+`rm -rf ~/.local/share/omhc ~/.local/bin/omhc`.
+
+<details>
+<summary>From a git checkout instead</summary>
 
 ```bash
 git clone git@github.com:SungJun1217/oh-my-harness-cowork.git
 cd oh-my-harness-cowork
 ln -s "$PWD/bin/omhc" ~/.local/bin/omhc
-omhc status          # 다섯 검사 전부 PASS/FAIL. SKIP 은 없다
 ```
 
-훅 배선은 `hooks/` 의 파일을 각자 설정에 **병합**하십시오(덮어쓰지 말 것).
+</details>
 
-| 하네스 | 파일 | 대상 |
+Wire up the hooks by **merging** the files under `hooks/` into your own
+config (don't overwrite it).
+
+| Harness | File | Target |
 |---|---|---|
-| Claude Code | `hooks/claude-settings.fragment.json` | `~/.claude/settings.json` 의 `hooks` |
+| Claude Code | `hooks/claude-settings.fragment.json` | `hooks` in `~/.claude/settings.json` |
 | Codex CLI | `hooks/codex-hooks.json` | `~/.codex/hooks.json` |
 
-### AGENTS.md 를 Claude Code 와 공유하는 레포
+> [!WARNING]
+> Measured (codex-cli 0.155.1): a hand-dropped `hooks.json` is **not trusted
+> by default, and an untrusted hook is silently skipped with no message** —
+> neither `mark` nor `brief` ever runs, so nothing is delivered in either
+> direction. You must approve it once through Codex's own hook trust flow.
+> Both fragments use `--wire claude` — `--wire sdk` (top-level
+> `additionalContext`) is rejected by codex-cli 0.155.1 with
+> `hook: SessionStart Failed` and nothing gets injected.
 
-권장 배치는 `AGENTS.md` 를 하네스 중립 원본으로 두고, `CLAUDE.md` 는 실제 파일로
-`@AGENTS.md` 로 시작한 뒤 Claude 전용 내용을 잇는 것입니다(이 레포 자체가 그
-구조입니다). `CLAUDE.md` 를 `AGENTS.md` 로의 심링크로 두는 것도 마찬가지로
-공유입니다 — 어느 쪽이든 `AGENTS.md` 는 심링크여선 안 됩니다.
+`omhc status` shows 5 gated checks (adapters/ledger/archive/off switch/
+instruction files, all PASS/FAIL) plus 2 informational rows (pull rate,
+watcher).
 
-이런 레포에서는 omhc 가 `AGENTS.md` 에 절대 쓰지 않습니다. Codex 용 관리 구간
-(Path B)이 Claude Code 세션에도 그대로 읽혀 핸드오프가 새고, 심링크를 통해 쓰면
-공유·추적 중인 원본 파일이 바뀌기 때문입니다. Codex 로의 핸드오프는 Codex의
-SessionStart 훅(Path A)으로 전달됩니다 — 이 훅이 신뢰되어 돌지 않으면 Path B/
-outbox 가 대신 받는 게 아니라 Codex 쪽 `brief` 호출 자체가 없어 아무것도
-전달되지 않으므로, **Codex 는 outbox 디렉터리를 자동으로 읽지도 않을뿐더러**
-위 표의 Codex 훅을 반드시 설치해야 합니다(그리고 그 훅을 Codex 자신의 절차로
-신뢰해야 합니다). `omhc status` 의 `instruction files` 행이 이 레이아웃을
-보여줍니다.
+### Repos that share AGENTS.md with Claude Code
 
-## 사용
+> [!IMPORTANT]
+> The recommended layout keeps `AGENTS.md` as the harness-neutral source,
+> with `CLAUDE.md` as a real file starting with `@AGENTS.md` followed by
+> Claude-specific content (this repo uses exactly that structure). Making
+> `CLAUDE.md` a symlink to `AGENTS.md` counts as sharing too — either way,
+> `AGENTS.md` itself must never be the symlink.
 
-| 명령 | 역할 |
+In such repos, omhc never writes to `AGENTS.md`. Codex's managed block
+(Path B) would otherwise be read verbatim in Claude Code sessions too,
+leaking the handoff, and writing through the symlink would mutate the
+shared, tracked source file. Handoffs to Codex go through Codex's own
+SessionStart hook (Path A) instead — if that hook doesn't run, Path B and
+the outbox don't step in either, because the `brief` call on the Codex side
+never happens. So **Codex does not auto-read the outbox directory**, and you
+must install the Codex hook from the table above (and trust it through
+Codex's own flow). The `instruction files` row in `omhc status` reflects
+this layout.
+
+## Usage
+
+| Command | Role |
 |---|---|
-| `omhc status [--json]` | 유일한 사람용 대시보드. `lag_bytes`와 인출률 포함 |
-| `omhc log [--last N] [--grep P] [--verb V] [--file P]` | 색인된 이벤트를 한 줄씩 |
-| `omhc show <E1\|#137> [--full]` | **원본 바이트를 오프셋으로 조회** (tier b 진입점) |
-| `omhc note "<text>"` | 메모. 두 하네스의 에이전트가 맨 명령줄로 호출 가능 |
-| `omhc clear` | 설치된 표식 제거 |
-| `omhc mark --harness X` | 세션 시작 기록 (훅이 부른다) |
-| `omhc brief --harness X [--wire claude\|cursor\|sdk]` | 표식 출력 (훅이 부른다) |
+| `omhc status [--json]` | The one human dashboard. Includes archive lag (`lag_bytes`, `tail=…B`) and pull rate |
+| `omhc log [--last N] [--grep P] [--verb V] [--file P]` | Indexed events, one per line |
+| `omhc show <E1\|#137> [--full]` | **Looks up the original bytes by offset** (tier (b) entry point) |
+| `omhc note "<text>"` | Leave a note. Either harness's agent can call it from the plain command line |
 
-끄기: `OMHC_OFF=1` 또는 `~/.omhc/<repo-key>/off` 파일.
+Turn it off: `OMHC_OFF=1`, or an `~/.omhc/<repo-key>/off` file.
 
-## 이 도구를 쓰지 말아야 할 때
+By default, headless sessions (`claude -p`, `codex exec`, app-server clients) and
+Codex subagent threads are never handoff sources. To treat headless sessions as real
+ones in a sandbox, export `OMHC_ALLOW_HEADLESS=1` with the same value for both the
+source and the receiving launch (both `mark` and `brief` read it). Subagents and
+sidechains stay excluded even then.
 
-**같은 하네스끼리는 네이티브 resume이 낫습니다.** Claude Code → Claude Code라면
-`claude --resume <세션ID>`를 쓰십시오. 무손실이고 thinking 블록까지 보존됩니다.
-omhc는 그것보다 **열등합니다** — 요약이니까요. 그래서 `from == to`면 파이프라인을
-단축하고 아무것도 쓰지 않습니다.
+## When not to use it
 
-omhc의 가치는 **벤더가 다를 때**입니다. 교차 벤더 재생은 thinking 블록 서명이
-시스템 프롬프트와 선행 메시지까지 검증하므로 **원리적으로** 불가능합니다.
+> [!TIP]
+> **Native resume beats omhc within the same harness.** Claude Code →
+> Claude Code should use `claude --resume <session-id>`. It's lossless,
+> down to preserving thinking blocks.
 
-## 실측 사실 (설계 근거)
+omhc is **strictly worse** there, because it's a summary. That's why the
+pipeline short-circuits and writes nothing when `from == to`.
 
-| 사실 | 값 |
-|---|---|
-| 세션 파일에서 실제 대화가 차지하는 비중 | Claude Code 8%, Codex 0.15% |
-| 최상위 세션 31개 중 대화형(`entrypoint=cli`) | **1개** (나머지 30개는 `sdk-py`) |
-| 798 레코드에서 추출되는 진짜 사람 턴 | **11개** (`user` 95개 중 67개가 `tool_result`, 7개가 슬래시 명령 봉투) |
-| `SessionStart` 훅이 한 세션에서 발동한 횟수 | **6회** → 세션당 1회 게이트가 필수 |
-| `cwd`가 처음 등장하는 레코드 인덱스 | **3** (0이 아니고, 798개 중 222개엔 아예 없음) |
-| 타임스탬프가 뒤로 가는 지점 | **254개** (최대 52ms) → 순서 근거로 쓸 수 없음 |
-| `skill_listing` 본문 크기 / 포함된 마커 수 | 29,958자 / **0개** → 마커 탐지만으로는 못 잡음 |
-| 툴 어휘 교집합 | **공집합** (`Read/Edit/Bash` vs `shell/apply_patch`) |
+omhc earns its keep **when the vendor changes**. Cross-vendor resume is
+**impossible in principle** — thinking-block signatures are verified
+against the system prompt and preceding messages.
 
-## 알려진 한계
-
-- **Codex 툴 호출 매핑이 미검증입니다.** 이 머신의 Codex가 인증되지 않아(401)
-  실물 `function_call` 레코드를 얻지 못했습니다. Rust serde 필드명 기준으로
-  구현했고 모르는 페이로드는 예외 대신 `unparsed`로 계상됩니다. `codex login`
-  후 `python3 tests/harvest.py --force` 로 골든을 갱신해야 합니다. 테스트
-  클래스 이름에 `UNVERIFIED`를 남겨 뒀습니다.
-- **실측(codex-cli 0.155.1): 신뢰되지 않은 `hooks.json`은 메시지 없이 조용히
-  건너뛰어 `brief`가 한 번도 돌지 않습니다.** `deliver()`(Path B 포함)는 그
-  `brief` 호출 안에서만 실행되므로, 훅이 신뢰되지 않으면 Codex로 들어가는
-  방향은 아무것도 받지 못합니다 — `AGENTS.md` 관리 구간이나 outbox가 대신
-  받는 게 아니라 아예 켜지지 않습니다. Codex→Claude 방향은 이 훅에 의존하지
-  않고 rollout 파일을 직접 읽으므로 하루 루프의 절반은 그래도 동작합니다.
-  Path B/outbox는 `brief`가 실제로 도는데 `install_handoff`가 실패할 때
-  열립니다 — 대표적으로 `~/.codex/hooks.json`에 omhc 훅이 없을 때이지만,
-  `~/.omhc` 쓰기 실패 등 다른 예외도 같은 경로를 탑니다(예: 수동
-  `omhc brief --harness codex-cli`).
-- **원본 포맷은 공식 계약이 아닙니다.** Claude Code의 on-disk 스키마는 문서화되지
-  않았고 2026년 내내 파괴적으로 변했습니다(공식 `SessionStore`조차 엔트리를
-  "opaque"로 선언합니다). 화이트리스트 + fail-open + `status`의 열화 보고로
-  완화하지만, 깨질 것을 전제로 설계했습니다. 아카이브가 포인터인 이유가 이것입니다.
-- **동시 사용은 v1 범위 밖입니다.** seam은 `omhc/due.py::due()` 하나이고, v2는
-  반환형을 `List[Watermark]`로 바꾸고 `stale.py`를 같은 스트림의 두 번째
-  소비자로 추가합니다. v1이 이미 그 기반(절단되지 않은 `paths` 열 + 바이트 오프셋
-  순서)을 기록합니다.
-- **픽스처는 커밋되지 않습니다.** 실제 대화 내용이라서요. `python3 tests/harvest.py`
-  로 각자 머신에서 생성합니다.
-
-## 테스트
+## Extending
 
 ```bash
-python3 -m unittest discover -s tests -t . -q   # 약 12초, 하네스를 띄우지 않는다
-bash tests/smoke.sh                             # 적대적 입력 7종
+python3 -m unittest discover -s tests -t . -q   # ~12s, never launches a harness
+bash tests/smoke.sh                             # 7 adversarial inputs
 ```
 
-적합성 스위트(`tests/conformance/test_suite.py`)의 불변식 22개는 `REGISTRY` 위에
-파라미터화됩니다 — **어댑터를 추가하면 테스트가 저절로 늘어납니다.**
+v1 ships exactly 2 adapters. Adding a third costs **one file + one
+fixture**:
 
-## 새 하네스 붙이기
+1. Implement the 5 methods (`detect`, `list_sessions`, `read_session`,
+   `native_resume_hint`, `install_handoff`) in `omhc/adapters/<harness>.py`,
+   decorated with `@_register`
+2. Add `from . import <harness>` at the bottom of `omhc/adapters/__init__.py`
+3. Freeze one real session under `tests/fixtures/<harness>/`
 
-v1은 어댑터 2개만 구현합니다. 3번째를 붙이는 비용은 **파일 하나 + 픽스처 하나**:
+No core changes. Reading and writing are independent capabilities, so a
+harness with no session hook is normally **read-only, not broken**. If
+`brief` runs for that harness but there's no injection path (or it fails),
+the universal floor `<repo>/.omhc/outbox/` catches it — if `brief` itself
+never runs (no hook installed, or an untrusted one), even the outbox
+receives nothing.
 
-1. `omhc/adapters/<harness>.py` 에 메서드 5개(`detect`, `list_sessions`,
-   `read_session`, `native_resume_hint`, `install_handoff`)를 구현하고
-   `@_register` 를 붙인다
-2. `omhc/adapters/__init__.py` 맨 아래에 `from . import <harness>` 한 줄
-3. `tests/fixtures/<harness>/` 에 실물 세션 하나를 얼린다
+## Tests
 
-코어 수정은 없습니다. 읽기와 쓰기는 독립 capability라서, 세션 훅이 없는 하네스는
-**읽기 전용 어댑터가 정상 상태**이고 결함이 아닙니다. 그 하네스로의 `brief`가
-실행됐는데 주입 경로가 없으면(또는 실패하면) `<repo>/.omhc/outbox/` 로 떨어지는
-보편 바닥이 받습니다 — `brief` 자체가 안 도는 경우(예: 훅이 없거나 신뢰되지
-않아 세션 시작 때 불리지 않음)는 outbox도 받지 못합니다.
+```bash
+python3 -m unittest discover -s tests -t . -q   # ~12s, never launches a harness
+bash tests/smoke.sh                             # 7 adversarial inputs
+```
+
+The conformance suite (`tests/conformance/test_suite.py`) parameterizes 22
+invariants over `REGISTRY` — **adding an adapter grows the test count for
+free.**
+
+About 60 tests are skipped without fixtures (`tests/fixtures/`, never
+committed). Generate them from real sessions on your own machine with
+`python3 tests/harvest.py [--force]`.
+
+<details>
+<summary>More: known limitations, measured facts, delivery fallback diagram, less-used commands</summary>
+
+### Known limitations
+
+- **Codex tool-call mapping is unverified.**
+  <details>
+  <summary>Details</summary>
+
+  This machine's Codex was unauthenticated (401), so no real
+  `function_call` records were available. The implementation follows the
+  Rust serde field names; unknown payloads are counted as `unparsed`
+  instead of raising. Refresh the golden fixtures with `codex login` then
+  `python3 tests/harvest.py --force`. The test class name is left tagged
+  `UNVERIFIED`.
+
+  </details>
+
+- **An untrusted Codex hook turns off both directions entirely.**
+  <details>
+  <summary>Details</summary>
+
+  Measured (codex-cli 0.155.1): an untrusted `hooks.json` is silently
+  skipped, and neither `mark` nor `brief` ever runs. Without `mark`, that
+  Codex session never lands in the ledger, so `due()` later has no row to
+  find even when Claude Code opens — Codex → Claude also fails. Because
+  `deliver()` (Path B included) only runs inside a `brief` call, an
+  untrusted hook means Claude → Codex isn't caught by the `AGENTS.md`
+  managed block or the outbox either — it just never turns on. **"Half the
+  daily loop still works" does not hold.** Path B/outbox only open when
+  `brief` actually runs but `install_handoff` fails — typically a missing
+  omhc hook in `~/.codex/hooks.json`, though other exceptions (e.g. a
+  write failure under `~/.omhc`) take the same path, such as calling
+  `omhc brief --harness codex-cli` manually.
+
+  </details>
+
+- **The on-disk formats are not an official contract.**
+  <details>
+  <summary>Details</summary>
+
+  Claude Code's on-disk schema is undocumented and changed in
+  backward-incompatible ways throughout 2026 (even the official
+  `SessionStore` declares entries "opaque"). Mitigated with whitelist
+  parsing, fail-open behavior, and degradation reporting in `status` — but
+  designed assuming it will break. That's why the archive is a pointer.
+
+  </details>
+
+- **Concurrent use is out of scope for v1.**
+  <details>
+  <summary>Details</summary>
+
+  The seam is a single function, `omhc/due.py::due()`. v2 changes its
+  return type to `List[Watermark]` and adds `stale.py` as a second consumer
+  of the same stream. v1 already records the foundation it needs (an
+  untruncated `paths` column plus byte-offset ordering).
+
+  </details>
+
+- **Fixtures are never committed.**
+  <details>
+  <summary>Details</summary>
+
+  They contain real conversation content. Generate them on your own
+  machine with `python3 tests/harvest.py`.
+
+  </details>
+
+### Measured facts (design rationale)
+
+| Fact | Value |
+|---|---|
+| Share of a session file that is actual conversation | Claude Code 8%, Codex 0.15% |
+| Interactive (`entrypoint=cli`) sessions among the top 31 | **1** (the other 30 are `sdk-py`) |
+| Real human turns extracted from 798 records | **11** (of 95 `user` records, 67 are `tool_result` and 7 are slash-command envelopes) |
+| Times `SessionStart` fired within one session | **6** → a once-per-session gate is required |
+| Record index where `cwd` first appears | **3** (not 0, and entirely absent in 222 of 798 records) |
+| Points where timestamps go backwards | **254** (up to 52 ms) → cannot be used as an ordering source |
+| Size of the `skill_listing` body / markers it contains | 29,958 chars / **0** → marker detection alone cannot catch it |
+| Intersection of the two harnesses' tool vocabularies | **empty set** (`Read/Edit/Bash` vs. `shell/apply_patch`) |
+
+### Delivery fallback diagram
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/delivery-dark.svg">
+  <img src="assets/delivery-light.svg" width="100%" alt="Delivery fallback chain: if the SessionStart hook is not trusted nothing is delivered; otherwise Path A (install_handoff) is tried, then Path B (AGENTS.md managed block, Codex only, never when shared with Claude Code), then the outbox floor which is never auto-read">
+</picture>
+
+### Less-used commands
+
+| Command | Role |
+|---|---|
+| `omhc mark --harness X` | Records session start (called by the hook) |
+| `omhc brief --harness X [--wire claude\|cursor\|sdk]` | Prints the handoff (called by the hook) |
+| `omhc clear` | Removes installed markers |
+| `omhc watch [--stop\|--once]` | Optional accelerator daemon (results are identical without it) |
+
+</details>

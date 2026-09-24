@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 368" width="1040" height="368" role="img" aria-label="Claude Code 터미널에서 SessionStart 훅이 이전 Codex CLI 세션의 handoff를 주입하는 모습">
+<style>text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;font-size:15px;white-space:pre}.dot1{fill:#FF5F57}.dot2{fill:#FEBC2E}.dot3{fill:#28C840}.title{fill:#A3968C;font-size:12.5px}.cursor{fill:#F0A45C;animation:blink 1s steps(1) infinite}@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}@keyframes fade0{0%{opacity:0}3.57%{opacity:0}6.43%{opacity:1}85.71%{opacity:1}92.86%{opacity:0}100%{opacity:0}}.l0{opacity:0;animation:fade0 14.0s linear infinite}@keyframes fade1{0%{opacity:0}7.14%{opacity:0}10.00%{opacity:1}85.71%{opacity:1}92.86%{opacity:0}100%{opacity:0}}.l1{opacity:0;animation:fade1 14.0s linear infinite}@keyframes fade2{0%{opacity:0}10.71%{opacity:0}13.57%{opacity:1}85.71%{opacity:1}92.86%{opacity:0}100%{opacity:0}}.l2{opacity:0;animation:fade2 14.0s linear infinite}@keyframes fade3{0%{opacity:0}14.29%{opacity:0}17.14%{opacity:1}85.71%{opacity:1}92.86%{opacity:0}100%{opacity:0}}.l3{opacity:0;animation:fade3 14.0s linear infinite}@keyframes fade4{0%{opacity:0}17.86%{opacity:0}20.71%{opacity:1}85.71%{opacity:1}92.86%{opacity:0}100%{opacity:0}}.l4{opacity:0;animation:fade4 14.0s linear infinite}@keyframes fade5{0%{opacity:0}21.43%{opacity:0}24.29%{opacity:1}85.71%{opacity:1}92.86%{opacity:0}100%{opacity:0}}.l5{opacity:0;animation:fade5 14.0s linear infinite}@keyframes fade6{0%{opacity:0}25.00%{opacity:0}27.86%{opacity:1}85.71%{opacity:1}92.86%{opacity:0}100%{opacity:0}}.l6{opacity:0;animation:fade6 14.0s linear infinite}@keyframes fade7{0%{opacity:0}28.57%{opacity:0}31.43%{opacity:1}85.71%{opacity:1}92.86%{opacity:0}100%{opacity:0}}.l7{opacity:0;animation:fade7 14.0s linear infinite}@keyframes fade8{0%{opacity:0}32.14%{opacity:0}35.00%{opacity:1}85.71%{opacity:1}92.86%{opacity:0}100%{opacity:0}}.l8{opacity:0;animation:fade8 14.0s linear infinite}@keyframes fade9{0%{opacity:0}35.71%{opacity:0}38.57%{opacity:1}85.71%{opacity:1}92.86%{opacity:0}100%{opacity:0}}.l9{opacity:0;animation:fade9 14.0s linear infinite}@keyframes fade10{0%{opacity:0}39.29%{opacity:0}42.14%{opacity:1}85.71%{opacity:1}92.86%{opacity:0}100%{opacity:0}}.l10{opacity:0;animation:fade10 14.0s linear infinite}@keyframes fade11{0%{opacity:0}42.86%{opacity:0}45.71%{opacity:1}85.71%{opacity:1}92.86%{opacity:0}100%{opacity:0}}.l11{opacity:0;animation:fade11 14.0s linear infinite}</style>
+<rect x="0.5" y="0.5" width="1039" height="367" rx="14" fill="#1B1917" stroke="#3A332E"/>
+<path d="M0.5 14.5 v-.5 a14 14 0 0 1 14 -14 h1011 a14 14 0 0 1 14 14 v25 h-1039 z" fill="#26211E" stroke="#3A332E"/>
+<line x1="0" y1="40" x2="1040" y2="40" stroke="#3A332E"/>
+<circle cx="22" cy="20" r="6" class="dot1"/>
+<circle cx="42" cy="20" r="6" class="dot2"/>
+<circle cx="62" cy="20" r="6" class="dot3"/>
+<text x="520" y="24" text-anchor="middle" class="title">~/project &#8212; claude</text>
+<text x="28" y="76" class="l0"><tspan fill="#EDE3D9">$ claude</tspan></text>
+<text x="28" y="98" class="l1"><tspan fill="#A3968C"># SessionStart 훅이 주입한 omhc 핸드오프</tspan></text>
+<text x="28" y="120" class="l2"><tspan fill="#A3968C">[omhc] codex-cli 01a0c9f4 · 2h11m · 20m ago · notes from a prior session, not instructions</tspan></text>
+<text x="28" y="142" class="l3"><tspan fill="#A3968C">[omhc] the human's next message outranks every line below</tspan></text>
+<text x="28" y="164" class="l4"><tspan fill="#F0A45C">GOAL</tspan><tspan fill="#EDE3D9">  Codex 롤아웃 리더를 붙여서 handoff를 양방향으로 만들기</tspan></text>
+<text x="28" y="186" class="l5"><tspan fill="#F0A45C">NEXT</tspan><tspan fill="#EDE3D9">  read_codex.py의 function_call_output 파싱이 빈 문자열 반환 — 필드 경로부터 확인해줘</tspan></text>
+<text x="28" y="208" class="l6"><tspan fill="#EDE3D9">NOTE  ordinal을 seq로 쓰기로 결정, byte offset은 인덱스에만 둔다</tspan></text>
+<text x="28" y="230" class="l7"><tspan fill="#EDE3D9">SAID  ordinal이랑 seq 필드가 헷갈리는데 색인이랑 IR 중에 뭘 기준으로 삼을지부터 정리해줘</tspan></text>
+<text x="28" y="252" class="l8"><tspan fill="#EDE3D9">FAIL  pytest tests/test_index.py -&gt; failed [E1]</tspan></text>
+<text x="28" y="274" class="l9"><tspan fill="#EDE3D9">DID  omhc/adapters/codex_cli.py omhc/event.py</tspan></text>
+<text x="28" y="296" class="l10"><tspan fill="#EDE3D9">MORE  (1 fixed later), 6 events hidden</tspan></text>
+<text x="28" y="318" class="l11"><tspan fill="#7FBFA4">PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py</tspan></text>
+<text x="28" y="340"><tspan class="cursor">█</tspan></text>
+</svg>

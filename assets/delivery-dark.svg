@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 800" width="1040" height="800" role="img" aria-label="Delivery fallback chain: SessionStart hook trust gates everything; Path A install_handoff either delivers or falls through to a Path B availability check; Path B is AGENTS.md managed block, Codex only; anything that fails lands in the outbox floor">
+<style>text{white-space:pre}</style>
+<rect x="0.5" y="0.5" width="1039" height="799" rx="16" fill="#1B1917"/>
+<defs><marker id="da-dark" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#A3968C"/></marker><marker id="dg-dark" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#7FBFA4"/></marker></defs>
+<clipPath id="dclip0-dark"><rect x="20" y="30" width="460" height="100" rx="13"/></clipPath><rect x="20" y="30" width="460" height="100" rx="13" fill="#26211E" stroke="#F0A45C" stroke-width="1.5" stroke-dasharray="4 3"/><rect x="20" y="30" width="5" height="100" fill="#F0A45C" clip-path="url(#dclip0-dark)"/>
+<clipPath id="dclip1-dark"><rect x="20" y="240" width="460" height="90" rx="13"/></clipPath><rect x="20" y="240" width="460" height="90" rx="13" fill="#26211E" stroke="#3A332E" stroke-width="1.5"/><rect x="20" y="240" width="5" height="90" fill="#A3968C" clip-path="url(#dclip1-dark)"/>
+<clipPath id="dclip2-dark"><rect x="20" y="440" width="460" height="100" rx="13"/></clipPath><rect x="20" y="440" width="460" height="100" rx="13" fill="#26211E" stroke="#F0A45C" stroke-width="1.5" stroke-dasharray="4 3"/><rect x="20" y="440" width="5" height="100" fill="#F0A45C" clip-path="url(#dclip2-dark)"/>
+<clipPath id="dclip3-dark"><rect x="590" y="30" width="380" height="100" rx="13"/></clipPath><rect x="590" y="30" width="380" height="100" rx="13" fill="#26211E" stroke="#3A332E" stroke-width="1.5"/><rect x="590" y="30" width="5" height="100" fill="#A3968C" clip-path="url(#dclip3-dark)"/>
+<clipPath id="dclip4-dark"><rect x="590" y="240" width="380" height="90" rx="13"/></clipPath><rect x="590" y="240" width="380" height="90" rx="13" fill="#26211E" stroke="#3A332E" stroke-width="1.5"/><rect x="590" y="240" width="5" height="90" fill="#7FBFA4" clip-path="url(#dclip4-dark)"/>
+<clipPath id="dclip5-dark"><rect x="590" y="440" width="380" height="90" rx="13"/></clipPath><rect x="590" y="440" width="380" height="90" rx="13" fill="#26211E" stroke="#3A332E" stroke-width="1.5"/><rect x="590" y="440" width="5" height="90" fill="#F0A45C" clip-path="url(#dclip5-dark)"/>
+<clipPath id="dclip6-dark"><rect x="590" y="640" width="380" height="80" rx="13"/></clipPath><rect x="590" y="640" width="380" height="80" rx="13" fill="#26211E" stroke="#3A332E" stroke-width="1.5"/><rect x="590" y="640" width="5" height="80" fill="#A3968C" clip-path="url(#dclip6-dark)"/>
+<line x1="480" y1="80.0" x2="584" y2="80.0" stroke="#A3968C" stroke-width="1.5" marker-end="url(#da-dark)"/>
+<line x1="50" y1="130" x2="50" y2="236" stroke="#A3968C" stroke-width="1.5" marker-end="url(#da-dark)"/>
+<line x1="480" y1="285.0" x2="584" y2="285.0" stroke="#7FBFA4" stroke-width="1.5" marker-end="url(#dg-dark)"/>
+<line x1="50" y1="330" x2="50" y2="436" stroke="#A3968C" stroke-width="1.5" marker-end="url(#da-dark)"/>
+<line x1="480" y1="475.0" x2="584" y2="471.5" stroke="#A3968C" stroke-width="1.5" marker-end="url(#da-dark)"/>
+<path d="M 480 515.0 L 535.0 515.0 L 535.0 680.0 L 584 680.0" fill="none" stroke="#A3968C" stroke-width="1.5" marker-end="url(#da-dark)"/>
+<line x1="620" y1="530" x2="620" y2="636" stroke="#A3968C" stroke-width="1.5" marker-end="url(#da-dark)"/>
+<text x="40.0" y="64.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" fill="#EDE3D9" text-anchor="start" font-weight="600">SessionStart hook trusted</text>
+<text x="40.0" y="88.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" fill="#EDE3D9" text-anchor="start" font-weight="600">and running?</text>
+<text x="40.0" y="110.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#A3968C" text-anchor="start">gates everything below</text>
+<text x="40.0" y="272.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" fill="#F0A45C" text-anchor="start" font-weight="600">Path A</text>
+<text x="40.0" y="294.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13" fill="#EDE3D9" text-anchor="start">adapter.install_handoff()</text>
+<text x="40.0" y="470.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13.5" fill="#EDE3D9" text-anchor="start" font-weight="600">Path B available? (Codex only)</text>
+<text x="40.0" y="492.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#A3968C" text-anchor="start">never when AGENTS.md is shared</text>
+<text x="40.0" y="510.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#A3968C" text-anchor="start">with Claude Code</text>
+<text x="608.0" y="62.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" fill="#EDE3D9" text-anchor="start" font-weight="600">nothing delivered</text>
+<text x="608.0" y="84.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#A3968C" text-anchor="start">Path B / outbox never open --</text>
+<text x="608.0" y="100.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#A3968C" text-anchor="start">brief() itself does not run</text>
+<text x="608.0" y="272.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" fill="#7FBFA4" text-anchor="start" font-weight="600">delivered</text>
+<text x="608.0" y="294.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#A3968C" text-anchor="start">handoff lands in the harness's</text>
+<text x="608.0" y="310.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#A3968C" text-anchor="start">own session-start context</text>
+<text x="608.0" y="472.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" fill="#F0A45C" text-anchor="start" font-weight="600">Path B</text>
+<text x="608.0" y="494.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13" fill="#EDE3D9" text-anchor="start">AGENTS.md managed block</text>
+<text x="608.0" y="514.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#A3968C" text-anchor="start">read by Codex on its next start</text>
+<text x="608.0" y="672.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13" fill="#EDE3D9" text-anchor="start">floor: &lt;repo&gt;/.omhc/outbox/</text>
+<text x="608.0" y="694.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#A3968C" text-anchor="start">not auto-read by either harness</text>
+<text x="532.0" y="70.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="10.5" fill="#A3968C" text-anchor="middle">no</text>
+<text x="60.0" y="183.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="10.5" fill="#A3968C" text-anchor="start">yes</text>
+<text x="532.0" y="275.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="10.5" fill="#7FBFA4" text-anchor="middle">success</text>
+<text x="60.0" y="383.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="10.5" fill="#A3968C" text-anchor="start">failure</text>
+<text x="532.0" y="461.5" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="10.5" fill="#A3968C" text-anchor="middle">yes</text>
+<text x="543.0" y="507.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="10.5" fill="#A3968C" text-anchor="start">no</text>
+<text x="630.0" y="583.0" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="10.5" fill="#A3968C" text-anchor="start">failure</text>
+<text x="520.0" y="760.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#A3968C" text-anchor="middle">the hook-not-trusted branch cuts off Path B and the outbox too --</text>
+<text x="520.0" y="780.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#A3968C" text-anchor="middle">brief() has to run at all for either fallback to open</text>
+</svg>

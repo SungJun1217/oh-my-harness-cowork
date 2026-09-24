@@ -1,7 +1,7 @@
 {
   "_comment": [
     "이 조각을 ~/.claude/settings.json 의 hooks 에 병합한다. 파일을 덮어쓰지 말 것.",
-    "설치 전제: ln -s <repo>/bin/omhc ~/.local/bin/omhc",
+    "설치 전제: install.sh 로 설치했거나 ln -s <repo>/bin/omhc ~/.local/bin/omhc",
     "",
     "순서가 중요하다. mark 가 먼저 이 세션을 원장에 남기고, brief 가 그 뒤에 상대",
     "하네스의 세션을 읽는다. due() 는 my_session_id 를 제외하므로 자기 세션을",
