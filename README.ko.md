@@ -146,11 +146,25 @@ PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
 ## 설치
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
+omhc status          # 게이트된 검사 5개 전부 PASS/FAIL. SKIP 은 없다
+```
+
+최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
+심링크합니다. pip·pipx 를 쓰지 않습니다(의존성이 0 이라 소스 트리가 곧
+설치물입니다). 다시 실행하면 업데이트, 버전 고정은 `| OMHC_VERSION=v0.1.0 sh`,
+제거는 `rm -rf ~/.local/share/omhc ~/.local/bin/omhc`.
+
+<details>
+<summary>git 체크아웃에서 직접 쓰려면</summary>
+
+```bash
 git clone git@github.com:SungJun1217/oh-my-harness-cowork.git
 cd oh-my-harness-cowork
 ln -s "$PWD/bin/omhc" ~/.local/bin/omhc
-omhc status          # 게이트된 검사 5개 전부 PASS/FAIL. SKIP 은 없다
 ```
+
+</details>
 
 훅 배선은 `hooks/` 의 파일을 각자 설정에 **병합**하십시오(덮어쓰지 말 것).
 
