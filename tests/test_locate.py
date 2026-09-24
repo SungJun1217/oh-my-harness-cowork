@@ -6,6 +6,7 @@ import unittest
 
 from omhc import locate
 
+from . import _repo
 from ._repo import REPO
 
 
@@ -57,6 +58,24 @@ class TestLocate(unittest.TestCase):
 
     def test_state_dir_is_under_home_dot_omhc(self):
         self.assertEqual(locate.state_dir("k", home="/h"), "/h/.omhc/k")
+
+    def test_owning_repo_key_is_none_without_a_cwd(self):
+        self.assertIsNone(locate.owning_repo_key(None))
+        self.assertIsNone(locate.owning_repo_key(""))
+
+    def test_owning_repo_key_matches_repo_key_of_the_resolved_root(self):
+        sub = os.path.join(REPO, "omhc", "adapters")
+        self.assertEqual(locate.owning_repo_key(sub), locate.repo_key(REPO))
+
+    def test_owning_repo_key_finds_a_nested_git_root_before_a_non_git_parent(self):
+        with tempfile.TemporaryDirectory() as parent:
+            child = os.path.join(parent, "child")
+            os.makedirs(child)
+            _repo.git(child, "init", "-q")
+            self.assertEqual(locate.owning_repo_key(child),
+                             locate.repo_key(os.path.realpath(child)))
+            self.assertNotEqual(locate.owning_repo_key(child),
+                                locate.repo_key(os.path.realpath(parent)))
 
 
 if __name__ == "__main__":

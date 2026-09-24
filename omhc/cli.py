@@ -49,18 +49,9 @@ BACKFILL_TIME_BUDGET = 0.08
 
 
 def _ref_repo_key(ref) -> Optional[str]:
-    """이 ref 가 실제로 속한 레포 키. cmd_mark 가 자기 세션에 쓰는 것과 같은
-    해석(`locate.resolve_repo_root` → `locate.repo_key`)을 그대로 쓴다.
-
-    discover() 의 cwd 일치는 "root 아래(equal-or-descendant)"라서, `.git`
-    없는 부모 디렉터리에서 mark 가 불리면 그 밑의 **다른** 레포(자기 `.git`을
-    가진 자식, 예: 중첩 워크트리·서브모듈)에서 시작한 세션까지 통과한다.
-    거기서 온 세션을 그 부모의 repo 키로 원장에 적으면 다른 레포의 GOAL 이
-    이 레포의 브리핑에 새어든다 — repo 키를 다시 계산해 걸러야 한다.
-    """
-    if not ref.cwd:
-        return None
-    return locate.repo_key(locate.resolve_repo_root(ref.cwd))
+    """이 ref 가 실제로 속한 레포 키. `locate.owning_repo_key` 로 위임한다
+    (원래 이 함수에 있던 로직 — codex_cli.health() 도 같은 필터를 쓴다)."""
+    return locate.owning_repo_key(ref.cwd)
 
 
 def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,

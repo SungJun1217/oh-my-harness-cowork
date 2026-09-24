@@ -219,8 +219,13 @@ git 체크아웃이라면 레포의 `hooks/` 아래에 있습니다.
 `codex hook` 같은 어댑터 health 행), 그리고 정보성이거나 아직 판단할 근거가
 없는 행을 위한 **`----`**(ledger, off switch, pull rate, watcher) — `----`
 는 게이팅하지 않습니다. omhc Codex 훅이 설치돼 있으면 `codex hook` 행이
-붙습니다. 훅 설치 뒤 이 레포의 가장 최근 Codex 세션이 훅을 한 번도 돌리지
-않았으면(신뢰되지 않은 훅) FAIL 이고, 그 세션의 originator 를 함께 보여줍니다.
+붙습니다. `hooks.json`이 마지막으로 바뀐 뒤 이 레포의 가장 최근 대화형 Codex
+세션이 훅을 돌리지 않았으면(신뢰되지 않은 훅) FAIL 이고, 그 세션의 originator 를
+함께 보여줍니다. 이때 Claude→Codex 는 전달되지 않지만 Codex→Claude 는 Claude 쪽
+`mark` 의 채우기로 계속 동작합니다. 아직 판정할 수 없으면 `----` 입니다:
+`hooks.json`이 바뀐 뒤 이 레포에 대화형 Codex 세션이 없을 때(날짜 표시), 헤드리스
+`codex exec` 세션만 있을 때(판정에 세지 않습니다 — 여기서 대화형 `codex` 를 한 번
+여십시오), 알 수 없는 오류일 때.
 
 ### AGENTS.md 를 Claude Code 와 공유하는 레포
 

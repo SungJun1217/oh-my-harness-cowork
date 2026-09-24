@@ -153,9 +153,9 @@ def _is_headless_originator(originator) -> bool:
     return originator.startswith(_PROGRAMMATIC_ORIGINATOR_PREFIXES)
 
 
-def _is_interactive(meta: dict) -> bool:
-    """서브에이전트·헤드리스 실행을 걸러낸다. 차단목록이며 허용목록이 아니다 —
-    모르는 source/originator 는 여전히 대화형으로 남는다.
+def _is_subagent(meta: dict) -> bool:
+    """서브에이전트 스레드인가. 차단목록이며 허용목록이 아니다 — 모르는
+    source 는 여전히 서브에이전트가 아닌 것으로 남는다.
 
     실측(이 머신, 2026-09-24): host rollout 194개 중 116개가 서브에이전트
     스레드다. 부모 에이전트의 role=user 프롬프트가 content_item_kinds=
@@ -164,19 +164,31 @@ def _is_interactive(meta: dict) -> bool:
     source={"subagent": {"thread_spawn": {...}}}, thread_source="subagent",
     parent_thread_id=<uuid> — 셋 중 하나만 있어도 서브에이전트이고, 이건
     OMHC_ALLOW_HEADLESS 로도 절대 풀리지 않는다(발화자가 다른 문제라서).
-    `codex exec` 는 originator="codex_exec", source="exec" (샌드박스 rollout
-    5개 전부 실측). applecider/splitlane* 은 vscode 확장 안에 얹힌 프로그래매틱
-    클라이언트다(위 주석) — 셋 다 헤드리스이고 오버라이드가 켜졌을 때만
-    대화형이다.
     """
     source = meta.get("source")
     if isinstance(source, dict) and "subagent" in source:
-        return False
+        return True
     if meta.get("thread_source") == "subagent":
-        return False
+        return True
     if meta.get("parent_thread_id"):
+        return True
+    return False
+
+
+def _is_headless_meta(meta: dict) -> bool:
+    """`codex exec` 류 프로그래매틱 실행인가. `codex exec` 는
+    originator="codex_exec", source="exec" (샌드박스 rollout 5개 전부 실측).
+    applecider/splitlane* 은 vscode 확장 안에 얹힌 프로그래매틱 클라이언트다
+    (위 _PROGRAMMATIC_ORIGINATORS 주석)."""
+    return meta.get("source") == "exec" or _is_headless_originator(meta.get("originator"))
+
+
+def _is_interactive(meta: dict) -> bool:
+    """서브에이전트·헤드리스 실행을 걸러낸다. 서브에이전트는 언제나 제외,
+    헤드리스는 OMHC_ALLOW_HEADLESS 가 켜졌을 때만 통과시킨다."""
+    if _is_subagent(meta):
         return False
-    if source == "exec" or _is_headless_originator(meta.get("originator")):
+    if _is_headless_meta(meta):
         return allow_headless()
     return True
 
@@ -374,35 +386,60 @@ class CodexCliAdapter:
             return HarnessPresence(present=True, note=root)
         return HarnessPresence(present=False, note="not found: {}".format(root))
 
-    def list_sessions(self, repo_root: Optional[str]) -> List[SessionRef]:
+    def _scan(self, repo_root: Optional[str], include_headless: bool, *,
+              deadline: Optional[float] = None, newest_first: bool = False):
+        """list_sessions/discover/health 가 공유하는 날짜 디렉터리 walk.
+        서브에이전트는 언제나 뺀다; 헤드리스는 `include_headless` 로 직접
+        켠다 — list_sessions/discover 는 `allow_headless()`(env)를 그대로
+        넘기고, health() 의 "헤드리스만 있었나" 판별은 env 와 무관하게 True 를
+        넘긴다. (path, meta) 를 yield 한다 — SessionRef 조립은 호출자 몫이다
+        (list_sessions 는 파일 mtime, discover 는 session_meta.timestamp 를
+        쓴다 — 서로 다른 epoch 정의라 여기서 합치면 invariant 6 을 흐린다).
+        """
         if repo_root is None:
-            return []
+            return
         root = os.path.realpath(repo_root)
-        refs: List[SessionRef] = []
         for directory in _recent_date_dirs(self.sessions_root(), SCAN_DAYS, self._now):
-            for path in glob.glob(os.path.join(directory, "rollout-*.jsonl")):
+            if deadline is not None and time.time() > deadline:
+                break
+            # glob 은 파일시스템 순서라 정렬되지 않는다. 파일명이
+            # rollout-YYYY-MM-DDTHH-MM-SS- 로 시작하므로 역순 정렬이 곧 최신순이고,
+            # deadline 에 잘려도 가장 최근 세션부터 읽힌다(discover 전용).
+            paths = glob.glob(os.path.join(directory, "rollout-*.jsonl"))
+            if newest_first:
+                paths = sorted(paths, reverse=True)
+            for path in paths:
+                if deadline is not None and time.time() > deadline:
+                    break
                 meta = session_meta(path)
-                if not meta or not _is_interactive(meta):
+                if not meta or _is_subagent(meta):
+                    continue
+                if _is_headless_meta(meta) and not include_headless:
                     continue
                 cwd = meta.get("cwd")
                 # Codex 는 rollout 에 레포 루트를 기록한다. equal-or-descendant 로
                 # 판정해야 서브디렉터리에서 시작한 세션도 잡힌다.
                 if not isinstance(cwd, str) or not locate.is_within(root, cwd):
                     continue
-                try:
-                    stat = os.stat(path)
-                except OSError:
-                    continue
-                refs.append(
-                    SessionRef(
-                        adapter_id=self.adapter_id,
-                        session_id=str(meta.get("session_id") or meta.get("id") or ""),
-                        source_path=path,
-                        cwd=cwd,
-                        epoch=stat.st_mtime,
-                        size=stat.st_size,
-                    )
+                yield path, meta
+
+    def list_sessions(self, repo_root: Optional[str]) -> List[SessionRef]:
+        refs: List[SessionRef] = []
+        for path, meta in self._scan(repo_root, allow_headless()):
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            refs.append(
+                SessionRef(
+                    adapter_id=self.adapter_id,
+                    session_id=str(meta.get("session_id") or meta.get("id") or ""),
+                    source_path=path,
+                    cwd=meta.get("cwd"),
+                    epoch=stat.st_mtime,
+                    size=stat.st_size,
                 )
+            )
         refs.sort(key=lambda r: (-r.epoch, r.source_path))
         return refs
 
@@ -422,43 +459,26 @@ class CodexCliAdapter:
         모은 것만 돌려주고 멈춘다 — 날짜 디렉터리가 14일치라 파일이 많을 때
         cmd_mark 의 훅 예산을 이 호출 하나가 다 쓸 수 있어서다.
         """
-        if repo_root is None:
-            return []
-        root = os.path.realpath(repo_root)
         refs: List[SessionRef] = []
-        for directory in _recent_date_dirs(self.sessions_root(), SCAN_DAYS, self._now):
-            if deadline is not None and time.time() > deadline:
-                break
-            # glob 은 파일시스템 순서라 정렬되지 않는다. 파일명이
-            # rollout-YYYY-MM-DDTHH-MM-SS- 로 시작하므로 역순 정렬이 곧 최신순이고,
-            # deadline 에 잘려도 가장 최근 세션부터 읽힌다.
-            for path in sorted(glob.glob(os.path.join(directory, "rollout-*.jsonl")),
-                               reverse=True):
-                if deadline is not None and time.time() > deadline:
-                    break
-                meta = session_meta(path)
-                if not meta or not _is_interactive(meta):
-                    continue
-                cwd = meta.get("cwd")
-                if not isinstance(cwd, str) or not locate.is_within(root, cwd):
-                    continue
-                started = iso_epoch(meta.get("timestamp"))
-                if not started:
-                    continue
-                try:
-                    size = os.path.getsize(path)
-                except OSError:
-                    continue
-                refs.append(
-                    SessionRef(
-                        adapter_id=self.adapter_id,
-                        session_id=str(meta.get("session_id") or meta.get("id") or ""),
-                        source_path=path,
-                        cwd=cwd,
-                        epoch=started,
-                        size=size,
-                    )
+        for path, meta in self._scan(repo_root, allow_headless(), deadline=deadline,
+                                     newest_first=True):
+            started = iso_epoch(meta.get("timestamp"))
+            if not started:
+                continue
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            refs.append(
+                SessionRef(
+                    adapter_id=self.adapter_id,
+                    session_id=str(meta.get("session_id") or meta.get("id") or ""),
+                    source_path=path,
+                    cwd=meta.get("cwd"),
+                    epoch=started,
+                    size=size,
                 )
+            )
         return refs
 
     def read_session(self, ref: SessionRef) -> SessionRead:
@@ -734,6 +754,24 @@ class CodexCliAdapter:
         except OSError:
             return False
 
+    def _repo_matches(self, repo_root: Optional[str], cwd) -> bool:
+        """이 후보(cwd)가 `repo_root` 에 실제로 속하는가.
+
+        `repo_root` 자신이 `.git` 을 가진 진짜 레포면 그 안의 워크트리·서브모듈
+        (자기 `.git` 을 가진 중첩 디렉터리, 예: `.claude/worktrees/*`)도 여전히
+        이 레포에 속한 것으로 본다 — list_sessions 의 is_within(경로 포함)
+        판정을 그대로 신뢰한다(TestHealthMatchesAcrossNestedGitRoots).
+        `repo_root` 자신은 `.git` 이 없는데(resolve_repo_root 의 fallback,
+        "non-git 부모 디렉터리"에서 status 를 부른 경우) 안에 자기 `.git` 을
+        가진 **남남** 레포가 있으면 이야기가 다르다 — 그 세션은 여기 레포의
+        훅이 돈 증거가 아니다. 그 경우에만 repo 키를 엄격히 대조한다.
+        """
+        if repo_root is None:
+            return True
+        if os.path.exists(os.path.join(repo_root, ".git")):
+            return True
+        return locate.owning_repo_key(cwd) == locate.owning_repo_key(repo_root)
+
     def health(self, repo_root: Optional[str], ledger_rows):
         """훅이 설치돼 있는데 실제로 돈 적이 없는지 행태로 진단한다.
 
@@ -741,7 +779,11 @@ class CodexCliAdapter:
         0.155.1 은 신뢰되지 않은 훅을 메시지도 원장 행도 없이 건너뛴다. 그래서
         설치 이후 Codex 세션이 실제로 omhc mark 를 남겼는지를 원장과 대조한다.
         무엇이 잘못돼도 status 자체가 죽으면 안 되므로(진단 도구), 통째로
-        감싸 실패는 PASS/unknown 으로 열화시킨다.
+        감싸 실패는 ok=None(미판정)으로 열화시킨다.
+
+        ok=None(`----`, AGENTS.md 의 status 규약)은 "아직 아무것도 판정할 수
+        없다"는 세 번째 상태다 — 대화형 Codex 세션이 install 이후 하나도 없거나
+        헤드리스(`codex exec`)뿐이면 PASS 도 FAIL 도 아니다.
         """
         try:
             if not self.hook_is_installed():
@@ -752,7 +794,8 @@ class CodexCliAdapter:
             try:
                 install_epoch = os.path.getmtime(hooks_path)
             except OSError as exc:
-                return (("codex hook", True, "unknown ({})".format(exc)),)
+                return (("codex hook", None, "unknown ({})".format(exc)),)
+            install_date = time.strftime("%Y-%m-%d %H:%M %z", time.localtime(install_epoch))
 
             # 세션 id 는 전역 유일이다(Codex 가 부여) — 레포 경계로 거르지 않는다.
             # ledger_rows 를 레포로 먼저 거르면 워크트리·서브모듈처럼 자기 .git 을
@@ -767,29 +810,60 @@ class CodexCliAdapter:
                     # 향후 백필 행. 훅이 실제로 돌았다는 증거가 아니므로 세지
                     # 않는다 — 세면 문제를 가려버린다.
                     continue
+                if row.get("event") != "start":
+                    # "훅이 돌았다" 는 세션 시작 행의 존재로만 증명된다 — 계획된
+                    # pull 행 등 다른 event 는 훅이 돌았다는 증거가 아니다.
+                    continue
                 sid = row.get("session")
                 if sid:
                     ran_sessions.add(sid)
 
-            candidates = []  # (started_epoch, ref, meta)
-            for ref in self.list_sessions(repo_root):
-                meta = session_meta(ref.source_path)
-                if not meta:
-                    continue
-                # 파일 두 개(hooks.json mtime, rollout 의 session_meta.timestamp)의
-                # 시각을 비교한다 — 한쪽이 mtime 이라 invariant 6 이 금지하는
-                # "순서의 근거"가 아니라 일회성 진단이라 허용한다(이 비교 결과로
-                # 이벤트를 정렬하지 않는다). cli._backfill_foreign_sessions 가
-                # 하는 비교와는 다르다 — 거기는 두 세션 시작 epoch(둘 다
-                # session_meta.timestamp 계열, mtime 아님)를 비교해 원장 append
-                # 순서를 정하는, invariant 6 이 허용하는 예외다.
-                started = iso_epoch(meta.get("timestamp"))
-                if not started or started <= install_epoch:
-                    continue
-                candidates.append((started, ref, meta))
+            def _post_install(entries):
+                """entries: (session_id, cwd, meta) 튜플들. repo 소속과 설치
+                이후 시작 시각으로 걸러 (started, session_id, meta) 를 만든다."""
+                out = []
+                for session_id, cwd, meta in entries:
+                    if not self._repo_matches(repo_root, cwd):
+                        continue
+                    # 파일 두 개(hooks.json mtime, rollout 의
+                    # session_meta.timestamp)의 시각을 비교한다 — 한쪽이 mtime
+                    # 이라 invariant 6 이 금지하는 "순서의 근거"가 아니라
+                    # 일회성 진단이라 허용한다(이 비교 결과로 이벤트를 정렬하지
+                    # 않는다). cli._backfill_foreign_sessions 가 하는 비교와는
+                    # 다르다 — 거기는 두 세션 시작 epoch(둘 다
+                    # session_meta.timestamp 계열, mtime 아님)를 비교해 원장
+                    # append 순서를 정하는, invariant 6 이 허용하는 예외다.
+                    started = iso_epoch(meta.get("timestamp"))
+                    if not started or started <= install_epoch:
+                        continue
+                    out.append((started, session_id, meta))
+                return out
+
+            def _entries_from_refs(refs):
+                for ref in refs:
+                    meta = session_meta(ref.source_path)
+                    if meta:
+                        yield ref.session_id, ref.cwd, meta
+
+            candidates = _post_install(_entries_from_refs(self.list_sessions(repo_root)))
 
             if not candidates:
-                return (("codex hook", True, "no Codex sessions since install"),)
+                # OMHC_ALLOW_HEADLESS=1 이면 list_sessions() 자체가 헤드리스도
+                # 후보에 넣으므로 여기 온 시점엔 이미 진짜로 아무것도 없다 —
+                # 이 헤드리스 전용 재스캔은 env 와 무관하게 존재 여부만 본다.
+                headless_entries = (
+                    (str(meta.get("session_id") or meta.get("id") or ""),
+                     meta.get("cwd"), meta)
+                    for _path, meta in self._scan(repo_root, True)
+                )
+                if _post_install(headless_entries):
+                    return (("codex hook", None,
+                              "not judged — only headless (codex exec) sessions since "
+                              "hooks.json changed ({}); they don't count, open an "
+                              "interactive codex here once".format(install_date)),)
+                return (("codex hook", None,
+                          "not judged yet — no interactive Codex session in this repo "
+                          "since hooks.json changed ({})".format(install_date)),)
 
             # 신뢰는 config.toml 을 바꾸지, hooks.json 을 바꾸지 않는다 — 신뢰
             # 이전 세션은 install_epoch 이후라도 영원히 "안 돈 것"으로 남는다.
@@ -799,8 +873,8 @@ class CodexCliAdapter:
             candidates.sort(key=lambda c: c[0], reverse=True)
             missing_streak = 0
             newest_missing_meta = None
-            for started, ref, meta in candidates:
-                if ref.session_id in ran_sessions:
+            for started, session_id, meta in candidates:
+                if session_id in ran_sessions:
                     break
                 missing_streak += 1
                 if newest_missing_meta is None:
@@ -820,6 +894,10 @@ class CodexCliAdapter:
                        "are skipped silently)".format(missing_streak, originator))
             if not self._config_trusts_hook():
                 detail += "; no trust entry in ~/.codex/config.toml"
+            # 훅 백필(cmd_mark) 덕에 Codex→Claude 방향은 이 FAIL 과 무관하게
+            # 산다 — 끊긴 건 Claude→Codex 뿐이라는 걸 명시한다.
+            detail += (" — Claude→Codex is not delivered; Codex→Claude still works "
+                       "via Claude's mark backfill")
             return (("codex hook", False, detail),)
         except Exception as exc:  # 진단이 status 자체를 죽이면 안 된다 (invariant 7)
-            return (("codex hook", True, "unknown ({})".format(exc)),)
+            return (("codex hook", None, "unknown ({})".format(exc)),)

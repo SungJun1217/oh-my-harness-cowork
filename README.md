@@ -226,9 +226,14 @@ checks that were actually judged and can gate the exit code (adapters,
 archive, instruction files, and adapter health rows such as `codex hook`),
 and **`----`** for rows that are informational or not judgeable yet (ledger,
 off switch, pull rate, watcher) — `----` never gates. When the omhc Codex
-hook is installed, a `codex hook` row is added: it FAILs when the newest
-Codex session for this repo since the hook was installed never ran it — the
-untrusted-hook case — and names that session's originator.
+hook is installed, a `codex hook` row is added. It FAILs when the newest
+interactive Codex session for this repo since `hooks.json` last changed never
+ran the hook — the untrusted-hook case — and names that session's originator;
+Claude→Codex is then not delivered, while Codex→Claude still works through
+Claude's `mark` backfill. It shows `----` while it cannot judge yet: no
+interactive Codex session here since `hooks.json` changed (the date is shown),
+only headless `codex exec` sessions (they never count — open an interactive
+`codex` here once), or an unknown error.
 
 ### Repos that share AGENTS.md with Claude Code
 
