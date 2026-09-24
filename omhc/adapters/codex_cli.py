@@ -736,9 +736,9 @@ class CodexCliAdapter:
         성공으로 보고하면 Path B 가 영원히 발동하지 않는다.
         """
         try:
-            with open(self.hooks_path(), encoding="utf-8", errors="replace") as fh:
-                return "omhc" in fh.read()
-        except OSError:
+            return hookconf.has_runnable_call(
+                self.hooks_path(), "brief", {"--harness": self.adapter_id})
+        except Exception:
             return False
 
     def install_handoff(self, bundle: HandoffBundle) -> InstallReceipt:

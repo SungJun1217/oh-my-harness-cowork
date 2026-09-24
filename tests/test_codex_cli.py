@@ -660,7 +660,8 @@ class TestWriteSide(unittest.TestCase):
         os.makedirs(directory, exist_ok=True)
         with open(os.path.join(directory, "hooks.json"), "w", encoding="utf-8") as fh:
             json.dump({"hooks": {"SessionStart": [
-                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+                {"hooks": [{"type": "command",
+                            "command": "omhc brief --harness codex-cli"}]}]}}, fh)
 
     def test_install_handoff_writes_the_artifact_when_the_hook_exists(self):
         with tempfile.TemporaryDirectory() as home:
@@ -783,7 +784,7 @@ class TestHealth(unittest.TestCase):
         path = os.path.join(directory, "hooks.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"hooks": {"SessionStart": [
-                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+                {"hooks": [{"type": "command", "command": "omhc brief --harness codex-cli"}]}]}}, fh)
         os.utime(path, (self.INSTALL_EPOCH, self.INSTALL_EPOCH))
         return path
 
@@ -1078,7 +1079,7 @@ class TestHealthMatchesAcrossNestedGitRoots(unittest.TestCase):
         hooks_path = os.path.join(hooks_dir, "hooks.json")
         with open(hooks_path, "w", encoding="utf-8") as fh:
             json.dump({"hooks": {"SessionStart": [
-                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+                {"hooks": [{"type": "command", "command": "omhc brief --harness codex-cli"}]}]}}, fh)
         os.utime(hooks_path, (1700000000.0, 1700000000.0))
 
         sessions_dir = os.path.join(
@@ -1147,7 +1148,7 @@ class TestHealthMatchesAcrossOmhcRootMarker(unittest.TestCase):
         hooks_path = os.path.join(hooks_dir, "hooks.json")
         with open(hooks_path, "w", encoding="utf-8") as fh:
             json.dump({"hooks": {"SessionStart": [
-                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+                {"hooks": [{"type": "command", "command": "omhc brief --harness codex-cli"}]}]}}, fh)
         os.utime(hooks_path, (1700000000.0, 1700000000.0))
 
         sessions_dir = os.path.join(
@@ -1197,7 +1198,7 @@ class TestHealthLedgerWindow(unittest.TestCase):
             hooks_path = os.path.join(hooks_dir, "hooks.json")
             with open(hooks_path, "w", encoding="utf-8") as fh:
                 json.dump({"hooks": {"SessionStart": [
-                    {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+                    {"hooks": [{"type": "command", "command": "omhc brief --harness codex-cli"}]}]}}, fh)
             os.utime(hooks_path, (1700000000.0, 1700000000.0))
 
             sessions_dir = os.path.join(

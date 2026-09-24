@@ -250,6 +250,82 @@ class TestHookconf(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("not installed", detail)
 
+    # --- #20: matcher/type 이 세션 시작에 안 걸리는 설치는 FAIL --------------
+
+    def test_matcher_that_excludes_startup_fails_naming_the_matcher(self):
+        frag = json.loads(json.dumps(self.fragment))
+        frag["SessionStart"][0]["matcher"] = "compact"
+        self._write(frag)
+        ok, detail = hookconf.inspect(self.config_path, self.fragment, self.home)
+        self.assertFalse(ok)
+        self.assertIn("never run at session start", detail)
+        self.assertIn("matcher 'compact'", detail)
+        self.assertIn("omhc hooks install", detail)
+
+    def test_matcher_that_includes_startup_passes(self):
+        frag = json.loads(json.dumps(self.fragment))
+        frag["SessionStart"][0]["matcher"] = "startup|resume|clear|compact"
+        self._write(frag)
+        ok, detail = hookconf.inspect(self.config_path, self.fragment, self.home)
+        self.assertTrue(ok, detail)
+
+    # Claude Code 2.1.281 실측 매칭 의미론을 그대로 거울에 비춘다: "단순"
+    # matcher(`^[a-zA-Z0-9_|]+$`)는 "|" 로 쪼개 정확히 일치해야 하고, 그 외는
+    # 고정 없는 부분 검색(re.search)이다.
+    def test_simple_matcher_start_alone_does_not_run_at_startup(self):
+        self.assertFalse(hookconf._matcher_runs_at_startup("start"))
+
+    def test_regex_matcher_caret_start_runs_at_startup(self):
+        self.assertTrue(hookconf._matcher_runs_at_startup("^start"))
+
+    def test_regex_matcher_with_wildcard_runs_at_startup(self):
+        self.assertTrue(hookconf._matcher_runs_at_startup("sta.t"))
+
+    def test_invalid_regex_matcher_does_not_run_at_startup(self):
+        self.assertFalse(hookconf._matcher_runs_at_startup("startup("))
+
+    def test_hook_type_prompt_fails_naming_the_type(self):
+        frag = json.loads(json.dumps(self.fragment))
+        frag["SessionStart"][0]["hooks"][0]["type"] = "prompt"
+        frag["SessionStart"][0]["hooks"][1]["type"] = "prompt"
+        self._write(frag)
+        ok, detail = hookconf.inspect(self.config_path, self.fragment, self.home)
+        self.assertFalse(ok)
+        self.assertIn("never run at session start", detail)
+        self.assertIn("type 'prompt'", detail)
+
+    def test_duplicate_omhc_groups_reported_as_duplicate_not_wrong_order(self):
+        frag = json.loads(json.dumps(self.fragment))
+        frag["SessionStart"] = frag["SessionStart"] * 2  # mark, brief, mark, brief
+        self._write(frag)
+        ok, detail = hookconf.inspect(self.config_path, self.fragment, self.home)
+        self.assertFalse(ok)
+        self.assertIn("duplicate omhc hooks (found mark, brief, mark, brief)", detail)
+
+    def test_extra_non_runnable_omhc_group_fails_as_duplicate(self):
+        """리뷰 결함: runnable 호출만 비교하면 안 도는 여분의 omhc 그룹(예:
+        matcher "resume")이 있어도 PASS 로 보인다 — merge() 의 "PASS 면 중복
+        omhc 호출도 없다" 는 전제가 깨진다."""
+        frag = json.loads(json.dumps(self.fragment))
+        extra = json.loads(json.dumps(self.fragment["SessionStart"][0]))
+        extra["matcher"] = "resume"
+        frag["SessionStart"].append(extra)
+        self._write(frag)
+        ok, detail = hookconf.inspect(self.config_path, self.fragment, self.home)
+        self.assertFalse(ok)
+        self.assertIn("differs from shipped fragment", detail)
+        self.assertIn("duplicate omhc hooks", detail)
+
+    def test_flag_value_that_looks_like_a_flag_does_not_eat_the_next_real_flag(self):
+        # `--text` 뒤에 값이 없는데 곧장 `--harness codex-cli` 가 오면, 예전
+        # 파서는 "--harness" 를 --text 의 값으로 삼켜 진짜 --harness 를 잃었다.
+        frag = json.loads(json.dumps(self.fragment))
+        frag["SessionStart"][0]["hooks"][1]["command"] = (
+            "$HOME/.local/bin/omhc brief --text --harness claude-code --wire claude")
+        self._write(frag)
+        ok, detail = hookconf.inspect(self.config_path, frag, self.home)
+        self.assertTrue(ok, detail)
+
     def test_bare_name_not_found_on_path_fails(self):
         self._write(self._fragment_with("omhc"))
         old_path = os.environ.get("PATH", "")
@@ -262,6 +338,68 @@ class TestHookconf(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("cannot verify", detail)
         self.assertIn("PATH", detail)
+
+
+class TestHasRunnableCall(unittest.TestCase):
+    """`hookconf.has_runnable_call` — codex-cli 어댑터의 `hook_is_installed`
+    가 부분 문자열 대신 쓰는 구조적 판정(#20)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.config_path = os.path.join(self._tmp.name, "hooks.json")
+
+    def _write(self, conf) -> None:
+        with open(self.config_path, "w", encoding="utf-8") as fh:
+            json.dump(conf, fh)
+
+    def test_missing_file_is_false_not_raise(self):
+        self.assertFalse(hookconf.has_runnable_call(self.config_path, "brief"))
+
+    def test_malformed_json_is_false_not_raise(self):
+        with open(self.config_path, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        self.assertFalse(hookconf.has_runnable_call(self.config_path, "brief"))
+
+    def test_true_for_a_matching_runnable_brief_call(self):
+        self._write({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": "$HOME/.local/bin/omhc brief --harness codex-cli --wire claude"},
+        ]}]}})
+        self.assertTrue(hookconf.has_runnable_call(
+            self.config_path, "brief", {"--harness": "codex-cli"}))
+
+    def test_false_when_harness_flag_differs(self):
+        self._write({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": "$HOME/.local/bin/omhc brief --harness claude-code --wire claude"},
+        ]}]}})
+        self.assertFalse(hookconf.has_runnable_call(
+            self.config_path, "brief", {"--harness": "codex-cli"}))
+
+    def test_false_when_not_runnable_at_startup(self):
+        self._write({"hooks": {"SessionStart": [{"matcher": "compact", "hooks": [
+            {"type": "command", "command": "$HOME/.local/bin/omhc brief --harness codex-cli"},
+        ]}]}})
+        self.assertFalse(hookconf.has_runnable_call(
+            self.config_path, "brief", {"--harness": "codex-cli"}))
+
+    def test_false_for_a_lookalike_user_hook(self):
+        # 문자열에 "omhc brief" 가 들어 있어도 argv[0] 이 omhc 가 아니면 아니다
+        # — 옛 부분 문자열 판정이라면 여기서 오탐했다.
+        self._write({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": "echo 'run omhc brief --harness codex-cli later'"},
+        ]}]}})
+        self.assertFalse(hookconf.has_runnable_call(
+            self.config_path, "brief", {"--harness": "codex-cli"}))
+
+    def test_true_when_a_valueless_flag_precedes_harness(self):
+        # `--text` 뒤에 값 없이 곧장 `--harness` 가 오면, 예전 파서는
+        # "--harness" 를 --text 의 값으로 삼켜 has_runnable_call 이 오탐 False
+        # 를 내고 install_handoff 가 Path B 로 새버렸다.
+        self._write({"hooks": {"SessionStart": [{"hooks": [
+            {"type": "command", "command": "$HOME/.local/bin/omhc brief --text --harness codex-cli"},
+        ]}]}})
+        self.assertTrue(hookconf.has_runnable_call(
+            self.config_path, "brief", {"--harness": "codex-cli"}))
 
 
 class TestHookconfMergeStrip(unittest.TestCase):
@@ -498,7 +636,20 @@ class TestHookconfMergeStrip(unittest.TestCase):
         changed = hookconf.strip(self.config_path)
         self.assertTrue(changed)
         conf = self._read()
+        # hooks 가 SessionStart 만 들고 있었다면 hooks 자체도 사라져야 한다 —
+        # {"hooks": {}} 흔적을 남기지 않는다(#20).
+        self.assertNotIn("hooks", conf)
+
+    def test_strip_drops_empty_session_start_key_but_keeps_other_hook_events(self):
+        with open(self.config_path, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": dict(self.fragment, Stop=[
+                {"hooks": [{"type": "command", "command": "omhc done"}]}])}, fh)
+        changed = hookconf.strip(self.config_path)
+        self.assertTrue(changed)
+        conf = self._read()
         self.assertNotIn("SessionStart", conf["hooks"])
+        self.assertEqual(conf["hooks"]["Stop"],
+                         [{"hooks": [{"type": "command", "command": "omhc done"}]}])
 
     def test_strip_twice_second_time_nothing_to_remove(self):
         with open(self.config_path, "w", encoding="utf-8") as fh:
