@@ -159,9 +159,34 @@ omhc status          # 5 gated checks (+ codex hook when installed), all PASS/FA
 
 This unpacks the latest release into `~/.local/share/omhc/<version>` and
 symlinks `~/.local/bin/omhc` — no pip, no pipx (zero dependencies, so the
-source tree *is* the install). Re-run to update; pin a version with
-`| OMHC_VERSION=v0.1.0 sh`; uninstall with
-`rm -rf ~/.local/share/omhc ~/.local/bin/omhc`.
+source tree *is* the install). Re-run to update (old versions under
+`~/.local/share/omhc` are pruned automatically, keeping only the one
+`current` points at); pin a version with `| OMHC_VERSION=v0.1.0 sh`.
+
+Uninstall with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh -s -- --uninstall
+```
+
+This removes only omhc's own `SessionStart` hooks from
+`~/.claude/settings.json` and `~/.codex/hooks.json` — other hooks in the
+same file, or even in the same hook group, are left intact; the JSON is
+just re-serialized (2-space indent) in the process. A `<file>.omhc-bak`
+backup is written first. It then removes `~/.local/bin/omhc` and
+`~/.local/share/omhc`. `~/.omhc` (the archive and ledger) is kept — set
+`OMHC_PURGE=1` to remove that too, including through the pipe:
+`curl -fsSL .../install.sh | OMHC_PURGE=1 sh -s -- --uninstall`. Safe to
+run when nothing is installed, and safe to run twice.
+
+What it doesn't touch:
+- **Codex hook trust.** Trust entries are keyed by group/hook index, so
+  removing omhc's groups can shift the indices of any other Codex
+  `SessionStart` hooks you have — you may need to re-approve those through
+  Codex's own trust flow after uninstalling.
+- **Per-repo leftovers.** An omhc-managed block in a repo's `AGENTS.md`,
+  and `<repo>/.omhc/outbox/`. Run `omhc clear` inside each repo *before*
+  uninstalling if you want those cleaned up too.
 
 <details>
 <summary>From a git checkout instead</summary>
@@ -174,13 +199,15 @@ ln -s "$PWD/bin/omhc" ~/.local/bin/omhc
 
 </details>
 
-Wire up the hooks by **merging** the files under `hooks/` into your own
-config (don't overwrite it).
+Wire up the hooks by **merging** the fragment files into your own config
+(don't overwrite it). From a `curl \| sh` install they live under
+`~/.local/share/omhc/current/hooks/`; from a git checkout, under `hooks/`
+in the repo.
 
 | Harness | File | Target |
 |---|---|---|
-| Claude Code | `hooks/claude-settings.fragment.json` | `hooks` in `~/.claude/settings.json` |
-| Codex CLI | `hooks/codex-hooks.json` | `~/.codex/hooks.json` |
+| Claude Code | `claude-settings.fragment.json` | `hooks` in `~/.claude/settings.json` |
+| Codex CLI | `codex-hooks.json` | `~/.codex/hooks.json` |
 
 > [!WARNING]
 > Measured (codex-cli 0.155.1): a hand-dropped `hooks.json` is **not trusted
