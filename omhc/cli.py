@@ -249,15 +249,51 @@ def _unique_prefix_len(ids: List[str], minlen: int = 8) -> int:
     return n
 
 
+def _session_log_rank(key: str, state: str, home):
+    """`log` 의 세션 정렬 근거를 주는 랭크 함수.
+
+    최우선은 delivered.tsv 등장 순(due.delivered_order — last_delivered() 와
+    같은 소스라 log 의 끝이 `show '#N'` 의 기본 세션과 일치한다). 원장 첫
+    `start` 행 등장 순은 **못 쓴다** — mark 가 제 세션을 먼저 적고 나서
+    backfill 이 더 일찍 시작한 외래 세션을 뒤늦게 적으므로(cmd_mark), 마킹된
+    세션과 백필된 세션의 쌍마다 원장 등장 순이 실제 전달 순과 뒤집힌다(#18
+    리뷰 결함). 전달된 적 없는 세션(watch 로만 색인된 경우)은 원장 첫 start
+    행 순서로, 그것도 없으면 색인 파일명 순으로 결정적으로 둔다."""
+    delivered_rank = {sid: i for i, sid in enumerate(due.delivered_order(state))}
+    ledger_rank = {}
+    for i, row in enumerate(ledger.read(home=home, limit=0, repo_key=key)):
+        if row.get("event") != "start":
+            continue
+        session = row.get("session")
+        if session and session not in ledger_rank:
+            ledger_rank[session] = i
+    # 색인 파일명(=세션 id) 오름차순 — 위 두 근거가 다 없는 세션끼리도 흔들리지
+    # 않는 순서가 필요하다(_index_files 가 이미 그렇게 정렬해서 준다).
+    fallback_rank = {sid: n for n, sid in enumerate(_all_session_ids(state))}
+
+    def _rank(session):
+        if session in delivered_rank:
+            return (0, delivered_rank[session])
+        if session in ledger_rank:
+            return (1, ledger_rank[session])
+        return (2, fallback_rank.get(session, 0))
+
+    return _rank
+
+
 def cmd_log(args, *, home=None, out=sys.stdout) -> int:
     _root, key, state = _state_for(home)
     _record_pull(key, state, "log", home)
+    _session_rank = _session_log_rank(key, state, home)
+
     rows = []
     for path in _index_files(state):
         session = os.path.basename(path)[: -len(".idx")]
         for row in index.rows(path):
             rows.append((session, row))
-    rows.sort(key=lambda pair: (pair[1].epoch, pair[1].seq))
+    # 세션은 _session_log_rank 순, 세션 안에서는 색인 seq 순 — 타임스탬프는
+    # 순서의 근거로 쓰지 않는다(불변식 6, #18).
+    rows.sort(key=lambda pair: (_session_rank(pair[0]), pair[1].seq))
 
     if args.verb:
         rows = [r for r in rows if r[1].verb == args.verb]
