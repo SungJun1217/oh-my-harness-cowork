@@ -20,7 +20,10 @@ def _log_failure(home: Optional[str], detail: str) -> None:
     try:
         root = locate.omhc_root(home)
         os.makedirs(root, exist_ok=True)
-        with open(os.path.join(root, GUARD_LOG), "a", encoding="utf-8") as fh:
+        # 경로에 UTF-8 이 아닌 파일명이 섞이면(서로게이트) 쓰기가 UnicodeEncodeError
+        # (ValueError)로 터진다. 로그 한 줄 때문에 전달이 끊기면 안 된다.
+        with open(os.path.join(root, GUARD_LOG), "a", encoding="utf-8",
+                  errors="backslashreplace") as fh:
             fh.write("--- {}\n{}\n".format(time.strftime("%Y-%m-%dT%H:%M:%SZ"), detail))
     except OSError:
         pass
@@ -129,7 +132,12 @@ def compute(
 
     # 아카이브는 표식을 만든 뒤에 만든다 — 실패해도 표식은 나가야 한다.
     try:
-        pin.pin_session(state, ref)
+        pin_result = pin.pin_session_result(state, ref)
+        if not pin_result.linked:
+            # 조용히 넘기면 `omhc status` 의 archive 행이 핀 없이도 PASS 를
+            # 낸다(리뷰 결함) — 훅 경로의 유일한 실패 로그에 남겨야 사람이
+            # 원인을 알 수 있다. 여기서 던지면 안 되므로(invariant 2) 로그만.
+            _log_failure(home, "pin failed: {}".format(pin_result.error))
         # watch.sweep 과 같은 증분 규칙을 쓴다. 전부 다시 덧붙이면 데몬이 돌고
         # 있을 때 같은 이벤트가 두 번 색인되어 `omhc log` 가 중복을 보이고
         # `omhc show #N` 이 낡은 행을 가리킬 수 있다.

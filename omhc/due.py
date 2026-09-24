@@ -27,6 +27,19 @@ def is_off(state_dir: str) -> bool:
     return os.path.exists(os.path.join(state_dir, OFF_MARKER))
 
 
+def off_reason(state_dir: str) -> Optional[str]:
+    """켜져 있으면 None, 꺼져 있으면 무엇이 껐는지. is_off 와 같은 순서로 확인한다
+    — `omhc status` 가 "off" 를 FAIL 로 보이지 않으면서도 왜 꺼졌는지는 보여줘야
+    한다(끔은 사람이 의도한 상태일 수 있다)."""
+    val = os.environ.get(OFF_ENV, "").strip()
+    if val not in ("", "0", "false", "False"):
+        return "{}={}".format(OFF_ENV, val)
+    marker = os.path.join(state_dir, OFF_MARKER)
+    if os.path.exists(marker):
+        return "marker {}".format(marker)
+    return None
+
+
 def _delivered_path(state_dir: str) -> str:
     return os.path.join(state_dir, DELIVERED_NAME)
 

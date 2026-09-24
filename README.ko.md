@@ -150,7 +150,7 @@ Codex 자신의 훅이 신뢰된 적이 없어도 그 세션이 원장에 남습
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
-omhc status          # 게이트된 검사 5개(+ 설치 시 codex hook) 전부 PASS/FAIL. SKIP 은 없다
+omhc status          # 모든 행이 PASS/FAIL/---- 중 하나(+ 설치 시 codex hook). SKIP 은 없다
 ```
 
 최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
@@ -214,11 +214,13 @@ git 체크아웃이라면 레포의 `hooks/` 아래에 있습니다.
 > `additionalContext`)는 codex-cli 0.155.1에서 `hook: SessionStart Failed`로
 > 거부되고 아무것도 주입되지 않습니다.
 
-`omhc status`는 게이트된 검사 5개(adapters/ledger/archive/off switch/
-instruction files, 전부 PASS/FAIL)와 정보성 행 2개(pull rate, watcher)를
-보여줍니다. omhc Codex 훅이 설치돼 있으면 `codex hook` 행이 붙습니다. 훅 설치 뒤
-이 레포의 가장 최근 Codex 세션이 훅을 한 번도 돌리지 않았으면(신뢰되지 않은 훅)
-FAIL 이고, 그 세션의 originator 를 함께 보여줍니다.
+`omhc status`의 모든 행은 세 라벨 중 하나입니다: 실제로 판정되어 exit code 를
+게이팅할 수 있는 **PASS**/**FAIL**(adapters, archive, instruction files,
+`codex hook` 같은 어댑터 health 행), 그리고 정보성이거나 아직 판단할 근거가
+없는 행을 위한 **`----`**(ledger, off switch, pull rate, watcher) — `----`
+는 게이팅하지 않습니다. omhc Codex 훅이 설치돼 있으면 `codex hook` 행이
+붙습니다. 훅 설치 뒤 이 레포의 가장 최근 Codex 세션이 훅을 한 번도 돌리지
+않았으면(신뢰되지 않은 훅) FAIL 이고, 그 세션의 originator 를 함께 보여줍니다.
 
 ### AGENTS.md 를 Claude Code 와 공유하는 레포
 

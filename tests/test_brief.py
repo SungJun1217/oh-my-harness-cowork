@@ -6,8 +6,9 @@ import os
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
-from omhc import brief, deliver, ledger
+from omhc import brief, deliver, ledger, locate, pin
 
 from . import _repo
 from omhc.adapter import Capability, HandoffBundle
@@ -119,6 +120,25 @@ class TestCompute(unittest.TestCase):
         self.assertTrue(os.path.exists(pinned), "하드링크가 없다")
         self.assertEqual(os.stat(path).st_ino, os.stat(pinned).st_ino)
         self.assertTrue(os.path.exists(idx), "색인이 없다")
+
+    def test_pin_failure_is_logged_but_the_hook_still_succeeds(self):
+        """리뷰 결함: pin 실패를 조용히 넘기면 `omhc status` 의 archive 행이
+        아무 흔적 없이 거짓 PASS 를 낸다. 훅 경로(invariant 2)이므로 로그만
+        남기고 exit 0/핸드오프 본문은 그대로여야 한다."""
+        self.h.plant_codex_session()
+        broken = pin.PinResult(None, False, 0, "mocked pin failure")
+        stdin = json.dumps({"session_id": "me1", "cwd": self.h.repo_root})
+        with mock.patch.object(pin, "pin_session_result", return_value=broken):
+            out = io.StringIO()
+            code = brief.emit(harness="claude-code", stdin_text=stdin,
+                              home=self.h.home, now=NOW, out=out)
+        self.assertEqual(code, 0)
+        self.assertIn("[omhc]", out.getvalue())
+
+        guard_log = os.path.join(locate.omhc_root(self.h.home), brief.GUARD_LOG)
+        with open(guard_log, encoding="utf-8") as fh:
+            content = fh.read()
+        self.assertIn("pin failed: mocked pin failure", content)
 
     def test_notes_are_included(self):
         self.h.plant_codex_session()
@@ -379,3 +399,12 @@ class TestWireFormat(unittest.TestCase):
             self.assertIn(wire, ("claude", "cursor", "sdk"), adapter_id)
             payload = json.loads(brief.hook_wire("x", wire))
             self.assertEqual(len(payload), 1, adapter_id)
+
+
+class TestLogFailureNeverRaises(unittest.TestCase):
+    def test_a_non_utf8_filename_in_the_detail_is_logged_not_raised(self):
+        with tempfile.TemporaryDirectory() as home:
+            brief._log_failure(home, "pin failed: source missing: /x/\udcff.jsonl")
+            with open(os.path.join(locate.omhc_root(home), brief.GUARD_LOG),
+                      encoding="utf-8") as fh:
+                self.assertIn("\\udcff", fh.read())
