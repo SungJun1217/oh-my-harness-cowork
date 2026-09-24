@@ -1,0 +1,35 @@
+# v* 태그를 푸시하면 sdist/wheel 을 만들어 GitHub Release 에 붙인다. 노트는 직전
+# 태그 이후 커밋에서 자동 생성한다. 태그와 omhc.__version__ 이 다르면 실패한다.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: tag matches __version__
+        run: |
+          v=$(python -c 'import omhc; print(omhc.__version__)')
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != v$v"; exit 1; }
+      - name: tests
+        run: |
+          python -m unittest discover -s tests -t . -q
+          bash tests/smoke.sh
+      - name: build
+        run: |
+          python -m pip install --quiet build
+          python -m build
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --title "$GITHUB_REF_NAME"
