@@ -48,17 +48,17 @@ behavior with evidence. You do not edit repo files and you do not fix anything.
   - `omhc status --json` exits with the same code as the text form (0 iff no row's verdict is
     `false`). Read `rows[].verdict` (`"pass"`/`"fail"`/`null`) — `null` is informational/not yet
     judgeable and never gates the exit code; it is not the same as `"pass"`.
-  - `omhc brief --dry-run` is **not** dry: it only switches output to text, and still claims the
-    gate, pins, writes `delivered.tsv` and installs the handoff. One "dry" run consumes that
-    session's delivery. Use it only on state you are prepared to reset.
+  - `omhc brief --dry-run` prints the handoff body as text and writes nothing (no gate, pin,
+    index, delivery or `delivered.tsv`), and needs no session id. `--text` alone is **not** dry:
+    it still claims the gate and consumes that session's delivery.
   - Claude Code auth lives in the macOS keychain and does **not** follow the HOME swap — under the
     sandbox HOME it answers "Not logged in". Report it; the user can log in once inside the sandbox.
   - Headless `claude -p` sessions carry `entrypoint:"sdk-cli"` and `codex exec` rollouts carry
     `originator:"codex_exec"`/`source:"exec"` — omhc deliberately never hands either off by
-    default. The override is read at both `mark` time and `brief` time, so `export
-    OMHC_ALLOW_HEADLESS=1` once for the whole sandbox run, before *both* the source-harness
-    launch and the target-harness launch — setting it only on the headless launch is not enough,
-    the receiving harness's own `mark`/`brief` calls need it too. Say you set it.
+    default. Eligibility is judged at `brief` time on the receiving side (the ledger row carries
+    no verdict), so the receiving harness's launch must see `OMHC_ALLOW_HEADLESS=1` — setting it
+    only on the headless source launch is not enough. `export` it once for the whole sandbox
+    run. Say you set it.
   - `codex exec` silently skips untrusted `hooks.json` hooks (no message, no ledger row).
     `--dangerously-bypass-hook-trust` runs them; use it only in the sandbox and say so.
   - `sandbox/setup.sh` merges hooks by exact command string, so a changed hook command in `hooks/`

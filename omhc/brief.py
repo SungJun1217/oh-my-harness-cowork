@@ -60,6 +60,11 @@ def _ref_for(adapter, watermark, repo_root: str):
         ref = adapter.ref_for_path(watermark.path, watermark.session_id, repo_root)
         if ref is not None:
             return [ref]
+        if os.path.exists(watermark.path):
+            # 파일이 있는데 어댑터가 거절했다 — 헤드리스·서브에이전트 세션이다.
+            # 스캔으로 떨어지면 결론은 같은데 249ms 를 쓴다. due 가 원장의 부적격
+            # 행마다 이 함수를 부르므로 여기서 멈춰야 한다.
+            return []
     # 원장에 경로가 없거나 그 파일이 사라졌을 때만 전체 스캔으로 떨어진다.
     return [r for r in adapter.list_sessions(repo_root)
             if r.session_id == watermark.session_id]
@@ -98,8 +103,13 @@ def compute(
     now: Optional[float] = None,
     budget: int = mint.BUDGET,
     force: bool = False,
+    dry_run: bool = False,
 ) -> str:
     """전달할 표식 본문. 보낼 것이 없으면 빈 문자열.
+
+    dry_run 이면 본문만 만들고 아무것도 쓰지 않는다 — 게이트·아카이브·전달·
+    delivered 기록을 모두 건너뛴다. 수동 확인 한 번이 그 세션의 전달을 소비하면
+    다음 실제 SessionStart 에 아무것도 가지 않는다(#17).
 
     이 함수는 예외를 던질 수 있다 — 호출자(run)가 감싼다. 테스트는 여기를 직접
     불러 실패를 볼 수 있어야 한다.
@@ -108,12 +118,30 @@ def compute(
     key = locate.repo_key(repo_root)
     state = locate.state_dir(key, home=home)
 
-    watermark = due.due(key, my_harness, my_session_id, stamp, home=home)
+    # 적격성은 brief 시점에 어댑터가 판정한다(#21). 세션을 고르는 판정이 곧
+    # 여는 판정이므로 결과를 받아 두었다가 그대로 쓴다.
+    found = {}
+
+    def eligible(mark) -> bool:
+        adapter = adapters.get(mark.harness, home=home)
+        refs = _ref_for(adapter, mark, repo_root)
+        found[mark.session_id] = (adapter, refs)
+        if refs:
+            return True
+        # 건너뛰는 것은 어댑터가 헤드리스·서브에이전트라고 확실히 판정한 경우
+        # 뿐이다. 파일이 사라졌거나, 비었거나, 모르는 모양이면 여기서 멈춘다 —
+        # 그 앞으로 가면 사용자가 이어서 작업한 세션을 두고 그 전날 세션이
+        # "방금 일"로 나가고, 그런 행마다 전체 스캔(249ms)이 돈다.
+        if not (mark.path and os.path.exists(mark.path)):
+            return True
+        return adapter.classify(mark.path)
+
+    watermark = due.due(key, my_harness, my_session_id, stamp, home=home,
+                        eligible=eligible)
     if watermark is None:
         return ""
 
-    adapter = adapters.get(watermark.harness, home=home)
-    refs = _ref_for(adapter, watermark, repo_root)
+    adapter, refs = found[watermark.session_id]
     if not refs:
         return ""
 
@@ -125,6 +153,9 @@ def compute(
         # 보낼 것이 없으면 게이트를 쓰지 않는다. 첫 발동이 빈손으로 슬롯을
         # 태우면 밀리초 뒤에 데이터가 도착해도 그 세션은 영구히 못 받는다.
         return ""
+
+    if dry_run:
+        return body
 
     if not force and not gate.claim(state, my_harness, my_session_id):
         # 실측: SessionStart 훅이 한 세션에서 6회 발동했다.
@@ -142,8 +173,7 @@ def compute(
         # 있을 때 같은 이벤트가 두 번 색인되어 `omhc log` 가 중복을 보이고
         # `omhc show #N` 이 낡은 행을 가리킬 수 있다.
         idx = os.path.join(state, "index", ref.session_id + ".idx")
-        seen = index.last_seq(idx)
-        index.append_rows(idx, [e for e in read.events if e.seq > seen])
+        index.append_new(idx, read.events)
         index.write_refs(state, ref, mint.failure_tags(read))
     except OSError as exc:
         _log_failure(home, "archive failed: {}".format(exc))
@@ -174,6 +204,7 @@ def emit(
     wire: str = "",
     force: bool = False,
     as_text: bool = False,
+    dry_run: bool = False,
     home: Optional[str] = None,
     now: Optional[float] = None,
     out=None,
@@ -205,6 +236,7 @@ def emit(
             now=now,
             budget=budget,
             force=force,
+            dry_run=dry_run,
         )
         if not body:
             return 0
@@ -213,7 +245,7 @@ def emit(
             _log_failure(home, "body exceeded budget at print time; suppressed")
             return 0
         chosen = wire or _wire_for(harness, home)
-        stream.write(body if as_text else hook_wire(body, chosen) + "\n")
+        stream.write(body if as_text or dry_run else hook_wire(body, chosen) + "\n")
         return 0
     except Exception:
         _log_failure(home, traceback.format_exc())

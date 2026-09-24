@@ -120,6 +120,19 @@ class TestHooksInstallCli(unittest.TestCase):
         self.assertTrue(os.path.exists(settings))  # 그래도 파일은 실제로 쓰였다
 
 
+class TestHooksNoAction(unittest.TestCase):
+    """#19: 동작 없이 `omhc hooks` 만 부르면 argparse 관례대로 사용법은
+    stderr 로, exit 2 로 간다."""
+
+    def test_no_action_prints_usage_to_stderr_and_exits_2(self):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = cli.cmd_hooks(cli.build_parser().parse_args(["hooks"]), out=out, err=err)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("usage:", err.getvalue())
+
+
 class TestHooksFreshUser(unittest.TestCase):
     """curl 설치 직후, 어느 하네스도 아직 한 번도 안 돌아 `detect()` 가 보는
     세션 디렉터리(`~/.claude/projects`, `~/.codex/sessions`)가 없는 상태
@@ -273,6 +286,23 @@ class TestInstallShParity(unittest.TestCase):
             {"hooks": []},
             {"hooks": [{"type": "command", "command": "echo hello"}]},
         ]}})
+
+    def test_only_omhc_hooks_drops_the_hooks_key_entirely(self):
+        # #20: SessionStart 가 omhc 훅뿐이면, 지우고 나서 hooks 가 빈 객체로
+        # 남는 게 아니라 hooks 키 자체가 사라져야 한다 — 두 판정이 같이 그런다.
+        conf = {"hooks": {"SessionStart": [
+            {"hooks": [
+                {"type": "command", "command": "$HOME/.local/bin/omhc mark --harness claude-code"},
+                {"type": "command", "command": "$HOME/.local/bin/omhc brief --harness claude-code --wire claude"},
+            ]},
+        ]}}
+        got_sh, changed_sh = self._run_install_sh(json.loads(json.dumps(conf)))
+        got_py, changed_py = self._run_hookconf_strip(json.loads(json.dumps(conf)))
+        self.assertTrue(changed_sh)
+        self.assertTrue(changed_py)
+        self.assertEqual(got_sh, {})
+        self.assertEqual(got_py, {})
+        self._assert_parity(conf)
 
 
 if __name__ == "__main__":

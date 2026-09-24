@@ -186,6 +186,22 @@ class TestEndToEnd(unittest.TestCase):
         oldest = "cx0"
         self.assertNotIn(oldest, {r["session"] for r in rows})
 
+    def test_two_sessions_starting_in_the_same_whole_second_both_land(self):
+        """#22: session_meta.timestamp 는 초 단위다. 첫 mark 가 세션 하나를
+        채워 그 epoch 가 newest_start 가 된 뒤, 같은 초에 시작한 **다른**
+        세션이 두 번째 mark 에서 `<=` 비교에 걸려 사라지면 안 된다 — id 가
+        다르면 이미 아는 세션이 아니다."""
+        now = time.time()
+        same_second = now - 500
+        self.h.plant("cx-a", same_second)
+        self.h.mark()
+        self.assertEqual([r["session"] for r in self.h.scan_rows()], ["cx-a"])
+
+        self.h.plant("cx-b", same_second + 0.4)  # 같은 초 → 같은 ISO 문자열
+        self.h.mark()
+        sessions = {r["session"] for r in self.h.scan_rows()}
+        self.assertEqual(sessions, {"cx-a", "cx-b"})
+
     def test_sessions_from_a_nested_child_repo_are_not_backfilled(self):
         """Claude 가 `.git` 없는 부모 디렉터리에서 열리면, discover() 의
         equal-or-descendant 판정이 그 아래 **자기 `.git`을 가진 자식** 레포의
@@ -278,7 +294,7 @@ class TestEndToEnd(unittest.TestCase):
         hooks_path = os.path.join(hooks_dir, "hooks.json")
         with open(hooks_path, "w", encoding="utf-8") as fh:
             json.dump({"hooks": {"SessionStart": [
-                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+                {"hooks": [{"type": "command", "command": "omhc brief --harness codex-cli"}]}]}}, fh)
         install_epoch = now - 3600
         os.utime(hooks_path, (install_epoch, install_epoch))
         self.h.plant("cx1", now - 600)  # install 이후 시작

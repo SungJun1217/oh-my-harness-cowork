@@ -181,6 +181,44 @@ class TestSafeScopedByProvenance(unittest.TestCase):
         self.assertFalse(guard.safe(body, "agent"))
 
 
+class TestHandoffEcho(unittest.TestCase):
+    """#24: 받는 에이전트가 주입된 [omhc] 블록을 인용하면 반대 방향 핸드오프의
+    PLAN? 에 그 블록이 통째로 중첩된다. 진짜 mint() 산출물로 재현한다 — 헤더
+    문구를 손으로 베껴 쓰면 mint 가 실제로 내는 것과 어긋날 수 있다.
+    """
+
+    def _real_handoff_block(self) -> str:
+        from omhc import adapter as A
+        from omhc import mint
+        from omhc.event import Event
+
+        ref = A.SessionRef(
+            adapter_id="claude-code", session_id="01a0c9f4-06aa-72d0",
+            source_path="/x.jsonl", cwd="/repo", epoch=1700000000.0, size=100,
+        )
+        events = [
+            Event(seq=1, epoch=1700000000.0, author="human", verb="said", ok=True,
+                  text="로그인 버그 고쳐줘", arg="", paths=(), offset=0, length=10),
+        ]
+        read = A.SessionRead(ref=ref, events=tuple(events), unparsed=0, dropped={})
+        out = mint.mint(read, to_adapter_id="codex-cli", budget=900, now=1700000900.0)
+        self.assertTrue(out, "테스트가 재현하려면 mint() 가 실제로 뭔가를 내야 한다")
+        return out
+
+    def test_agent_utterance_quoting_a_real_minted_block_is_dropped(self):
+        block = self._real_handoff_block()
+        quoted = "이전 세션 요약을 받았다:\n\n" + block + "\n\n계속 진행하겠습니다."
+        self.assertFalse(guard.safe(quoted, "agent"))
+
+    def test_agent_mentioning_omhc_in_passing_is_kept(self):
+        self.assertTrue(guard.safe("the [omhc] tool을 써서 컨텍스트를 넘겼다", "agent"))
+
+    def test_human_pasting_the_block_is_still_human(self):
+        """사람이 블록을 그대로 붙여 넣어도 사람의 발화라는 사실은 바뀌지 않는다."""
+        block = self._real_handoff_block()
+        self.assertTrue(guard.safe(block, "human"))
+
+
 class TestRedaction(unittest.TestCase):
     def test_long_base64_runs_are_redacted(self):
         blob = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5" * 4

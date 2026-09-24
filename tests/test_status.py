@@ -172,11 +172,90 @@ class TestStatusRows(unittest.TestCase):
         code, text = self.run_status()
         word, detail = _find_row(text, "pull rate")
         self.assertEqual(word, "----")
-        self.assertIn("pulled 1 of 2 injections", detail)
+        self.assertIn("pulled 1 of 2 recent injections", detail)
 
         code_json, payload = self.run_status_json()
         self.assertEqual(payload["pulls"], 1)
         self.assertEqual(payload["injections"], 2)
+        self.assertEqual(payload["recent_injections"], 2)
+        self.assertEqual(payload["pull_rate_window"], cli.PULL_RATE_WINDOW)
+
+    def test_pull_rate_windows_the_denominator_to_the_most_recent_injections(self):
+        """#25: 분모를 delivered.tsv 전체로 두면 한 레포를 오래 쓸수록 옛
+        전달이 영원히 분모에 남아 인출률이 서서히 낮아 보인다. 최근
+        PULL_RATE_WINDOW 개 전달만 분모로 삼아야 한다."""
+        os.makedirs(self.t.state, exist_ok=True)
+        from omhc import ledger
+
+        window = cli.PULL_RATE_WINDOW
+        with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",
+                  encoding="utf-8") as fh:
+            # 창보다 오래된 전달 하나 — 실제로 인출됐지만 분모·분자 모두에서
+            # 빠져야 한다.
+            fh.write("old\tclaude-code\tcodex-cli\t1700000000\n")
+            for i in range(window):
+                fh.write("s{}\tclaude-code\tcodex-cli\t{}\n".format(i, 1700000001 + i))
+        ledger.append({"repo": self.t.key, "event": "pull", "via": "show",
+                       "session": "old", "epoch": 1700000002}, home=self.t.home)
+        ledger.append({"repo": self.t.key, "event": "pull", "via": "show",
+                       "session": "s0", "epoch": 1700000003}, home=self.t.home)
+
+        code, text = self.run_status()
+        word, detail = _find_row(text, "pull rate")
+        self.assertEqual(word, "----")
+        self.assertIn("pulled 1 of {} recent injections (window {})".format(
+            window, window), detail)
+
+        code_json, payload = self.run_status_json()
+        self.assertEqual(payload["injections"], window + 1)
+        self.assertEqual(payload["recent_injections"], window)
+        self.assertEqual(payload["recent_pulls"], 1)
+        # `pulls` 는 전체 기간 값 그대로다 — `pulls / injections` 가 뜻을 잃지 않게.
+        self.assertEqual(payload["pulls"], 2)
+
+    def test_status_reads_the_ledger_exactly_once(self):
+        """#25: repo_key 로 한 번, health 용 limit=0 으로 한 번 — 총 두 번
+        읽던 것을 한 번으로 합쳤다."""
+        from omhc import ledger
+
+        real_read = ledger.read
+        calls = []
+
+        def counting(*a, **kw):
+            calls.append(kw)
+            return real_read(*a, **kw)
+
+        with mock.patch.object(cli.ledger, "read", side_effect=counting):
+            code, _text = self.run_status()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1, calls)
+        self.assertEqual(calls[0].get("limit"), 0)
+        self.assertNotIn("repo_key", calls[0])
+
+    def test_status_ledger_row_count_matches_reading_with_the_repo_filter_directly(self):
+        """한 번 읽고 메모리에서 거른 결과가 `read(repo_key=key)` 를 직접
+        부른 것과 같아야 한다(필터가 limit 보다 먼저 적용되는 규칙까지)."""
+        from omhc import ledger
+
+        for i in range(5):
+            ledger.append({"repo": "other-repo", "harness": "claude",
+                           "session": "o{}".format(i), "event": "start"},
+                          home=self.t.home)
+        for i in range(3):
+            ledger.append({"repo": self.t.key, "harness": "claude",
+                           "session": "m{}".format(i), "event": "start"},
+                          home=self.t.home)
+        with mock.patch.object(cli.ledger, "DEFAULT_LIMIT", 2):
+            code, text = self.run_status()
+            code_json, payload = self.run_status_json()
+        expected = ledger.read(home=self.t.home, repo_key=self.t.key, limit=2)
+        self.assertEqual(code, 0)
+        self.assertEqual(code_json, code)
+        word, detail = _find_row(text, "ledger")
+        self.assertEqual(word, "----")
+        self.assertIn("{} rows for this repo".format(len(expected)), detail)
+        self.assertEqual(payload["ledger_rows"], len(expected))
+        self.assertEqual([r["session"] for r in expected], ["m1", "m2"])
 
     def test_hooks_row_passes_when_the_shipped_fragment_is_installed(self):
         """setUp 이 이미 claude-code 훅을 심어 둔다 — 여기서는 그 행이 실제로
@@ -242,6 +321,12 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(row["verdict"], "fail")
         self.assertIn("is not a project root", payload["refused"])
         self.assertIsNone(payload["orphaned_state"])
+        # #19: 정상 경로와 같은 최상위 키 집합 — 값은 비어 있어도 소비자가
+        # `/` 에서만 KeyError 로 죽지 않는다. 목록을 손으로 적지 않고 정상
+        # 경로의 실제 출력과 비교한다(손 목록은 #25 의 새 키를 놓쳤다).
+        os.chdir(self.t.root)
+        _code, normal = self.run_status_json()
+        self.assertEqual(set(normal) - set(payload), set())
 
     def test_status_at_slash_reports_an_orphaned_state_dir_in_text_and_json(self):
         from omhc import locate

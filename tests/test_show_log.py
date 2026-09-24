@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 import unittest
 
 from omhc import cli, due, index
 from omhc.event import Event
 
-from ._repo import TempRepo
+from ._repo import REPO, TempRepo
 
 
 def _write_idx(state: str, session_id: str, rows) -> None:
@@ -98,11 +99,13 @@ class TestShowSeqRef(unittest.TestCase):
         _write_idx(self.t.state, "aaaaaaaa2222", [(1, "said", "y")])
         code, out, err = self._show("aaaaaaaa#1")
         self.assertEqual(code, 1)
-        self.assertIn("ambiguous", out)
+        # 오류는 stdout 이 아니라 stderr 로 간다(#19) — exit code 는 1 그대로.
+        self.assertEqual(out, "")
+        self.assertIn("ambiguous", err)
         # 후보는 축약하지 않고 전체 id 로 보여준다 — 접두사로 줄이면 그 자체가
         # 다시 모호해질 수 있다(리뷰 결함).
-        self.assertIn("aaaaaaaa1111", out)
-        self.assertIn("aaaaaaaa2222", out)
+        self.assertIn("aaaaaaaa1111", err)
+        self.assertIn("aaaaaaaa2222", err)
 
     def test_ambiguous_prefix_lists_full_ids_even_when_they_share_13_chars(self):
         """13자는 표시상 선호일 뿐이다 — 그 안에서 안 갈리는 두 id 를 후보로 줄여
@@ -113,14 +116,14 @@ class TestShowSeqRef(unittest.TestCase):
         _write_idx(self.t.state, long_b, [(1, "said", "y")])
         code, out, err = self._show("aaaaaaaaaaaaa#1")
         self.assertEqual(code, 1)
-        self.assertIn(long_a, out)
-        self.assertIn(long_b, out)
+        self.assertIn(long_a, err)
+        self.assertIn(long_b, err)
 
     def test_no_default_session_gives_a_hint_not_a_crash(self):
         _write_idx(self.t.state, "aaaaaaaa1111", [(1, "said", "x")])
         code, out, err = self._show("#1")
         self.assertEqual(code, 1)
-        self.assertIn("no default session", out)
+        self.assertIn("no default session", err)
 
     def test_default_session_delivered_but_not_indexed_gives_a_distinct_hint(self):
         """#N 힌트가 "아무것도 전달된 적 없다" 와 "전달은 됐는데 색인이 아직
@@ -128,8 +131,43 @@ class TestShowSeqRef(unittest.TestCase):
         _mark_delivered(self.t.state, "not-indexed-yet")
         code, out, err = self._show("#1")
         self.assertEqual(code, 1)
-        self.assertIn("not-indexed-yet", out)
-        self.assertNotIn("no default session", out)
+        self.assertIn("not-indexed-yet", err)
+        self.assertNotIn("no default session", err)
+
+
+class TestShowRealStdoutIsRawBytes(unittest.TestCase):
+    """#19: 진짜 stdout(`.buffer` 가 있는 스트림)에는 원본 바이트를 그대로
+    쓴다 — 잘못된 UTF-8 을 U+FFFD 로 바꾸지 않고, 없는 줄바꿈도 붙이지 않는다.
+    io.StringIO 로는 이 경로를 확인할 수 없어 실제 바이너리를 서브프로세스로
+    돈다. 오류는 stderr 로, exit code 는 1 로 간다."""
+
+    def setUp(self):
+        self.t = TempRepo()
+        self.addCleanup(self.t.close)
+
+    def _run(self, target, extra=()):
+        return subprocess.run(
+            [os.path.join(REPO, "bin", "omhc"), "show", target] + list(extra),
+            cwd=self.t.root, env=self.t.env, capture_output=True)
+
+    def test_invalid_utf8_and_missing_trailing_newline_survive_unchanged(self):
+        os.makedirs(self.t.state, exist_ok=True)
+        body = b'{"broken":"\xff\xfe no newline here"}'
+        source = os.path.join(self.t.state, "source.jsonl")
+        with open(source, "wb") as fh:
+            fh.write(body)
+        with open(os.path.join(self.t.state, index.REFS_NAME), "w", encoding="utf-8") as fh:
+            fh.write("\t".join(("E1", "s1", source, "0", str(len(body)), "1")) + "\n")
+
+        proc = self._run("E1")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout, body)
+
+    def test_error_goes_to_stderr_and_stdout_stays_empty(self):
+        proc = self._run("E404")
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, b"")
+        self.assertIn(b"unknown reference", proc.stderr)
 
 
 class TestLogRefsAndSaidPreview(unittest.TestCase):
@@ -181,6 +219,120 @@ class TestLogRefsAndSaidPreview(unittest.TestCase):
         refs = [line.split()[0] for line in out.strip().splitlines()]
         sessions = [r.split("#")[0] for r in refs]
         self.assertEqual(len(sessions), len(set(sessions)))
+
+    def test_rows_within_a_session_order_by_seq_even_when_epoch_goes_backwards(self):
+        """불변식 6: 타임스탬프는 순서의 근거가 아니다(#18). 같은 세션 안에서
+        epoch 이 뒤로 가도 색인에 적힌 seq 순서를 지켜야 한다."""
+        idx_dir = os.path.join(self.t.state, "index")
+        os.makedirs(idx_dir, exist_ok=True)
+        events = [
+            Event(seq=1, epoch=1700000500.0, author="human", verb="said",
+                  ok=True, text="first", arg="first", paths=(), offset=0, length=5),
+            Event(seq=2, epoch=1700000100.0, author="human", verb="said",
+                  ok=True, text="second", arg="second", paths=(), offset=5, length=6),
+        ]
+        index.append_rows(os.path.join(idx_dir, "aaaaaaaa1111.idx"), events)
+        code, out = self._log()
+        self.assertEqual(code, 0)
+        lines = out.strip().splitlines()
+        self.assertIn("first", lines[0])
+        self.assertIn("second", lines[1])
+
+    def test_sessions_order_by_ledger_append_order_not_epoch(self):
+        """세션 순서는 원장에 `start` 행이 적힌 순서다 — 한 세션의 epoch 이
+        다른 세션보다 늦게 시작한 것처럼 찍혀 있어도 원장 등장 순서를 따른다."""
+        from omhc import ledger
+
+        _write_idx(self.t.state, "bbbbbbbb2222", [(1, "said", "second-session")])
+        _write_idx(self.t.state, "aaaaaaaa1111", [(1, "said", "first-session")])
+        # aaaaaaaa1111 이 원장엔 먼저 적혔지만 epoch 은 더 크다(뒤로 간 타임스탬프).
+        ledger.append({"repo": self.t.key, "harness": "codex-cli",
+                       "session": "aaaaaaaa1111", "event": "start",
+                       "epoch": 2000000000.0, "path": "x", "cwd": self.t.root},
+                      home=self.t.home)
+        ledger.append({"repo": self.t.key, "harness": "claude-code",
+                       "session": "bbbbbbbb2222", "event": "start",
+                       "epoch": 1000000000.0, "path": "y", "cwd": self.t.root},
+                      home=self.t.home)
+        code, out = self._log()
+        self.assertEqual(code, 0)
+        lines = out.strip().splitlines()
+        self.assertIn("first-session", lines[0])
+        self.assertIn("second-session", lines[1])
+
+    def test_log_ends_on_the_last_delivered_session_despite_mark_then_backfill_ledger_order(self):
+        """리뷰 결함(#18): `cmd_mark` 는 제 세션(C)을 원장에 먼저 적고,
+        `_backfill_foreign_sessions` 는 더 일찍 시작한 외래 세션(X)을 뒤늦게
+        `via:"scan"` 으로 적는다 — 원장 등장 순은 C, X 지만 실제 전달 순서
+        (delivered.tsv)는 X, C 다. 원장 등장 순으로 랭크하면 C/X 쌍마다
+        뒤집혀 log 의 끝이 `show '#N'` 의 기본 세션(due.last_delivered)과
+        어긋나고 `--last N` 이 C 의 최신 줄 대신 X 의 옛 줄을 남긴다."""
+        from omhc import ledger
+
+        _write_idx(self.t.state, "cccccccc1111", [(1, "said", "c-old"), (2, "said", "c-new")])
+        _write_idx(self.t.state, "xxxxxxxx2222", [(1, "said", "x-event")])
+
+        # mark: C 를 먼저 원장에 적는다.
+        ledger.append({"repo": self.t.key, "harness": "claude-code",
+                       "session": "cccccccc1111", "event": "start",
+                       "epoch": 2000000000.0, "path": "c", "cwd": self.t.root},
+                      home=self.t.home)
+        # backfill: X 는 더 일찍 시작했지만 원장엔 뒤늦게 via:"scan" 으로 적힌다.
+        ledger.append({"repo": self.t.key, "harness": "codex-cli",
+                       "session": "xxxxxxxx2222", "event": "start",
+                       "epoch": 1000000000.0, "path": "x", "cwd": self.t.root,
+                       "via": "scan"}, home=self.t.home)
+
+        # 실제 전달 순서는 원장 등장 순과 반대다: X 먼저, C 가 가장 최근.
+        _mark_delivered(self.t.state, "xxxxxxxx2222")
+        _mark_delivered(self.t.state, "cccccccc1111")
+
+        code, out = self._log()
+        self.assertEqual(code, 0)
+        lines = out.strip().splitlines()
+        self.assertIn("x-event", lines[0])
+        self.assertIn("c-old", lines[1])
+        self.assertIn("c-new", lines[2])
+
+        from omhc import due
+        self.assertEqual(due.last_delivered(self.t.state), "cccccccc1111")
+
+        code, out = self._log(["--last", "2"])
+        self.assertEqual(code, 0)
+        lines2 = out.strip().splitlines()
+        self.assertEqual(len(lines2), 2)
+        self.assertNotIn("x-event", out)
+        self.assertIn("c-old", lines2[0])
+        self.assertIn("c-new", lines2[1])
+
+    def test_sessions_without_a_ledger_row_sort_after_ledgered_ones(self):
+        """색인은 있는데 원장에 `start` 행이 없는 세션(예: 백필 전)은 순서를
+        판단할 근거가 없다 — 등장 순 세션 뒤로, 파일명 순으로 결정적으로 둔다."""
+        from omhc import ledger
+
+        _write_idx(self.t.state, "aaaaaaaa1111", [(1, "said", "ledgered")])
+        _write_idx(self.t.state, "zzzzzzzz9999", [(1, "said", "no-ledger-row")])
+        ledger.append({"repo": self.t.key, "harness": "codex-cli",
+                       "session": "aaaaaaaa1111", "event": "start",
+                       "epoch": 1000000000.0, "path": "x", "cwd": self.t.root},
+                      home=self.t.home)
+        code, out = self._log()
+        self.assertEqual(code, 0)
+        lines = out.strip().splitlines()
+        self.assertIn("ledgered", lines[0])
+        self.assertIn("no-ledger-row", lines[1])
+
+
+class TestDeliveredOrder(unittest.TestCase):
+    def test_a_session_redelivered_later_ranks_by_its_last_delivery(self):
+        """last_delivered 와 같은 기준이라야 log 의 끝과 show 의 기본 세션이 같다."""
+        import tempfile
+        from omhc import due
+        with tempfile.TemporaryDirectory() as state:
+            with open(os.path.join(state, due.DELIVERED_NAME), "w", encoding="utf-8") as fh:
+                fh.write("S\ta\tx\t1\nT\tb\tx\t2\nS\tc\tx\t3\n")
+            self.assertEqual(due.delivered_order(state), ["T", "S"])
+            self.assertEqual(due.last_delivered(state), "S")
 
 
 if __name__ == "__main__":

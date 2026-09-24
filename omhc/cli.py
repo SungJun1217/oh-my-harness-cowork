@@ -18,6 +18,10 @@ PROG = "omhc"
 NOTES_NAME = "notes.txt"
 ARTIFACT_NAME = "omhc.txt"
 
+# pull rate 가 보는 "최근 전달" 창(§9, #25). 분모를 delivered.tsv 전체로 두면
+# 오래된 전달이 영원히 분모에 남아 인출률이 서서히 낮아 보인다.
+PULL_RATE_WINDOW = 20
+
 
 def _stdin_text() -> str:
     try:
@@ -42,6 +46,17 @@ def _state_for(home: Optional[str], start: Optional[str] = None):
 # 쪽 훅이 멀쩡히 돌아도 Codex→Claude 가 죽는다. 그래서 **Claude 의** mark 가
 # 얹혀서 다른 하네스(Codex)의 세션을 원장에 채운다 — due() 자체는 안 바뀐다.
 BACKFILL_CAP = 5
+# #22: cap 을 넘는 초과분과, discover() 의 시간 예산에 밀려 못 본 나머지는
+# 이후 어떤 mark 도 다시 채우지 않는다 — 다음 호출의 newest_start 가 이미
+# 이번에 고른 것 중 가장 최근 것이라 그보다 오래된 미채움 세션은 "원장의
+# 최신 start 보다 오래됨" 판정에 영영 걸린다. 그런데도 무해한 건 두 가지가
+# 겹쳐서다: due() 는 가장 최근 자격 있는 외래 세션 하나만 보면 되고,
+# discover() 는 brief 의 eligible(#21)과 **같은** 헤드리스 필터
+# (allow_headless())를 쓴다 — 그래서 보통 discover() 가 채우는 것과 due() 가
+# 원하는 것이 같은 집합이다. 유일하게 깨지는 경우는 mark 시점과 이후 brief
+# 시점 사이에 OMHC_ALLOW_HEADLESS 가 달라지는 것뿐이다(그러면 그 사이에 생긴
+# 대화형 세션이 헤드리스 더미 뒤에 있다가 채워지지 않은 채로 cap 에 밀릴 수
+# 있다) — 흔치 않은 설정 변경이라 v1 에서는 감수한다.
 # 훅 예산(150ms) 의 일부만 쓴다. 비싼 부분은 discover() 자체(Codex 는 날짜
 # 디렉터리 스캔)이므로 이 deadline 을 discover() 에도 그대로 넘겨 어댑터가
 # 스스로 스캔을 끊게 한다 — 여기서만 재고 있으면 discover() 호출 자체가
@@ -81,11 +96,18 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
         # 먼저 자격 있는 것만 걸러 **전체를 놓고** 정렬한다 — 오래된 것부터
         # 자르면(리뷰 결함) 8개 중 5개가 죄다 옛것이 되어 due() 가 최신 대신
         # 4번째로 최신인 세션을 돌려준다. 최신 N개를 골라야 한다.
+        #
+        # "이미 아는 세션"은 **id 로만** 거른다(known_sessions) — epoch 로
+        # 거르지 않는다. session_meta.timestamp 는 초 단위라 같은 초에 시작한
+        # 서로 다른 두 세션이 있을 수 있고, 그걸 epoch 로 판정했다면(#22,
+        # 반개구간 <=) id 가 다른데도 하나가 죽는다. 그래서 진짜 새 것인지는
+        # newest_start 와 **엄격히** 비교하고(<), 이미 원장에 있는지는 id 로
+        # 따로 본다.
         eligible = []
         for ref in refs:
             if not ref.session_id or ref.session_id in known_sessions:
                 continue
-            if ref.epoch <= newest_start:
+            if ref.epoch < newest_start:
                 continue
             if now and (now - ref.epoch) > due.MAX_AGE_SECONDS:
                 continue
@@ -112,6 +134,13 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
                 "cwd": root,
                 # health() 가 이 값을 보고 "훅이 실제로 돌았다" 는 증거에서 뺀다
                 # (codex_cli.py) — 백필이 신뢰 없는 훅을 가려버리면 안 된다.
+                #
+                # #22: 이 세션들은 실제 시작 시각이 이 mark 자신의 시작 행보다
+                # 앞서더라도 원장에는 이 행 **뒤에** 붙는다(mark 는 자기 행부터
+                # 적고 백필은 그다음이라). due() 는 하네스별로 원장을 훑으므로
+                # (harness == my_harness 인 행은 건너뜀) 무해하다 — 영향은
+                # 같은 하네스 내부의 append 순서뿐인데, 여기서 붙이는 건
+                # 다른 하네스 행이다.
                 "via": "scan",
             }
             ledger.append(row, home=home)
@@ -143,19 +172,10 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
         "path": str(payload.get("transcript_path") or ""),
         "cwd": root,
     }
-    # 사람이 대화한 세션인지 **여기서** 판정해 기록한다. 훅 stdin 페이로드에는
-    # 그 정보가 없으므로 어댑터가 트랜스크립트를 보고 판단한다. 기록하지 않으면
-    # due() 의 비대화형 차단이 프로덕션에서 죽은 코드가 된다 — 테스트만 그 필드를
-    # 손으로 넣어 통과하고, 실제로는 남의 도구가 남긴 sdk 세션이 핸드오프된다.
-    #
-    # 판정은 하네스별 지식이므로 어댑터가 소유한다. 코어가 어휘를 들고 있으면
-    # 새 하네스를 붙일 때 코어를 고쳐야 한다.
-    if row["path"]:
-        try:
-            if not adapters.get(args.harness, home=home).classify(row["path"]):
-                row["interactive"] = False
-        except Exception:
-            pass
+    # 사람이 대화한 세션인지는 여기서 판정하지 않는다(#21). SessionStart 시점에는
+    # Claude 트랜스크립트가 아직 쓰이지 않아 판정이 늘 fail-open 했고, Codex 는
+    # rollout 이 없으면 영구히 비대화형으로 적힐 수 있었다. 판정은 brief 시점에
+    # 어댑터가 실제 파일을 보고 내린다(brief.compute 가 due 에 넘기는 eligible).
     ledger.append(row, home=home)
     # 다른 하네스의 세션을 원장에 백필한다(위 주석). 훅 경로이므로 실패해도
     # mark 자체는 항상 exit 0, 빈 stdout 이어야 한다(invariant 2).
@@ -178,7 +198,8 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
 # --- note -------------------------------------------------------------------
 
 
-def cmd_note(args, *, home=None, out=sys.stdout, err=sys.stderr) -> int:
+def cmd_note(args, *, home=None, out=sys.stdout, err=None) -> int:
+    err = err or sys.stderr
     root, _key, state = _state_for(home)
     reason = locate.refused_root(root)
     if reason:
@@ -258,15 +279,55 @@ def _unique_prefix_len(ids: List[str], minlen: int = 8) -> int:
     return n
 
 
+def _session_log_rank(key: str, state: str, home):
+    """`log` 의 세션 정렬 근거를 주는 랭크 함수.
+
+    최우선은 delivered.tsv 등장 순(due.delivered_order — last_delivered() 와
+    같은 소스라 log 의 끝이 `show '#N'` 의 기본 세션과 일치한다). 원장 첫
+    `start` 행 등장 순은 **못 쓴다** — mark 가 제 세션을 먼저 적고 나서
+    backfill 이 더 일찍 시작한 외래 세션을 뒤늦게 적으므로(cmd_mark), 마킹된
+    세션과 백필된 세션의 쌍마다 원장 등장 순이 실제 전달 순과 뒤집힌다(#18
+    리뷰 결함). 전달된 적 없는 세션(watch 로만 색인된 경우)은 원장 첫 start
+    행 순서로, 그것도 없으면 색인 파일명 순으로 결정적으로 둔다."""
+    delivered_rank = {sid: i for i, sid in enumerate(due.delivered_order(state))}
+    ledger_rank = {}
+    for i, row in enumerate(ledger.read(home=home, limit=0, repo_key=key)):
+        if row.get("event") != "start":
+            continue
+        session = row.get("session")
+        if session and session not in ledger_rank:
+            ledger_rank[session] = i
+    # 색인 파일명(=세션 id) 오름차순 — 위 두 근거가 다 없는 세션끼리도 흔들리지
+    # 않는 순서가 필요하다(_index_files 가 이미 그렇게 정렬해서 준다).
+    fallback_rank = {sid: n for n, sid in enumerate(_all_session_ids(state))}
+
+    def _rank(session):
+        if session in delivered_rank:
+            return (0, delivered_rank[session])
+        if session in ledger_rank:
+            return (1, ledger_rank[session])
+        return (2, fallback_rank.get(session, 0))
+
+    return _rank
+
+
 def cmd_log(args, *, home=None, out=sys.stdout) -> int:
-    _root, key, state = _state_for(home)
+    root, key, state = _state_for(home)
+    reason = locate.refused_root(root)
+    if reason:
+        out.write("{}\n".format(reason))
+        return 1
     _record_pull(key, state, "log", home)
+    _session_rank = _session_log_rank(key, state, home)
+
     rows = []
     for path in _index_files(state):
         session = os.path.basename(path)[: -len(".idx")]
         for row in index.rows(path):
             rows.append((session, row))
-    rows.sort(key=lambda pair: (pair[1].epoch, pair[1].seq))
+    # 세션은 _session_log_rank 순, 세션 안에서는 색인 seq 순 — 타임스탬프는
+    # 순서의 근거로 쓰지 않는다(불변식 6, #18).
+    rows.sort(key=lambda pair: (_session_rank(pair[0]), pair[1].seq))
 
     if args.verb:
         rows = [r for r in rows if r[1].verb == args.verb]
@@ -361,7 +422,8 @@ def _resolve_seq_ref(state: str, prefix: str, seq: int):
     return entry, note
 
 
-def cmd_show(args, *, home=None, out=sys.stdout, err=sys.stderr) -> int:
+def cmd_show(args, *, home=None, out=sys.stdout, err=None) -> int:
+    err = err or sys.stderr
     _root, key, state = _state_for(home)
     target = args.target.strip()
     refs = index.read_refs(state)
@@ -373,11 +435,11 @@ def cmd_show(args, *, home=None, out=sys.stdout, err=sys.stderr) -> int:
         if m:
             entry, err_or_note = _resolve_seq_ref(state, m.group(1), int(m.group(2)))
             if entry is None:
-                out.write("{}\n".format(err_or_note))
+                err.write("{}\n".format(err_or_note))
                 return 1
             note = err_or_note
     if entry is None:
-        out.write("unknown reference {!r}; try `omhc log --last 30`\n".format(target))
+        err.write("unknown reference {!r}; try `omhc log --last 30`\n".format(target))
         return 1
 
     if note:
@@ -387,15 +449,23 @@ def cmd_show(args, *, home=None, out=sys.stdout, err=sys.stderr) -> int:
 
     source = _pinned_path(state, entry["session_id"], entry.get("source_path") or "")
     if not source or not os.path.exists(source):
-        out.write("source bytes are gone for {} (session {})\n".format(
+        err.write("source bytes are gone for {} (session {})\n".format(
             target, entry["session_id"]))
         return 1
     with open(source, "rb") as fh:
         fh.seek(entry["offset"])
         raw = fh.read(entry["length"] if not args.full else -1)
-    out.write(raw.decode("utf-8", "replace"))
-    if not raw.endswith(b"\n"):
-        out.write("\n")
+    buf = getattr(out, "buffer", None)
+    if buf is not None:
+        # 진짜 stdout — 원본 바이트를 그대로 쓴다(`show '#3' --full | jq .` 가
+        # 깨지면 안 된다). 없는 줄바꿈을 붙이지 않는다: 그 자체가 원본 바이트다.
+        buf.write(raw)
+    else:
+        # 테스트의 io.StringIO 처럼 .buffer 가 없는 스트림 — 텍스트로만 비교할
+        # 수 있으므로 디코드하고, 사람이 읽기 좋게 줄바꿈을 보정한다.
+        out.write(raw.decode("utf-8", "replace"))
+        if not raw.endswith(b"\n"):
+            out.write("\n")
     _record_pull(key, state, "show", home, session=entry["session_id"], tag=target)
     return 0
 
@@ -418,6 +488,25 @@ def _check(out, label: str, verdict: Optional[bool], detail: str) -> None:
     out.write("{:<4} {:<22} {}\n".format(_verdict_word(verdict), label, detail))
 
 
+def _status_json_empty() -> dict:
+    """`status --json` 의 최상위 키 전부를 빈 값으로. `/` 처럼 진단을 못 내는
+    경로가 쓴다. 정상 경로에 키를 더하면 여기에도 더해야 한다 —
+    test_status 가 두 경로의 키 집합이 같은지 확인한다(#19 리뷰: #25 가 더한
+    키가 `/` 에서만 빠졌다)."""
+    return {
+        "repo_root": None, "repo_key": None, "state_dir": None,
+        "adapters": [], "ledger_rows": 0,
+        "archive": [],
+        "injections": 0, "pulls": 0,
+        "pull_rate_window": PULL_RATE_WINDOW,
+        "recent_injections": 0, "recent_pulls": 0,
+        "off": False, "watcher_pid": None,
+        "instruction_files": {"shared": None, "stale_block": False},
+        "health": [],
+        "rows": [],
+    }
+
+
 def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     root, key, state = _state_for(home)
     reason = locate.refused_root(root)
@@ -429,45 +518,67 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         # 갈라지는 최소한의 필드(refused, orphaned_state)를 덧붙인다.
         orphaned = state if os.path.isdir(state) else None
         if args.json:
-            out.write(json.dumps({
+            # 정상 경로와 같은 최상위 키 집합을 유지한다 — 빈 값이라도 있어야
+            # 소비자가 `/` 에서만 KeyError 로 죽지 않는다(#19). 값 자체는 의미가
+            # 없다(정상 경로의 진단은 전부 `root` 에 걸려 있어 여기선 못 낸다).
+            payload = _status_json_empty()
+            payload.update({
                 "repo_root": root, "repo_key": key, "state_dir": state,
                 "refused": reason, "orphaned_state": orphaned,
                 "rows": [{"label": "root", "verdict": "fail", "detail": reason}],
-            }, ensure_ascii=False, indent=2) + "\n")
+            })
+            out.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         else:
             _check(out, "root", False, reason)
             if orphaned:
                 out.write("orphaned state dir: {}\n".format(orphaned))
         return 1
     installed = adapters.present(now=time.time)
-    # repo_key= 를 쓴다 — read() 는 limit(기본 2000, 머신 전체 공유)보다 먼저
-    # repo 필터를 적용하므로, 여러 레포를 오가는 사람에게서 이 레포의 행이
-    # 슬라이스 밖으로 밀려나지 않는다(ledger.read 문서 참고).
-    rows = ledger.read(home=home, repo_key=key)
+    # 원장은 아래 health_rows 를 위해 어차피 무제한으로 한 번 더 읽어야 한다
+    # (전역 세션 id 때문에 레포로 못 거름) — 10만 행에서 파싱만 약 0.5초라
+    # 두 번 읽으면 배가된다(#25). 한 번 무제한으로 읽고, 이 레포용 rows 는
+    # read(repo_key=key) 가 하던 것과 같은 규칙(필터 먼저, limit 은 나중에)을
+    # 메모리에서 재현한다 — 안 그러면 여러 레포를 오가는 사람에게서 이 레포의
+    # 행이 다른 레포 행들에 밀려 슬라이스 밖으로 나간다.
+    all_rows = ledger.read(home=home, limit=0)
+    rows = [r for r in all_rows if r.get("repo") == key][-ledger.DEFAULT_LIMIT:]
     artifact = os.path.join(state, ARTIFACT_NAME)
 
     # watch.lag 가 정확히 이 계산을 소유한다. 두 벌로 두면 고정 레이아웃이
     # 바뀔 때 한쪽만 고쳐진다.
     lag_rows = watch.lag(state)
 
-    # X = 최소 한 번 인출된 "전달받은 세션"의 수(중복 제거), N = 전달 횟수.
-    # 같은 세션을 두 번 show 해도 X 는 한 번만 세고, injections 는 delivered.tsv
-    # 줄 수 그대로 둔다(§9 "pulled X of N injections" — N 은 전달 횟수다).
+    # X = 최근 PULL_RATE_WINDOW 번 전달 중 최소 한 번 인출된 세션 수(중복
+    # 제거), N = 그 창의 전달 횟수(§9 "pulled X of N injections"). injections
+    # 는 별도로 delivered.tsv 전체 줄 수(archive 행 판정용)를 유지한다.
     pull_sessions = {r.get("session") for r in rows
                       if r.get("event") == "pull" and r.get("session")}
-    injections = 0
-    delivered_sessions = set()
     delivered = os.path.join(state, due.DELIVERED_NAME)
+    # append 순서 그대로 모은다 — delivered.tsv 의 epoch 필드는 타임스탬프라
+    # 거꾸로 갈 수 있으므로(불변식 6) 정렬 기준이 아니라 줄 순서 자체를 쓴다.
+    delivered_order: List[str] = []
     if os.path.exists(delivered):
         with open(delivered, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if not line.strip():
                     continue
-                injections += 1
-                session = line.split("\t", 1)[0]
-                if session:
-                    delivered_sessions.add(session)
-    pulls = len(delivered_sessions & pull_sessions)
+                delivered_order.append(line.split("\t", 1)[0])
+    injections = len(delivered_order)
+
+    # pull rate 의 분모를 delivered.tsv 전체로 두면, 한 레포를 오래 쓸수록
+    # 분모만 무한정 자라 인출률이 서서히 낮아 보인다(#25) — 오래된 전달의
+    # pull 행은 이미 원장 창(rows, DEFAULT_LIMIT) 밖으로 밀려났는데 분모는
+    # 안 줄기 때문이다. 그래서 "최근 N번 전달 중 몇 번 인출됐는가"로 분모
+    # 자체를 최근 N 개로 묶는다. 세션 id 로 맞춘다 — pull 행이 session 필드를
+    # 이미 들고 있어(위 pull_sessions) 위치 기반 근사가 필요 없다.
+    recent_window = delivered_order[-PULL_RATE_WINDOW:]
+    recent_injections = len(recent_window)
+    recent_sessions = {s for s in recent_window if s}
+    recent_pulls = len(recent_sessions & pull_sessions)
+    # JSON 의 `pulls` 는 예전 뜻(전체 전달 중 인출된 세션 수)을 유지한다 —
+    # `pulls / injections` 로 비율을 내는 소비자가 창 도입으로 조용히 틀리지
+    # 않게, 창 안의 값은 `recent_pulls` / `recent_injections` 짝으로 따로 낸다.
+    pulls = len({s for s in delivered_order if s} & pull_sessions)
 
     # AGENTS.md 가 CLAUDE.md 와 공유되면 Codex Path B 는 절대 쓰면 안 된다 —
     # 그 파일을 공유 배선 만들기 *전에* 심어 둔 낡은 관리 구간만 실패 사유다.
@@ -476,13 +587,13 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         agents_md.path_for(root)) is not None
 
     # 선택적 어댑터 진단(예: codex 신뢰 안 된 훅). 세션 id 는 전역 유일이므로
-    # 레포로 거르지 않은 원장을 넘긴다 — 위 rows 처럼 이 레포로 미리 거르면
-    # 자기 .git 을 가진 중첩 워크트리·서브모듈에서 시작한 세션이 다른 repo 키로
-    # 기록돼 여기서 영원히 "안 돈 것"으로 보인다. limit(기본 2000, 머신 전체
-    # 공유)이 14일 창을 못 덮을 수 있다는 게 알려진 한계다 — 개인용 도구고
-    # status 는 훅 경로가 아니므로 필요하면 여기서만 무제한으로 읽는다.
-    # 한 어댑터가 죽어도 나머지 status 가 죽으면 안 되므로 어댑터별로 감싼다.
-    all_rows = ledger.read(home=home, limit=0)
+    # 레포로 거르지 않은 all_rows(위에서 이미 무제한으로 읽어 둔 것)를 그대로
+    # 넘긴다 — 위 rows 처럼 이 레포로 미리 거르면 자기 .git 을 가진 중첩
+    # 워크트리·서브모듈에서 시작한 세션이 다른 repo 키로 기록돼 여기서 영원히
+    # "안 돈 것"으로 보인다. limit(기본 2000, 머신 전체 공유)이 14일 창을 못
+    # 덮을 수 있다는 게 알려진 한계다 — 개인용 도구고 status 는 훅 경로가
+    # 아니므로 필요하면 여기서만 무제한으로 읽는다. 한 어댑터가 죽어도 나머지
+    # status 가 죽으면 안 되므로 어댑터별로 감싼다.
     health_rows = []
     for adapter_id in installed:
         try:
@@ -580,7 +691,8 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         checks.append((label, hook_ok, detail))
 
     checks.append(("pull rate", None,
-                   "pulled {} of {} injections".format(pulls, injections)))
+                   "pulled {} of {} recent injections (window {})".format(
+                       recent_pulls, recent_injections, PULL_RATE_WINDOW)))
     checks.append(("watcher (optional)", None,
                    "running pid {}".format(watcher) if watcher
                    else "not running — brief falls back to inline parsing"))
@@ -600,6 +712,8 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
             "adapters": installed, "ledger_rows": len(rows),
             "archive": lag_rows,
             "injections": injections, "pulls": pulls,
+            "pull_rate_window": PULL_RATE_WINDOW,
+            "recent_injections": recent_injections, "recent_pulls": recent_pulls,
             "off": due.is_off(state), "watcher_pid": watcher,
             "instruction_files": {"shared": shared, "stale_block": leaked},
             "health": [{"label": label, "ok": ok, "detail": detail}
@@ -636,6 +750,7 @@ def cmd_brief(args, *, home=None, out=sys.stdout) -> int:
         wire=args.wire,
         force=args.force,
         as_text=args.text or args.dry_run,
+        dry_run=args.dry_run,
         home=home,
         out=out,
     )
@@ -688,14 +803,16 @@ def hook_config_targets(home) -> List[str]:
     return ids
 
 
-def cmd_hooks(args, *, home=None, out=sys.stdout) -> int:
+def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
     """`omhc hooks install|uninstall`. status 의 `<adapter-id> hooks` 행이
     가리키는 그 설치를 실제로 한다. 코어는 벤더 이름을 모른다 — 대상은
     `hook_config()` 를 구현한, 이 머신에 감지됐거나 설정 디렉터리가 있는
     어댑터들이다."""
     if not getattr(args, "hooks_action", None):
-        out.write("usage: omhc hooks install|uninstall [--harness ID]\n")
-        return 0
+        # argparse 관례: 동작 없이 부르면 사용법은 stderr, exit 2(#19).
+        (err or sys.stderr).write(
+            "usage: omhc hooks install|uninstall [--harness ID]\n")
+        return 2
 
     targets = [args.harness] if args.harness else hook_config_targets(home)
     if not targets:
@@ -764,6 +881,10 @@ def cmd_hooks(args, *, home=None, out=sys.stdout) -> int:
 
 def cmd_clear(args, *, home=None, out=sys.stdout) -> int:
     root, _key, state = _state_for(home)
+    reason = locate.refused_root(root)
+    if reason:
+        out.write("{}\n".format(reason))
+        return 1
     removed = []
     if agents_md.collapse(root, force=True):
         removed.append(agents_md.path_for(root))
@@ -826,7 +947,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="주입 JSON 형식. 기본값은 --harness 에서 유도한다")
     p.add_argument("--force", action="store_true")
     p.add_argument("--text", action="store_true")
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true",
+                   help="본문만 텍스트로 보이고 게이트·아카이브·전달을 건드리지 않는다")
     p.add_argument("--stdin", default=None, help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_brief)
 

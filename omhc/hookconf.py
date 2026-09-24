@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import collections
 import copy
 import json
 import os
@@ -77,20 +78,68 @@ def load_fragment(name: str) -> Dict[str, list]:
         return json.load(fh)["hooks"]
 
 
-def _extract_commands(hooks_by_event, event: str = "SessionStart") -> List[str]:
-    """`event` 아래 그룹들의 command 문자열을 순서대로 펼친다. 다른 이벤트는
+class _Entry(NamedTuple):
+    """`event` 아래 command 훅 하나 — 판정에 필요한 그룹/훅 필드까지 들고 있다."""
+
+    command: str
+    matcher: object  # 그룹의 matcher. 없으면 None.
+    type: object  # 훅의 type. 없으면 None.
+
+
+def _extract_entries(hooks_by_event, event: str = "SessionStart") -> List[_Entry]:
+    """`event` 아래 그룹들의 command 훅을 순서대로 펼친다. 다른 이벤트는
     본 적도 없다는 듯 무시한다 — "omhc done" 같은 사용자 훅이 다른 이벤트에
     있어도 이 판정에 걸리면 안 된다."""
-    out: List[str] = []
+    out: List[_Entry] = []
     if not isinstance(hooks_by_event, dict):
         return out
     for group in hooks_by_event.get(event) or []:
         if not isinstance(group, dict):
             continue
+        matcher = group.get("matcher")
         for h in group.get("hooks") or []:
             if isinstance(h, dict) and isinstance(h.get("command"), str):
-                out.append(h["command"])
+                out.append(_Entry(h["command"], matcher, h.get("type")))
     return out
+
+
+_SIMPLE_MATCHER_RE = re.compile(r"^[a-zA-Z0-9_|]+$")
+
+
+def _matcher_runs_at_startup(matcher) -> bool:
+    """그룹의 matcher 가 세션 시작(SessionStart 의 "startup")에도 걸리는가.
+
+    Claude Code 2.1.281(바이너리 안의 함수) 실측을 그대로 거울에 비춘다 —
+    Codex 의 정확한 의미론은 확인된 바 없고, 지금은 같은 스키마를 쓴다고
+    가정한다: 비었거나 "*" 면 전부 매칭. `^[a-zA-Z0-9_|]+$` 를 만족하는
+    "단순" matcher(예: `startup|resume|clear|compact`)는 정규식으로 쓰지
+    않고 "|" 로 쪼개 "startup" 과 정확히 같은 항목이 있는지만 본다 — 그래서
+    "start" 하나만 있는 단순 matcher는 "startup" 과 문자열이 달라 안 걸린다.
+    그 외는 `new RegExp(m).test(source)`(고정 없는 부분 검색)이므로
+    `re.search`(fullmatch 아님)로 흉내 낸다. 정규식으로 못 읽는 문자열은
+    안 도는 쪽(False)이다.
+    """
+    if matcher is None or matcher == "" or matcher == "*":
+        return True
+    if not isinstance(matcher, str):
+        return False
+    if _SIMPLE_MATCHER_RE.match(matcher):
+        return "startup" in matcher.split("|")
+    try:
+        pattern = re.compile(matcher)
+    except re.error:
+        return False
+    return pattern.search("startup") is not None
+
+
+def _runnable_at_startup(entry: "_Entry") -> bool:
+    return entry.type == "command" and _matcher_runs_at_startup(entry.matcher)
+
+
+def _not_runnable_reason(entry: "_Entry") -> str:
+    if entry.type != "command":
+        return "type {!r}".format(entry.type)
+    return "matcher {!r}".format(entry.matcher)
 
 
 def _parse_call(command: str) -> Optional[OmhcCall]:
@@ -120,18 +169,24 @@ def _parse_call(command: str) -> Optional[OmhcCall]:
             key, value = tok.split("=", 1)
             flags[key] = value
             i += 1
-        elif tok.startswith("--") and i + 1 < len(rest):
+        elif tok.startswith("--") and i + 1 < len(rest) and not rest[i + 1].startswith("--"):
             flags[tok] = rest[i + 1]
             i += 2
         else:
-            i += 1  # 값 없는 플래그/잉여 토큰은 조용히 건너뛴다 — 비교는 아는 키만 본다.
+            # 값 없는 플래그(다음 토큰도 "--"로 시작하거나 마지막 토큰이다)/
+            # 잉여 토큰은 조용히 건너뛴다 — 비교는 아는 키만 본다. 다음 토큰을
+            # 무조건 값으로 삼으면 `--text --harness codex-cli` 에서 "--harness"
+            # 가 --text 의 값으로 먹혀 진짜 --harness 를 잃어버린다.
+            i += 1
     return OmhcCall(argv=tuple(argv), sub=argv[1], flags=flags)
 
 
-def _omhc_calls(commands: List[str]) -> List[OmhcCall]:
+def _omhc_calls(entries: List["_Entry"], *, runnable_only: bool = False) -> List[OmhcCall]:
     out = []
-    for c in commands:
-        call = _parse_call(c)
+    for entry in entries:
+        if runnable_only and not _runnable_at_startup(entry):
+            continue
+        call = _parse_call(entry.command)
         if call is not None:
             out.append(call)
     return out
@@ -167,6 +222,10 @@ def _diff_reason(shipped: List[OmhcCall], installed: List[OmhcCall]) -> str:
         missing = [s for s in shipped_subs if s not in installed_subs]
         if missing:
             return "missing {}".format(" and ".join(missing))
+        installed_counts = collections.Counter(installed_subs)
+        shipped_counts = collections.Counter(shipped_subs)
+        if any(installed_counts[s] > shipped_counts[s] for s in installed_counts):
+            return "duplicate omhc hooks (found {})".format(", ".join(installed_subs))
         return "wrong order (found {})".format(", ".join(installed_subs) or "nothing")
     for want, got in zip(shipped, installed):
         if want.flags != got.flags:
@@ -201,11 +260,38 @@ def inspect(config_path: str, fragment: Dict[str, list], home: str) -> Tuple[boo
     if not isinstance(conf, dict):
         return False, "cannot parse {}".format(config_path)
 
-    installed_omhc = _omhc_calls(_extract_commands(conf.get("hooks")))
-    if not installed_omhc:
+    installed_entries = _extract_entries(conf.get("hooks"))
+    installed_omhc_any = _omhc_calls(installed_entries)
+    if not installed_omhc_any:
         return False, "not installed in {} — run `omhc hooks install`".format(config_path)
 
-    shipped = _omhc_calls(_extract_commands(fragment))
+    installed_omhc = _omhc_calls(installed_entries, runnable_only=True)
+    if not installed_omhc:
+        # omhc 호출은 있는데(위에서 확인) 세션 시작 시점에는 하나도 안 돈다 —
+        # matcher 가 좁혀놨거나 command 가 아닌 type 이어서다. "PASS 인데 안
+        # 도는" 설치가 merge() 의 "이미 PASS 면 손대지 않는다" 경로에 걸려
+        # 영영 고쳐지지 않는 걸 막는다.
+        reason = None
+        for entry in installed_entries:
+            if _parse_call(entry.command) is not None and not _runnable_at_startup(entry):
+                reason = _not_runnable_reason(entry)
+                break
+        return False, ("omhc hooks never run at session start ({}) — "
+                        "run `omhc hooks install`").format(reason or "not runnable")
+
+    shipped_entries = _extract_entries(fragment)
+    shipped_any = _omhc_calls(shipped_entries)
+    # runnable 호출만 비교하면, 실제로는 안 도는 여분의 omhc 그룹(예: matcher
+    # "resume" 에 낀 두 번째 brief)이 있어도 PASS 로 보일 수 있다 — merge()
+    # 의 "PASS 면 이미 중복이 없다" 는 전제가 깨진다. 그래서 전체(안 도는
+    # 것까지) 개수도 shipped 를 넘지 않는지 따로 본다(#20 리뷰).
+    installed_counts = collections.Counter(c.sub for c in installed_omhc_any)
+    shipped_counts = collections.Counter(c.sub for c in shipped_any)
+    if any(installed_counts[s] > shipped_counts[s] for s in installed_counts):
+        return False, "differs from shipped fragment ({}) — run `omhc hooks install`".format(
+            _diff_reason(shipped_any, installed_omhc_any))
+
+    shipped = _omhc_calls(shipped_entries, runnable_only=True)
     if [c.sub for c in installed_omhc] != [c.sub for c in shipped] or \
             any(w.flags != g.flags for w, g in zip(shipped, installed_omhc)):
         return False, "differs from shipped fragment ({}) — run `omhc hooks install`".format(
@@ -219,6 +305,31 @@ def inspect(config_path: str, fragment: Dict[str, list], home: str) -> Tuple[boo
             return False, "{} not executable".format(binpath)
 
     return True, "installed"
+
+
+def has_runnable_call(config_path: str, sub: str, flags: Optional[Dict[str, str]] = None) -> bool:
+    """`config_path` 의 SessionStart 에 `sub`(예: "brief")를 부르는, 세션 시작
+    시점에 실제로 도는 omhc 호출이 있는가. `flags` 가 주어지면 그 키=값도
+    맞아야 한다(예: `{"--harness": "codex-cli"}`).
+
+    훅 경로(install_handoff → hook_is_installed)에서 쓴다 — 절대 던지지
+    않는다: 실패는 전부 False 다(설치 안 됨과 구분 못 하지만, 구분해서 얻는
+    이득보다 훅 경로가 절대 안 죽어야 한다는 쪽이 우선이다, 불변식 2).
+    """
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            conf = json.loads(fh.read())
+        if not isinstance(conf, dict):
+            return False
+        for call in _omhc_calls(_extract_entries(conf.get("hooks")), runnable_only=True):
+            if call.sub != sub:
+                continue
+            if flags and any(call.flags.get(k) != v for k, v in flags.items()):
+                continue
+            return True
+        return False
+    except Exception:
+        return False
 
 
 # --- install/uninstall (`omhc hooks install|uninstall`) ---------------------
@@ -302,6 +413,10 @@ def _strip_hooks(conf: dict) -> dict:
         hooks["SessionStart"] = kept_groups
     else:
         del hooks["SessionStart"]
+    if not hooks:
+        # hooks 가 SessionStart 하나만 들고 있었다면 이제 빈 객체다 — 남겨두면
+        # 아무 것도 설치한 적 없는 설정에 `{"hooks": {}}` 만 흔적으로 남는다.
+        del conf["hooks"]
     return conf
 
 

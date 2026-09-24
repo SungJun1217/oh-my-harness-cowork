@@ -55,5 +55,34 @@ class TestWatchRefusesSlash(unittest.TestCase):
         self.assertEqual(code, 1)
 
 
+class TestLogRefusesSlash(unittest.TestCase):
+    """#19: log/clear 도 note/status/watch 와 같은 거부를 한다 — 읽기·정리용이라
+    무해하지만, `/` 에서 전체 원장을 뒤지는 것도 오사용이긴 마찬가지다."""
+
+    def test_log_at_slash_refuses(self):
+        t = TempRepo()
+        self.addCleanup(t.close)
+        cwd = os.getcwd()
+        os.chdir("/")
+        self.addCleanup(os.chdir, cwd)
+        args = cli.build_parser().parse_args(["log"])
+        out = io.StringIO()
+        code = cli.cmd_log(args, home=t.home, out=out)
+        self.assertEqual(code, 1)
+
+
+class TestClearRefusesSlash(unittest.TestCase):
+    def test_clear_at_slash_refuses(self):
+        t = TempRepo()
+        self.addCleanup(t.close)
+        cwd = os.getcwd()
+        os.chdir("/")
+        self.addCleanup(os.chdir, cwd)
+        args = cli.build_parser().parse_args(["clear"])
+        out = io.StringIO()
+        code = cli.cmd_clear(args, home=t.home, out=out)
+        self.assertEqual(code, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

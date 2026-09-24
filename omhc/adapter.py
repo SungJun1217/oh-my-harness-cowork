@@ -126,6 +126,10 @@ class HarnessAdapter:
     def classify(self, source_path: str) -> bool:
         """이 트랜스크립트가 **사람이 대화한 세션**인가.
 
+        False 는 헤드리스·서브에이전트라고 확실할 때만 낸다. 판단할 수 없으면
+        True 다 — brief 는 False 인 원장 행을 건너뛰고 그 앞 행으로 가므로, 모르는
+        파일을 False 로 판정하면 낡은 세션이 나간다(#21).
+
         하네스별 지식이므로 어댑터가 소유한다. 코어가 한 어댑터의 파서로 다른
         하네스의 세션을 판정하면 안 된다 — Claude 의 entrypoint/isSidechain 을
         Codex rollout 에서 찾으면 아무것도 없어 필터가 조용히 no-op 가 된다.

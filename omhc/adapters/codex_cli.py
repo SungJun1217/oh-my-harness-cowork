@@ -305,11 +305,23 @@ def _item_fact(item: dict):
         code = item.get("exit_code")
         ok = ok and (code is None or code == 0)
         if not ok and code == 1 and kinds and kinds <= _INSPECT_KINDS:
-            # 실측(era B, 2건): grep/rg 류는 매치 없음을 exit 1 로 표현하는
-            # 관용구가 있다 — parsed_cmd 가 전부 읽기이고 출력도 비었으면 그
-            # 관용구로 본다. 위험: 검증용 `grep -q` 는 보통 parsed_cmd 가
-            # unknown 이라 여기 안 걸리고 실패로 남는다(의도적으로 손대지 않음
-            # — era A 처럼 명령어 이름으로 짐작하지 않는다).
+            # 실측(era B, CommandExecution 2,708개 중 비0 종료 331개): grep/rg 류는
+            # 매치 없음을 exit 1 로 표현한다. parsed_cmd 가 전부 읽기이고 출력도
+            # 비었으면 그 관용구로 본다 — 이 규칙이 잡는 것은 3건이고 실제 실패는
+            # 하나도 가리지 않는다.
+            # 더 넓히지 않는 이유(#11):
+            # - parsed_cmd 는 전부 아니면 전무다. 복합 명령에 모르는 부분(pwd,
+            #   echo, 2>/dev/null 리다이렉트 …)이 하나라도 있으면 명령 전체가
+            #   unknown 한 칸이 된다(unknown 이 다른 항목과 섞인 경우 0건). 그러니
+            #   `pwd; rg …` 에 닿으려면 원문 셸 문자열을 쪼개야 하고, 그건 era A
+            #   처럼 명령어 이름으로 짐작하는 일이다.
+            # - unknown 에서는 빈 출력이 무해의 신호가 아니다: 출력을 파일로 돌린
+            #   빌드·타입 검사 실패도 비어 보인다.
+            # - 읽기 항목끼리여도 출력이 있으면 실패로 둔다: 없는 경로의 sed/cat/ls
+            #   는 "No such file" 을 stdout 에 남긴다(stderr 는 늘 비어 있다 — pty
+            #   로 stdout 에 합쳐진다). && 는 짧게 끊기므로 마지막 항목이 search
+            #   라고 그 search 가 종료 코드를 낸 것도 아니다.
+            # 위험: 검증용 `grep -q`/`rg -q` 는 실측상 unknown 이라 여기 안 걸린다.
             output = "{}{}".format(item.get("stdout") or "", item.get("stderr") or "")
             if not output.strip():
                 ok = True
@@ -668,11 +680,14 @@ class CodexCliAdapter:
     def classify(self, source_path: str) -> bool:
         """Codex rollout 에 사람이 시작한 세션인가.
 
-        session_meta 를 읽을 수 있어야 하고, 서브에이전트·헤드리스 exec 가
-        아니어야 한다(`_is_interactive`).
+        False 는 서브에이전트·헤드리스 exec 라고 **확실할 때만** 낸다
+        (`_is_interactive`). session_meta 를 못 읽으면(빈 파일, 모르는 첫 줄)
+        판단할 수 없으므로 True 다 — brief 는 False 인 행만 건너뛰므로, 여기서
+        False 를 내면 포맷이 바뀐 날부터 새 rollout 이 전부 건너뛰어지고 그 전의
+        낡은 세션이 나간다(#21). 여는 판정은 ref_for_path 가 따로 한다.
         """
         meta = session_meta(source_path)
-        return meta is not None and _is_interactive(meta)
+        return meta is None or _is_interactive(meta)
 
     def ref_for_path(self, source_path: str, session_id: str,
                      cwd: Optional[str] = None) -> Optional[SessionRef]:
@@ -721,9 +736,9 @@ class CodexCliAdapter:
         성공으로 보고하면 Path B 가 영원히 발동하지 않는다.
         """
         try:
-            with open(self.hooks_path(), encoding="utf-8", errors="replace") as fh:
-                return "omhc" in fh.read()
-        except OSError:
+            return hookconf.has_runnable_call(
+                self.hooks_path(), "brief", {"--harness": self.adapter_id})
+        except Exception:
             return False
 
     def install_handoff(self, bundle: HandoffBundle) -> InstallReceipt:

@@ -318,18 +318,23 @@ this layout.
 | `omhc show <E1\|#137\|abcdef01#137> [--full]` | **Looks up the original bytes by offset** (tier (b) entry point). Bare `#N` resolves against the most recently delivered session (same rule `log`'s pull accounting uses); `<prefix>#N` names the session explicitly — an ambiguous prefix lists the candidates |
 | `omhc note "<text>"` | Leave a note. Either harness's agent can call it from the plain command line |
 
-**Pull rate** ("pulled X of N injections") is the one number for judging
-whether omhc's overhead is worth it: X is how many of the N delivered
-sessions were actually dug into via `omhc show` or `omhc log` (each session
-counts once, no matter how many times it's pulled) — a human running
-`omhc log` by hand counts too, not just an agent.
+**Pull rate** ("pulled X of N recent injections") is the one number for
+judging whether omhc's overhead is worth it: X is how many of the last N
+(`PULL_RATE_WINDOW`, 20) delivered sessions for this repo were actually dug
+into via `omhc show` or `omhc log` (each session counts once, no matter how
+many times it's pulled) — a human running `omhc log` by hand counts too, not
+just an agent. The window is over the most recent deliveries in append order
+(matched by session id), not the whole history — otherwise a repo used for a
+long time would show a rate that keeps drifting down as old, no-longer-pulled
+deliveries pile up in a denominator that never shrinks.
 
 Turn it off: `OMHC_OFF=1`, or an `~/.omhc/<repo-key>/off` file.
 
 By default, headless sessions (`claude -p`, `codex exec`, app-server clients) and
 Codex subagent threads are never handoff sources. To treat headless sessions as real
-ones in a sandbox, export `OMHC_ALLOW_HEADLESS=1` with the same value for both the
-source and the receiving launch (both `mark` and `brief` read it). Subagents and
+ones in a sandbox, export `OMHC_ALLOW_HEADLESS=1` for the receiving launch: eligibility
+is judged when the receiving session starts, so it also admits headless sessions that
+ran before you set it. Exporting it once for the whole run is simplest. Subagents and
 sidechains stay excluded even then.
 
 ## When not to use it
@@ -423,11 +428,29 @@ committed). Generate them from real sessions on your own machine with
   anything already ledgered for that harness in this repo, up to 5 sessions
   per `mark` call. `omhc status`'s `codex hook` row ignores those `scan` rows
   on purpose — counting them would hide the fact that the hook itself never
-  ran. **Known gap (unverified):** `codex resume` of an old rollout keeps
-  that rollout's original start timestamp, so a resumed old session can be
-  missed by the "must be newer" check — and separately, if that original
-  start is older than 7 days (`due.MAX_AGE_SECONDS`), the backfill's own age
-  check skips it too, resumed or not.
+  ran. **Known gap (#22, harmless in the default config):** sessions beyond
+  those 5 (or beyond `discover()`'s own hook-path time budget) are never
+  backfilled later either — the next `mark` call's watermark is already the
+  newest one just picked, so anything older permanently fails the "newer
+  than what's ledgered" check. This is harmless because `due()` only ever
+  needs the single newest *eligible* foreign session, and `discover()`
+  applies the same headless filter (`allow_headless()`) that `brief`'s
+  eligibility check does — so what gets backfilled and what `due()` wants
+  are normally the same set. It only breaks if `OMHC_ALLOW_HEADLESS` differs
+  between the `mark` that ran the backfill and the later `brief` call: an
+  interactive session sitting behind more than 5 newer headless ones could
+  then be missing from the ledger entirely. Not fixed — an uncommon
+  configuration change to hit in practice. **Known gap (partially
+  verified):** `session_meta.timestamp` is read once from a rollout's first
+  line and never updated. Measured on a real machine: a session's rollout
+  file can carry activity spanning days (80h between its first and last
+  record in one case) while keeping that one first-line timestamp — so a
+  long-lived or resumed session can look no newer than a backfill that
+  already ran against it, and separately, if that original start is older
+  than 7 days (`due.MAX_AGE_SECONDS`), the backfill's own age check skips it
+  too. A correct fix needs an ordering source other than session-start epoch
+  (e.g. last-record timestamp or file mtime), which invariant 6 rules out —
+  not fixed.
 
   </details>
 
