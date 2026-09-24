@@ -5,10 +5,11 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
-from omhc import brief, deliver, ledger, locate, pin
+from omhc import brief, deliver, due, ledger, locate, pin
 
 from . import _repo
 from omhc.adapter import Capability, HandoffBundle
@@ -435,6 +436,75 @@ class TestDryRun(unittest.TestCase):
                    home=self.h.home, now=NOW, out=out)
         self.assertTrue(out.getvalue().startswith("[omhc]"))
 
+    def test_dry_run_with_an_open_non_tty_stdin_does_not_hang(self):
+        """`omhc brief --dry-run` 이 stdin 이 TTY 가 아닌 채 열려 있으면(파이프의
+        다른 쪽 끝이 열려만 있고 아무것도 안 씀) 멈추면 안 된다(#27 부수 발견).
+        --stdin 을 명시하지 않은 dry-run 은 stdin 을 아예 읽지 않아야 한다."""
+        # 실제 프로세스라 brief 가 진짜 time.time() 을 쓴다 — NOW 상수는 고정된
+        # 과거 시각이라 too-old 필터에 걸린다. 여기서만 실제 현재 시각을 심는다.
+        self.h.t.plant_codex(session_id="cx1", human="필드 경로부터 다시 확인해줘",
+                             ledger_home=self.h.home, when=time.time())
+        from tests._repo import REPO
+        r_fd, w_fd = os.pipe()
+        try:
+            proc = subprocess.run(
+                [os.path.join(REPO, "bin", "omhc"), "brief",
+                 "--harness", "claude-code", "--dry-run"],
+                stdin=r_fd, capture_output=True, text=True,
+                cwd=self.h.repo_root, env=self.h.t.env,
+                timeout=10,
+            )
+        finally:
+            os.close(r_fd)
+            os.close(w_fd)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("[omhc]", proc.stdout)
+
+    def test_dry_run_reads_a_piped_payload_from_a_different_cwd(self):
+        """리뷰(#27 라운드 1): 문서화된 쓰임 하나가 다른 cwd 에서 payload 를
+        파이프로 넘기는 것이다(`echo '{"cwd": R}' | omhc brief --dry-run`).
+        stdin 을 아예 안 읽으면 이 쓰임이 깨진다 — 여기서는 실제로 읽어야 한다."""
+        self.h.t.plant_codex(session_id="cx1", human="필드 경로부터 다시 확인해줘",
+                             ledger_home=self.h.home, when=time.time())
+        from tests._repo import REPO
+        r_fd, w_fd = os.pipe()
+        os.write(w_fd, json.dumps({"cwd": self.h.repo_root}).encode("utf-8"))
+        os.close(w_fd)  # echo 처럼 보내고 바로 닫는다 — EOF.
+        try:
+            proc = subprocess.run(
+                [os.path.join(REPO, "bin", "omhc"), "brief",
+                 "--harness", "claude-code", "--dry-run"],
+                stdin=r_fd, capture_output=True, text=True,
+                cwd=tempfile.gettempdir(), env=self.h.t.env,
+                timeout=10,
+            )
+        finally:
+            os.close(r_fd)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("[omhc]", proc.stdout)
+
+    def test_dry_run_returns_after_a_write_even_if_the_pipe_stays_open(self):
+        """쓰개가 한 줄 보내고 파이프를 계속 열어 두는 경우(#27 리뷰) — EOF 는
+        안 오지만 다음 데이터도 안 오므로 타임아웃 안에 멈춰야 한다."""
+        self.h.t.plant_codex(session_id="cx1", human="필드 경로부터 다시 확인해줘",
+                             ledger_home=self.h.home, when=time.time())
+        from tests._repo import REPO
+        r_fd, w_fd = os.pipe()
+        os.write(w_fd, json.dumps({"cwd": self.h.repo_root}).encode("utf-8"))
+        try:
+            proc = subprocess.run(
+                [os.path.join(REPO, "bin", "omhc"), "brief",
+                 "--harness", "claude-code", "--dry-run"],
+                stdin=r_fd, capture_output=True, text=True,
+                cwd=tempfile.gettempdir(), env=self.h.t.env,
+                timeout=10,
+            )
+        finally:
+            os.close(r_fd)
+            os.close(w_fd)
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("[omhc]", proc.stdout)
+
     def test_cli_dry_run_flag_reaches_compute(self):
         from omhc import cli
         self.h.plant_codex_session()
@@ -448,6 +518,74 @@ class TestDryRun(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(out.getvalue().startswith("[omhc]"))
         self.assertEqual(self._tree(), before)
+
+
+class TestReopenRedeliveryGuard(unittest.TestCase):
+    """#27: reopen 은 힌트일 뿐이다 — 새 사람 턴이 실제로 있어야 다시 보낸다."""
+
+    def setUp(self):
+        self.h = Harness()
+
+    def tearDown(self):
+        self.h.close()
+
+    def _deliver_once(self):
+        path = self.h.plant_codex_session()
+        first = brief.compute(my_harness="claude-code", my_session_id="me1",
+                              repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertTrue(first)
+        return path
+
+    def test_empty_prompt_resume_yields_empty(self):
+        """`codex exec resume <id> ""` — rollout 에 `"text": ""` 인 user 메시지만
+        붙는다(실측). 새 사람 턴이 아니므로 다시 보내면 안 된다."""
+        path = self._deliver_once()
+        due.mark_reopened(self.h.state, "cx1", "codex-cli", NOW + 10)
+        from tests._repo import append_codex_user_turn
+        append_codex_user_turn(path, "", ordinal=90)
+        again = brief.compute(my_harness="claude-code", my_session_id="me2",
+                              repo_root=self.h.repo_root, home=self.h.home, now=NOW + 20)
+        self.assertEqual(again, "")
+
+    def test_a_real_new_human_turn_is_delivered_again(self):
+        path = self._deliver_once()
+        due.mark_reopened(self.h.state, "cx1", "codex-cli", NOW + 10)
+        from tests._repo import append_codex_user_turn
+        append_codex_user_turn(path, "이어서 로그 포맷도 고쳐줘", ordinal=90)
+        again = brief.compute(my_harness="claude-code", my_session_id="me2",
+                              repo_root=self.h.repo_root, home=self.h.home, now=NOW + 20)
+        self.assertIn("이어서 로그 포맷도 고쳐줘", again)
+
+    def test_race_delivery_then_reopen_with_no_new_turn_yields_empty(self):
+        """mark 와 brief 의 동시 실행 경합(실측): brief 가 전달한 바로 그 초에
+        mark 의 성장 판정이 이미 전달된 턴을 보고 reopen 을 그 뒤에 붙인다."""
+        self._deliver_once()
+        due.mark_reopened(self.h.state, "cx1", "codex-cli", NOW + 1)
+        again = brief.compute(my_harness="claude-code", my_session_id="me2",
+                              repo_root=self.h.repo_root, home=self.h.home, now=NOW + 2)
+        self.assertEqual(again, "")
+
+    def test_legacy_four_column_delivery_is_still_redelivered(self):
+        """옛 4열 delivered 줄(offset 없음) 뒤 reopen 은 오늘까지의 동작 그대로
+        — offset 을 모르면 조건 없이 다시 보낸다."""
+        path = self.h.plant_codex_session()
+        wm = due.Watermark(repo_key=self.h.key, harness="codex-cli", session_id="cx1",
+                           path=path, event="start", epoch=NOW - 600)
+        due.mark_delivered(self.h.state, wm, to_harness="claude-code", epoch=NOW)
+        due.mark_reopened(self.h.state, "cx1", "codex-cli", NOW + 10)
+        again = brief.compute(my_harness="claude-code", my_session_id="me2",
+                              repo_root=self.h.repo_root, home=self.h.home, now=NOW + 20)
+        self.assertTrue(again)
+
+    def test_dry_run_applies_the_same_guard(self):
+        path = self._deliver_once()
+        due.mark_reopened(self.h.state, "cx1", "codex-cli", NOW + 10)
+        from tests._repo import append_codex_user_turn
+        append_codex_user_turn(path, "", ordinal=90)
+        again = brief.compute(my_harness="claude-code", my_session_id="me2",
+                              repo_root=self.h.repo_root, home=self.h.home,
+                              now=NOW + 20, dry_run=True)
+        self.assertEqual(again, "")
 
 
 class TestDeliver(unittest.TestCase):

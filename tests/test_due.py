@@ -290,5 +290,46 @@ class TestReopen(unittest.TestCase):
         self.assertEqual(due.delivered_order(self.state), ["cx1", "cx2"])
 
 
+class TestLastDeliveryOffset(unittest.TestCase):
+    """#27: reopen 뒤 redelivery 를 막으려면 "얼마나 읽었는지"가 필요하다."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = self.tmp.name
+        self.state = os.path.join(self.home, ".omhc", REPO_KEY)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def wm(self, session_id):
+        return due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id=session_id,
+                             path="/p", event="start", epoch=10.0)
+
+    def test_no_prior_delivery_yields_none(self):
+        self.assertIsNone(due.last_delivery_offset(self.state, "cx1", "claude-code"))
+
+    def test_offset_is_read_back(self):
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code",
+                           epoch=20.0, offset=4096)
+        self.assertEqual(due.last_delivery_offset(self.state, "cx1", "claude-code"), 4096)
+
+    def test_legacy_four_column_line_yields_none(self):
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code", epoch=20.0)
+        self.assertIsNone(due.last_delivery_offset(self.state, "cx1", "claude-code"))
+
+    def test_a_later_delivery_wins(self):
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code",
+                           epoch=20.0, offset=100)
+        due.mark_reopened(self.state, "cx1", "codex-cli", 30.0)
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code",
+                           epoch=40.0, offset=500)
+        self.assertEqual(due.last_delivery_offset(self.state, "cx1", "claude-code"), 500)
+
+    def test_offset_is_scoped_to_the_target_harness(self):
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code",
+                           epoch=20.0, offset=100)
+        self.assertIsNone(due.last_delivery_offset(self.state, "cx1", "gajae-code"))
+
+
 if __name__ == "__main__":
     unittest.main()

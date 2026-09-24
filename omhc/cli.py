@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import select
 import sys
 import time
 from typing import Dict, List, Optional
@@ -29,6 +30,45 @@ def _stdin_text() -> str:
             return ""
         return sys.stdin.read()
     except Exception:
+        return ""
+
+
+# --dry-run 이 stdin 을 기다리는 시간의 상한(초). 훅 예산과는 무관하다 —
+# 사람이 손으로 부르는 경로다.
+_DRY_RUN_STDIN_TIMEOUT = 0.2
+# 훅 payload 는 1KB 남짓이다. `yes |` 처럼 끝없이 쓰는 쪽이면 데이터가 늘
+# 준비돼 있어 타임아웃이 안 걸리므로 크기로도 끊는다(리뷰).
+_DRY_RUN_STDIN_CAP = 1 << 20
+
+
+def _dry_run_stdin_text() -> str:
+    """`--dry-run`(`--stdin` 없이)용 stdin 읽기 — 읽되 멈추지는 않는다(#27
+    리뷰). 문서화된 쓰임 하나가 `echo '{"cwd": R}' | omhc brief --dry-run`
+    처럼 다른 cwd 에서 payload 를 파이프로 넘기는 것이라 아예 안 읽으면 그
+    쓰임이 깨진다. 그렇다고 `sys.stdin.read()` 를 그대로 쓰면 파이프의 다른
+    쪽 끝이 한 줄 보내고 열어만 둔 채로 있어도(TTY 가 아니라 isatty() 는
+    False) EOF 를 영영 못 만나 멈춘다. 그래서 select 로 "지금 읽을 게 있는가"
+    만 묻고, 있으면 읽고, 다음 데이터가 타임아웃 안에 안 오면 거기서 멈춘다
+    — EOF(echo 처럼 쓰고 닫음)도 "읽을 게 있다"로 잡혀 즉시 반환된다."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return ""
+        fd = sys.stdin.fileno()
+        chunks = []
+        total = 0
+        while total < _DRY_RUN_STDIN_CAP:
+            ready, _w, _x = select.select([fd], [], [], _DRY_RUN_STDIN_TIMEOUT)
+            if not ready:
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        # select 는 Windows 에서 파이프에 못 쓴다; fileno()/read() 도 닫힌
+        # 스트림이면 던질 수 있다. 훅 경로가 아니어도 절대 던지지 않는다.
         return ""
 
 
@@ -666,6 +706,14 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     # 이미 다른 하네스에 전달됐었다면 due() 가 already_delivered() 에서 멈춰
     # resumed 턴을 영영 못 내보낸다(#22). "compact" 는 같은 신호를 주지 않는다
     # — 컨텍스트만 압축했을 뿐 사람의 새 턴이 없으므로 재전달할 것이 없다.
+    # 이 reopen 은 여전히 "다시 열렸을 수 있다"는 힌트일 뿐이다 — 빈 프롬프트
+    # resume 은 source:"resume" 을 내면서도 새 사람 턴을 안 남기고, mark/brief
+    # 동시 실행이면 이 reopen 이 brief 가 방금 내보낸 턴 뒤에 붙을 수도 있다
+    # (#27). 그래도 지운다고 브리지를 고치는 게 아니다 — due() 가 이 세션을
+    # 다시 후보로 보게 하는 유일한 신호가 이것이기 때문이다. 실제로 새로운지는
+    # brief.compute 가 delivered.tsv 의 offset(5번째 열)과 이 세션의 사람 said
+    # 이벤트를 비교해 판정한다 — mark 는 "후보로 볼까"만 결정하고, brief 는
+    # "보낼 게 있나"를 결정한다. 둘의 책임이 다르다.
     if session and str(payload.get("source") or "") == "resume":
         try:
             due.mark_reopened(state, session, args.harness, row["epoch"])
@@ -1278,9 +1326,21 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
 
 
 def cmd_brief(args, *, home=None, out=sys.stdout) -> int:
+    # --dry-run 은 사람이 손으로 확인하려고 부르는 경로다(훅은 --dry-run 을
+    # 절대 넘기지 않는다). 문서화된 쓰임 하나가 `echo '{"cwd": R}' | omhc brief
+    # --dry-run` 처럼 다른 cwd 에서 payload 를 파이프로 넘기는 것이라, 아예 안
+    # 읽으면 그 쓰임이 깨진다(리뷰). 그렇다고 `_stdin_text()` 를 그대로 쓰면
+    # 파이프의 다른 쪽 끝이 열려만 있고 아직 아무것도 안 쓴 채면(TTY 가 아니라
+    # isatty() 는 False) EOF 를 기다리며 멈춘다(#27). `_dry_run_stdin_text()`
+    # 는 select 로 "지금 읽을 게 있는가"만 먼저 물어 그 사이를 가른다. 실제
+    # 훅 경로(dry_run=False)는 오늘과 똑같이 그대로 읽는다.
+    if args.dry_run and args.stdin is None:
+        stdin_text = _dry_run_stdin_text()
+    else:
+        stdin_text = args.stdin if args.stdin is not None else _stdin_text()
     return brief.emit(
         harness=args.harness,
-        stdin_text=args.stdin if args.stdin is not None else _stdin_text(),
+        stdin_text=stdin_text,
         budget=args.budget,
         wire=args.wire,
         force=args.force,

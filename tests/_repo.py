@@ -276,6 +276,13 @@ def append_codex_turn(path: str, ordinal: int = 90) -> None:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def append_codex_user_turn(path: str, text: str, ordinal: int = 90) -> None:
+    """`codex exec resume <id> "<text>"` 가 같은 rollout 에 이어붙이는 것과 같은
+    모양의 user 메시지 한 줄(#27). `text=""` 로 빈 프롬프트 resume 을 재현한다."""
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(codex_user_row(text, ordinal=ordinal), ensure_ascii=False) + "\n")
+
+
 def plant_hook_install(home: str, adapter_id: str) -> None:
     """임시 홈에 `adapter_id` 의 SessionStart 훅을 실제 배포 조각 그대로 심는다.
 

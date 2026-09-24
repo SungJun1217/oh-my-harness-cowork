@@ -539,6 +539,26 @@ committed). Generate them from real sessions on your own machine with
   already-delivered Claude session, then switches to a new Codex one)
   isn't detected until it is.
 
+  **`reopen` is a hint, not a guarantee (#27).** `codex exec resume <id> ""`
+  fires `source:"resume"` and leaves a `reopen` line, but the rollout only
+  gains a user record with `"text": ""` — no human turn. Concurrently, Codex
+  fires its SessionStart hooks in parallel, so `mark` and `brief` can race:
+  `brief` can deliver a session in the same second `mark`'s growth check
+  reactivates it from a turn `brief` had already read, appending `reopen`
+  *after* the delivery. Either way, `due()` would hand the session back
+  to `brief` with nothing new to say. So `brief.compute` also records, on
+  every delivery, the byte offset just past what it read (a 5th
+  tab-separated column in `delivered.tsv`; readers that only look at the
+  first two columns are unaffected, and lines without it fall back to
+  today's unconditional behavior). Before redelivering a reopened session,
+  it requires at least one `author=="human"`, `verb=="said"` event with a
+  non-empty `text` at or past that offset — otherwise it returns empty
+  without touching the gate or `delivered.tsv`, exactly like the "nothing
+  to send" path. `--dry-run` runs the same check. `mark`'s `reopen` write is
+  unchanged — it is still the only signal that makes `due()` reconsider a
+  delivered session; `brief` is what decides whether there is actually
+  something new to send.
+
   </details>
 
 - **The on-disk formats are not an official contract.**
