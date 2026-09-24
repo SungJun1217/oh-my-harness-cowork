@@ -83,11 +83,14 @@ def git(repo: str, *args: str) -> None:
 # --- Codex rollout 픽스처 ------------------------------------------------------
 
 
-def codex_meta_row(session_id: str, cwd: str) -> dict:
+def codex_meta_row(session_id: str, cwd: str, extra: dict = None) -> dict:
+    payload = {"session_id": session_id, "cwd": cwd}
+    if extra:
+        payload.update(extra)
     return {
         "timestamp": "2026-09-22T16:30:00.000Z", "ordinal": 0,
         "type": "session_meta",
-        "payload": {"session_id": session_id, "cwd": cwd},
+        "payload": payload,
     }
 
 
@@ -145,11 +148,13 @@ def plant_codex(
     failing_shell: bool = False,
     ledger_home: str = "",
     when: float = 0.0,
+    meta_extra: dict = None,
 ) -> str:
     """임시 홈에 Codex rollout 하나를 심는다. 경로를 돌려준다.
 
     ledger_home 을 주면 원장에 start 행도 남긴다 — brief/due 경로를 태우는 테스트가
-    필요로 한다.
+    필요로 한다. meta_extra 는 session_meta.payload 에 그대로 병합된다(예: 서브에이전트
+    표식을 심는 테스트).
     """
     stamp = time.gmtime(when or time.time())
     directory = os.path.join(home, ".codex", "sessions",
@@ -157,7 +162,7 @@ def plant_codex(
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, "rollout-{}.jsonl".format(session_id))
 
-    rows = [codex_meta_row(session_id, cwd), codex_user_row(human)]
+    rows = [codex_meta_row(session_id, cwd, meta_extra), codex_user_row(human)]
     for i in range(shell_turns):
         fails = failing_shell and i == 0
         # 실패 턴은 의미 있는 명령을 쓴다 — FAIL 슬롯 단정이 그 문자열을 본다.

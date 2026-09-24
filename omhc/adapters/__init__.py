@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import calendar
+import os
 import re
 import time
 from typing import Dict, List, Optional
 
 from .. import fsio, locate
 from ..adapter import AdapterUnavailable, InstallReceipt
+
+# 헤드리스 오버라이드. 샌드박스에서 `claude -p`/`codex exec` 를 실제 세션으로
+# 받아들이기 위한 스위치다. 두 하네스가 공유하므로 이름에 벤더 문자열이 없다.
+# 서브에이전트/사이드체인은 이걸로도 절대 풀리지 않는다 — 그건 발화자가 다른
+# 문제이지 대화형/비대화형 문제가 아니다.
+HEADLESS_ENV = "OMHC_ALLOW_HEADLESS"
+
+
+def allow_headless() -> bool:
+    return os.environ.get(HEADLESS_ENV, "").strip() not in ("", "0", "false", "False")
 
 # 클래스의 리터럴 dict. 인스턴스가 아니라 클래스인 이유는 레포별 하네스 home 을
 # 나중에 CLI 에서 한 줄로 꽂을 수 있게 하기 위함이다.
