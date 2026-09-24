@@ -318,11 +318,15 @@ this layout.
 | `omhc show <E1\|#137\|abcdef01#137> [--full]` | **Looks up the original bytes by offset** (tier (b) entry point). Bare `#N` resolves against the most recently delivered session (same rule `log`'s pull accounting uses); `<prefix>#N` names the session explicitly — an ambiguous prefix lists the candidates |
 | `omhc note "<text>"` | Leave a note. Either harness's agent can call it from the plain command line |
 
-**Pull rate** ("pulled X of N injections") is the one number for judging
-whether omhc's overhead is worth it: X is how many of the N delivered
-sessions were actually dug into via `omhc show` or `omhc log` (each session
-counts once, no matter how many times it's pulled) — a human running
-`omhc log` by hand counts too, not just an agent.
+**Pull rate** ("pulled X of N recent injections") is the one number for
+judging whether omhc's overhead is worth it: X is how many of the last N
+(`PULL_RATE_WINDOW`, 20) delivered sessions for this repo were actually dug
+into via `omhc show` or `omhc log` (each session counts once, no matter how
+many times it's pulled) — a human running `omhc log` by hand counts too, not
+just an agent. The window is over the most recent deliveries in append order
+(matched by session id), not the whole history — otherwise a repo used for a
+long time would show a rate that keeps drifting down as old, no-longer-pulled
+deliveries pile up in a denominator that never shrinks.
 
 Turn it off: `OMHC_OFF=1`, or an `~/.omhc/<repo-key>/off` file.
 

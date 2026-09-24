@@ -8,6 +8,11 @@ from . import fsio, locate
 
 LEDGER_NAME = "ledger.jsonl"
 
+# read() 의 기본 limit. 호출자가 repo 로 거른 결과를 직접 슬라이스할 때도
+# (cli.cmd_status 처럼 한 번만 읽고 메모리에서 거를 때) 같은 값을 참조해야
+# read(repo_key=...) 를 두 번 부르는 것과 동일한 결과가 나온다.
+DEFAULT_LIMIT = 2000
+
 # PIPE_BUF(4096) 이하의 단일 write(2) 는 O_APPEND 에서 원자적이다. 400바이트
 # 상한이 그 보장의 근거이며, 여러 세션이 동시에 써도 부분 레코드가 생기지 않는다.
 MAX_LINE = 400
@@ -52,7 +57,7 @@ def append(record: dict, home: Optional[str] = None) -> bool:
     return True
 
 
-def read(limit: int = 2000, home: Optional[str] = None,
+def read(limit: int = DEFAULT_LIMIT, home: Optional[str] = None,
          repo_key: Optional[str] = None) -> List[dict]:
     """원장을 읽는다. 깨진 줄은 건너뛴다(fail-open).
 
