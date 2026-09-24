@@ -3,6 +3,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import re
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -36,38 +37,62 @@ _PARSED_ROLES = frozenset({"user", "assistant"})
 # 텍스트를 담는 블록 타입. user/developer 는 input_text, assistant 는 output_text.
 _TEXT_BLOCKS = frozenset({"input_text", "output_text", "text"})
 
-# --- 실측 (codex-cli 0.156.1, 2026-09-23) -----------------------------------
-# 셸 한 번은 레코드 두 개를 남긴다:
-#   response_item/custom_tool_call name="exec"  ← 모델이 쓴 JS 코드. 명령도
-#       종료 코드도 없고 출력은 성공·실패 모두 "Script completed" 로 시작한다.
-#   event_msg/item_completed item.type="CommandExecution"  ← argv, exit_code,
-#       status, cwd(file:// URI), parsed_cmd(Codex 자신의 분류)
-# 편집은 item.type="FileChange", changes={절대경로: {type, unified_diff}}.
-# 그래서 사실은 item 에서 읽고 JS 래퍼는 부기로 센다(둘 다 세면 이중 계상).
+# --- 실측 (codex-cli 0.141.0–0.155.1, 이 머신 211개 rollout, 2026-09) --------
+# 세 시대가 섞여 있다.
+#
+# era A (0.141–0.142): 셸은 response_item/function_call name="exec_command" 다.
+#   arguments 는 JSON 문자열이고 cmd(str, 381/381 실측)가 곧 셸 명령이다.
+#   workdir(절대경로, 가끔 없음)도 같이 온다. parsed_cmd 는 없다. 출력은
+#   function_call_output.output 의 평문이고("Chunk ID: … / Wall time: … /
+#   Process exited with code N 또는 Process running with session ID N /
+#   Original token count: N / Output: …") JSON 이 아니다. 백그라운드로 돌던
+#   프로세스는 나중의 write_stdin(args.session_id==N) 출력에서 결과가 온다.
+#   편집은 custom_tool_call name="apply_patch" 이고 JSON arguments 가 아니라
+#   최상위 input 에 원본 패치 텍스트가 들어 있다(*** Add/Update/Delete File:,
+#   *** Move to: 줄에서 경로를 읽는다). 같은 편집이 event_msg/item_completed
+#   FileChange(id==call_id, 절대경로)로 또 온다 — 둘 다 이벤트를 만들면 이중
+#   계상이라 FileChange 로 원래 이벤트를 덮어쓴다.
+# era B0 (0.144–0.148): 명령이 custom_tool_call name="exec" 의 JS 소스 문자열
+#   안에만 있다. JS 는 파싱하지 않는다(화이트리스트, fail-closed) — 그 구간의
+#   파일은 사실 없이 남는다(SCAN_DAYS 밖이라 손실을 감수한다).
+# era B (0.149–0.155.1, 현재): 셸은 event_msg/item_completed
+#   item.type="CommandExecution" 이다(status completed⇔exit 0, failed⇔exit≠0,
+#   parsed_cmd 있음). 같은 자리의 custom_tool_call name="exec" 는 JS 래퍼
+#   부기다. 멀티에이전트 도구(spawn_agent 등)는 function_call 로 온다.
 _JS_WRAPPER_TOOL = "exec"
 # parsed_cmd 가 전부 이 종류면 읽기다. Codex 에는 읽기 전용 도구가 따로 없어서
 # 이걸 안 쓰면 Codex 세션에 inspected 가 영영 없다.
 _INSPECT_KINDS = frozenset({"read", "list_files", "search"})
 _SHELL_FLAGS = frozenset({"-c", "-lc"})
 
-# --- UNVERIFIED (이전/다른 버전) --------------------------------------------
-# 0.156.1 은 function_call 을 쓰지 않는다. 아래는 Rust serde 필드명 기준 추정이고
-# 실물로 확인된 적이 없다. 모르는 모양은 예외 대신 unparsed 로 계상된다.
+# 도구 이름 → 중립 동사. 실측된 이름만 올린다(invariant 5 — 도구명 자체는 IR에
+# 남기지 않고 동사로만 흡수한다). 모르는 이름은 unmapped_tool 로만 세고 이벤트를
+# 만들지 않는다 — 빈 arg 의 가짜 ran 이 300개쯤 생기는 것보다 낫다.
 _VERB_BY_TOOL = {
-    "shell": "ran",
-    "local_shell": "ran",
     "exec_command": "ran",
     "apply_patch": "modified",
-    "write_file": "modified",
-    "read_file": "inspected",
-    "view_image": "inspected",
-    "update_plan": "said",
-    "web_search": "researched",
+    "spawn_agent": "delegated",
 }
-_DEFAULT_VERB = "ran"
-# ---------------------------------------------------------------------------
 
-_PATH_HINT_KEYS = ("path", "file_path", "filename")
+# 부기 전용 도구 — 이벤트를 만들지 않고 dropped["tool_bookkeeping"] 으로만
+# 센다. write_stdin 은 예외적으로 session_id 를 원래 exec_command 이벤트에
+# 되돌려 붙이는 데 쓰이지만(read_session 참고), 그 자신은 이벤트가 되지 않는다.
+_BOOKKEEPING_TOOLS = frozenset({
+    "write_stdin", "wait", "wait_agent", "list_agents", "interrupt_agent",
+    "send_message", "followup_task", "request_user_input",
+    "list_available_plugins_to_install",
+})
+
+# apply_patch 의 top-level input 에서 경로를 뽑는 줄. Move to: 는 목적지 경로다.
+_PATCH_PATH_RE = re.compile(
+    r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", re.MULTILINE)
+
+# exec_command/write_stdin 출력의 고정 헤더 줄. JSON 이 아니라 평문이다.
+_EXIT_CODE_RE = re.compile(
+    r"^(?:Process exited with code|Exit code:) (\d+)$", re.MULTILINE)
+_RUNNING_SID_RE = re.compile(
+    r"^Process running with session ID (\S+)$", re.MULTILINE)
+_ABORTED_RE = re.compile(r"^aborted by user after ", re.MULTILINE)
 
 # 사람이 타이핑한 내용의 kind 접두. 실측된 값:
 #   ['user.text']                        ← 진짜 사람의 프롬프트
@@ -184,40 +209,53 @@ def _text_of(blocks) -> str:
     )
 
 
+def _patch_paths(text: str, workdir: str) -> Tuple[str, ...]:
+    """apply_patch 의 원본 패치 텍스트에서 *** …: 줄만 읽는다. 상대경로는
+    workdir 이 있으면 그걸 기준으로 절대화하고, 없으면 받은 그대로 둔다."""
+    paths = []
+    for m in _PATCH_PATH_RE.finditer(text):
+        p = m.group(1).strip()
+        if workdir and not os.path.isabs(p):
+            p = os.path.join(workdir, p)
+        paths.append(p)
+    return tuple(paths)
+
+
 def _arg_and_paths(payload: dict) -> Tuple[str, Tuple[str, ...]]:
-    """UNVERIFIED: function_call.arguments 는 JSON 문자열로 온다고 가정한다."""
+    """exec_command 는 arguments(JSON 문자열).cmd, apply_patch 는 최상위 input
+    (원본 패치 텍스트), spawn_agent 는 task_name/agent_type 을 읽는다.
+    message 는 절대 읽지 않는다 — 에이전트가 쓴 프롬프트 본문이다."""
+    name = payload.get("name")
+
+    if name == "apply_patch":
+        text = payload.get("input")
+        if not isinstance(text, str):
+            return "", ()
+        workdir = payload.get("workdir")
+        paths = _patch_paths(text, workdir if isinstance(workdir, str) else "")
+        arg = paths[0] if paths else ""
+        return guard.redact_b64(arg)[:ARG_LIMIT], paths
+
     raw = payload.get("arguments")
     parsed = None
     if isinstance(raw, str):
         try:
             parsed = json.loads(raw)
         except ValueError:
-            return raw.strip()[:ARG_LIMIT], ()
+            parsed = None
     elif isinstance(raw, dict):
         parsed = raw
-    if parsed is None:
-        action = payload.get("action")
-        if isinstance(action, dict):
-            parsed = action
     if not isinstance(parsed, dict):
         return "", ()
 
-    command = parsed.get("command")
-    if isinstance(command, list):
-        arg = " ".join(str(c) for c in command)
-    elif isinstance(command, str):
-        arg = command
-    else:
-        arg = ""
-        for key in ("input", "patch", "query", "prompt"):
-            value = parsed.get(key)
-            if isinstance(value, str) and value.strip():
-                arg = value.strip()
-                break
-    paths = tuple(
-        str(parsed[key]) for key in _PATH_HINT_KEYS if isinstance(parsed.get(key), str)
-    )
-    return guard.redact_b64(arg)[:ARG_LIMIT], paths
+    if name == "spawn_agent":
+        arg = parsed.get("task_name") or parsed.get("agent_type") or ""
+        return guard.redact_b64(str(arg))[:ARG_LIMIT], ()
+
+    # exec_command: cmd 는 str, 실측 381/381.
+    cmd = parsed.get("cmd")
+    arg = cmd if isinstance(cmd, str) else ""
+    return guard.redact_b64(arg)[:ARG_LIMIT], ()
 
 
 def _uri_path(value) -> str:
@@ -254,6 +292,15 @@ def _item_fact(item: dict):
         )
         code = item.get("exit_code")
         ok = ok and (code is None or code == 0)
+        if not ok and code == 1 and kinds and kinds <= _INSPECT_KINDS:
+            # 실측(era B, 2건): grep/rg 류는 매치 없음을 exit 1 로 표현하는
+            # 관용구가 있다 — parsed_cmd 가 전부 읽기이고 출력도 비었으면 그
+            # 관용구로 본다. 위험: 검증용 `grep -q` 는 보통 parsed_cmd 가
+            # unknown 이라 여기 안 걸리고 실패로 남는다(의도적으로 손대지 않음
+            # — era A 처럼 명령어 이름으로 짐작하지 않는다).
+            output = "{}{}".format(item.get("stdout") or "", item.get("stderr") or "")
+            if not output.strip():
+                ok = True
         return verb, ok, guard.redact_b64(arg)[:ARG_LIMIT], paths
     if kind == "FileChange":
         changes = item.get("changes")
@@ -262,20 +309,40 @@ def _item_fact(item: dict):
     return None
 
 
-def _output_failed(payload: dict) -> bool:
-    """UNVERIFIED: function_call_output.output 의 실패 표현을 추정한다."""
-    output = payload.get("output")
-    if isinstance(output, str):
-        try:
-            output = json.loads(output)
-        except ValueError:
-            return False
-    if not isinstance(output, dict):
-        return False
-    code = output.get("exit_code")
-    if isinstance(code, int) and code != 0:
-        return True
-    return bool(output.get("is_error") or output.get("error"))
+class _ExecOutcome:
+    """_parse_exec_outcome 의 결과. ok=None 은 '이 출력에서 알 수 없다'다 —
+    오늘처럼 이벤트는 ok=True 로 남는다(출력이 아예 없는 abort 도 마찬가지)."""
+
+    __slots__ = ("ok", "session_id")
+
+    def __init__(self, ok: Optional[bool] = None, session_id: Optional[str] = None):
+        self.ok = ok
+        self.session_id = session_id
+
+
+def _parse_exec_outcome(output) -> _ExecOutcome:
+    """exec_command/write_stdin 의 평문 출력을 읽는다. JSON 이 아니다.
+
+    "Process exited with code N" / "Exit code: N" → 그 코드. "Process running
+    with session ID N" → 아직 안 끝났다, session_id 만 기록해 write_stdin 쪽
+    호출과 잇는다. "aborted by user after …" → 실패. 셋 다 없으면(포맷을 모름,
+    또는 abort 인데 이 문구가 아닌 경우) ok=None 으로 오늘처럼 True 를 유지한다.
+    """
+    if not isinstance(output, str):
+        return _ExecOutcome()
+    # 헤더만 본다. "Output:" 뒤 본문은 프로그램이 찍은 것이라, 백그라운드 빌드가
+    # "Exit code: 0" 같은 줄을 찍으면 "running" 헤더를 이기고 write_stdin 쪽 실패를
+    # 잃는다. apply_patch 의 "Exit code: N\n…\nOutput:" 도 같은 자리에서 갈린다.
+    output = output.partition("\nOutput:")[0]
+    m = _EXIT_CODE_RE.search(output)
+    if m:
+        return _ExecOutcome(ok=(int(m.group(1)) == 0))
+    m = _RUNNING_SID_RE.search(output)
+    if m:
+        return _ExecOutcome(session_id=m.group(1))
+    if _ABORTED_RE.search(output):
+        return _ExecOutcome(ok=False)
+    return _ExecOutcome()
 
 
 @_register
@@ -398,7 +465,12 @@ class CodexCliAdapter:
         events: List[Event] = []
         dropped: Dict[str, int] = {}
         unparsed = 0
-        pending: Dict[str, int] = {}
+        pending: Dict[str, int] = {}  # call_id -> events 인덱스
+        # write_stdin 의 args.session_id 로만 찾을 수 있다 — write_stdin 자신의
+        # call_id 는 별개다. "Process running with session ID N" 을 만난 원래
+        # exec_command 이벤트를 여기 걸어 두고, 나중에 write_stdin 이 오면
+        # 그 call_id 를 pending 에도 같은 인덱스로 얹는다(아래 참고).
+        pending_by_session: Dict[str, int] = {}
         seq = 0
         offset = 0
 
@@ -447,6 +519,16 @@ class CodexCliAdapter:
                         bump("item:" + str(item.get("type")))
                         continue
                     verb, ok, arg, paths = fact
+                    item_id = item.get("id")
+                    idx = pending.get(item_id) if isinstance(item_id, str) else None
+                    if idx is not None:
+                        # era A: apply_patch 의 call_id 와 이 FileChange 의 id 가
+                        # 같다 — 절대경로 사실은 여기에만 있으므로 원래 이벤트를
+                        # 갱신한다(둘 다 세면 이중 계상). seq/offset/length 는
+                        # 첫 레코드 것을 유지한다(invariant 6).
+                        events[idx] = events[idx]._replace(verb=verb, ok=ok, arg=arg,
+                                                            paths=paths)
+                        continue
                     seq += 1
                     events.append(Event(
                         seq=seq, epoch=epoch, author="agent", verb=verb, ok=ok,
@@ -486,32 +568,75 @@ class CodexCliAdapter:
 
                 if kind in ("function_call", "local_shell_call", "custom_tool_call"):
                     name = str(payload.get("name") or kind.replace("_call", ""))
+                    call_id = payload.get("call_id")
+
+                    if name == "write_stdin":
+                        # 백그라운드로 돌던 exec_command 로 입력을 보낸다 — 그
+                        # 자신은 부기이지만, 이 call_id 의 출력(아래)이 원래
+                        # exec_command 이벤트의 최종 결과다. session_id 로 그
+                        # 이벤트를 찾아 같은 인덱스를 이 call_id 에도 건다.
+                        sid = None
+                        args_raw = payload.get("arguments")
+                        args_parsed = None
+                        if isinstance(args_raw, str):
+                            try:
+                                args_parsed = json.loads(args_raw)
+                            except ValueError:
+                                args_parsed = None
+                        elif isinstance(args_raw, dict):
+                            args_parsed = args_raw
+                        if isinstance(args_parsed, dict):
+                            sid = args_parsed.get("session_id")
+                        target = pending_by_session.get(str(sid)) if sid is not None else None
+                        if isinstance(call_id, str) and target is not None:
+                            pending[call_id] = target
+                        bump("tool_bookkeeping")
+                        continue
+
+                    if name in _BOOKKEEPING_TOOLS:
+                        bump("tool_bookkeeping")
+                        continue
+
                     verb = _VERB_BY_TOOL.get(name)
                     if verb is None:
-                        verb = _DEFAULT_VERB
                         bump("unmapped_tool")
+                        continue
                     arg, paths = _arg_and_paths(payload)
                     seq += 1
                     events.append(Event(
                         seq=seq, epoch=epoch, author="agent", verb=verb, ok=True,
                         text="", arg=arg, paths=paths, offset=start, length=len(raw),
                     ))
-                    call_id = payload.get("call_id")
                     if isinstance(call_id, str):
                         pending[call_id] = len(events) - 1
                     continue
 
                 if kind in ("function_call_output", "local_shell_call_output",
                             "custom_tool_call_output"):
-                    if _output_failed(payload):
-                        idx = pending.get(payload.get("call_id"))
+                    outcome = _parse_exec_outcome(payload.get("output"))
+                    call_id = payload.get("call_id")
+                    if outcome.session_id is not None:
+                        idx = pending.get(call_id)
                         if idx is not None:
-                            events[idx] = events[idx]._replace(ok=False)
+                            pending_by_session[outcome.session_id] = idx
+                    elif outcome.ok is not None:
+                        idx = pending.get(call_id)
+                        if idx is not None:
+                            events[idx] = events[idx]._replace(ok=outcome.ok)
                     bump("tool_output")
                     continue
 
                 if kind == "reasoning":
                     bump("reasoning")
+                    continue
+
+                if kind in ("web_search_call", "tool_search_call", "tool_search_output",
+                            "agent_message"):
+                    # agent_message 는 에이전트 간 메시지다(실측 170건) — human
+                    # 도 said 도 아니다(invariant 3). web_search_call/
+                    # tool_search_* 는 실측되지 않은 부기 후보라 unparsed 대신
+                    # dropped 로 계상한다.
+                    bump(kind)
                     continue
 
                 # response_item 인데 모양을 모른다 → 조용히 버리지 않는다.
