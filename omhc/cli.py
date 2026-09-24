@@ -636,6 +636,7 @@ def cmd_brief(args, *, home=None, out=sys.stdout) -> int:
         wire=args.wire,
         force=args.force,
         as_text=args.text or args.dry_run,
+        dry_run=args.dry_run,
         home=home,
         out=out,
     )
@@ -826,7 +827,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="주입 JSON 형식. 기본값은 --harness 에서 유도한다")
     p.add_argument("--force", action="store_true")
     p.add_argument("--text", action="store_true")
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true",
+                   help="본문만 텍스트로 보이고 게이트·아카이브·전달을 건드리지 않는다")
     p.add_argument("--stdin", default=None, help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_brief)
 
