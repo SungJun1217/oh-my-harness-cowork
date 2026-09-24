@@ -538,3 +538,104 @@ class CodexCliAdapter:
         from .. import agents_md
 
         return (agents_md.install,)
+
+    def _config_trusts_hook(self) -> bool:
+        """`~/.codex/config.toml` 에 이 hooks.json 을 신뢰한다는 항목이 있는가.
+
+        3.9 에는 tomllib 이 없으므로 평문 부분 문자열 검색으로 충분하다 — 해시
+        의미론(codex 가 훅 내용의 무엇을 해시하는지)은 확인된 바 없으므로, 이
+        신호 하나만으로 실패 판정을 내리지 않는다(정적 힌트일 뿐이다).
+        """
+        config_path = os.path.join(self.home, ".codex", "config.toml")
+        needle = 'hooks.state."{}:session_start:'.format(self.hooks_path())
+        try:
+            with open(config_path, encoding="utf-8", errors="replace") as fh:
+                return needle in fh.read()
+        except OSError:
+            return False
+
+    def health(self, repo_root: Optional[str], ledger_rows):
+        """훅이 설치돼 있는데 실제로 돈 적이 없는지 행태로 진단한다.
+
+        정적 신호(hooks.json 존재)만으로는 신뢰 여부를 알 수 없다 — codex-cli
+        0.155.1 은 신뢰되지 않은 훅을 메시지도 원장 행도 없이 건너뛴다. 그래서
+        설치 이후 Codex 세션이 실제로 omhc mark 를 남겼는지를 원장과 대조한다.
+        무엇이 잘못돼도 status 자체가 죽으면 안 되므로(진단 도구), 통째로
+        감싸 실패는 PASS/unknown 으로 열화시킨다.
+        """
+        try:
+            if not self.hook_is_installed():
+                # 훅을 설치한 적 없는 사용자에게 매번 행을 보여주는 건 소음이다
+                # — "설치 안 됨" 은 기존 "adapters" 행이 이미 말해준다.
+                return ()
+            hooks_path = self.hooks_path()
+            try:
+                install_epoch = os.path.getmtime(hooks_path)
+            except OSError as exc:
+                return (("codex hook", True, "unknown ({})".format(exc)),)
+
+            # 세션 id 는 전역 유일이다(Codex 가 부여) — 레포 경계로 거르지 않는다.
+            # ledger_rows 를 레포로 먼저 거르면 워크트리·서브모듈처럼 자기 .git 을
+            # 가진 중첩 디렉터리에서 시작한 세션이 새는 repo 키로 기록돼 영원히
+            # 안 돈 것으로 보인다(리뷰 결함) — 그래서 호출자(cli.py)는 레포로
+            # 거르지 않은 원장을 여기로 넘긴다.
+            ran_sessions = set()
+            for row in ledger_rows:
+                if row.get("harness") != self.adapter_id:
+                    continue
+                if row.get("via") == "scan":
+                    # 향후 백필 행. 훅이 실제로 돌았다는 증거가 아니므로 세지
+                    # 않는다 — 세면 문제를 가려버린다.
+                    continue
+                sid = row.get("session")
+                if sid:
+                    ran_sessions.add(sid)
+
+            candidates = []  # (started_epoch, ref, meta)
+            for ref in self.list_sessions(repo_root):
+                meta = session_meta(ref.source_path)
+                if not meta:
+                    continue
+                # 파일 두 개(hooks.json mtime, rollout 의 session_meta.timestamp)의
+                # 시각을 비교한다 — invariant 6 이 금지하는 "순서의 근거"가 아니라
+                # 일회성 진단이라 허용한다(이 비교 결과로 이벤트를 정렬하지 않는다).
+                started = iso_epoch(meta.get("timestamp"))
+                if not started or started <= install_epoch:
+                    continue
+                candidates.append((started, ref, meta))
+
+            if not candidates:
+                return (("codex hook", True, "no Codex sessions since install"),)
+
+            # 신뢰는 config.toml 을 바꾸지, hooks.json 을 바꾸지 않는다 — 신뢰
+            # 이전 세션은 install_epoch 이후라도 영원히 "안 돈 것"으로 남는다.
+            # 그래서 전체 개수가 아니라 **가장 최신** 세션의 행태로 판정한다:
+            # 최신이 돌았으면 그 시점부터는 신뢰가 성립한 것이므로 PASS, 아니면
+            # 최신에서부터 거슬러 연속으로 안 돈 세션 수를 센다.
+            candidates.sort(key=lambda c: c[0], reverse=True)
+            missing_streak = 0
+            newest_missing_meta = None
+            for started, ref, meta in candidates:
+                if ref.session_id in ran_sessions:
+                    break
+                missing_streak += 1
+                if newest_missing_meta is None:
+                    newest_missing_meta = meta
+
+            if missing_streak == 0:
+                return (("codex hook", True, "ran for the latest session since install"),)
+
+            # UNVERIFIED: Codex Desktop/IDE 세션(originator 예: codex_work_desktop)이
+            # 이 훅을 애초에 전혀 돌리지 않을 수 있다 — 확인된 바 없다. 오진단이
+            # 눈에 보이도록 가장 최신 미실행 세션의 originator 를 detail 에 남긴다.
+            originator = newest_missing_meta.get("originator")
+            if not isinstance(originator, str) or not originator:
+                originator = "unknown"
+            detail = ("{} consecutive Codex session(s) since install never ran the "
+                       "omhc hook (newest: {}) — trust it in Codex (untrusted hooks "
+                       "are skipped silently)".format(missing_streak, originator))
+            if not self._config_trusts_hook():
+                detail += "; no trust entry in ~/.codex/config.toml"
+            return (("codex hook", False, detail),)
+        except Exception as exc:  # 진단이 status 자체를 죽이면 안 된다 (invariant 7)
+            return (("codex hook", True, "unknown ({})".format(exc)),)

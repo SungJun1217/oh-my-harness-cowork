@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from omhc import adapter as A
+from omhc import cli
 from omhc.adapters import codex_cli as CX
 
 from . import _repo
@@ -623,3 +626,328 @@ class TestMetadataKindDiscriminator(unittest.TestCase):
             "content_item_kinds": ["user.text"]}}
         self.assertEqual(CX.human_kinds(payload), ["user.text"])
         self.assertIsNone(CX.human_kinds({"content_item_kinds": ["user.text"]}))
+
+
+class TestHealth(unittest.TestCase):
+    """codex-cli 0.155.1 은 신뢰 안 된 훅을 메시지도 원장 행도 없이 건너뛴다 —
+    이 진단이 그 상태를 행태 증거로 잡아낸다."""
+
+    INSTALL_EPOCH = 1700000000.0  # 2023-11-14T22:13:20Z
+
+    def _install_hook(self, home: str) -> str:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "hooks.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+        os.utime(path, (self.INSTALL_EPOCH, self.INSTALL_EPOCH))
+        return path
+
+    def _rollout(self, home: str, session_id: str, iso_ts: str, *,
+                 extra_meta=None, raw: bytes = None) -> str:
+        stamp = time.gmtime()
+        directory = os.path.join(
+            home, ".codex", "sessions",
+            time.strftime("%Y", stamp), time.strftime("%m", stamp),
+            time.strftime("%d", stamp))
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "rollout-{}.jsonl".format(session_id))
+        if raw is not None:
+            with open(path, "wb") as fh:
+                fh.write(raw)
+            return path
+        payload = {"session_id": session_id, "cwd": REPO, "timestamp": iso_ts}
+        payload.update(extra_meta or {})
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "timestamp": iso_ts, "ordinal": 0, "type": "session_meta",
+                "payload": payload,
+            }) + "\n")
+        return path
+
+    def test_no_hook_installed_reports_nothing(self):
+        with tempfile.TemporaryDirectory() as home:
+            rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertEqual(rows, ())
+
+    def test_fail_when_a_post_install_session_has_no_ledger_row(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z",
+                          extra_meta={"originator": "codex_cli_rs"})
+            rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertEqual(len(rows), 1)
+            label, ok, detail = rows[0]
+            self.assertIsInstance(label, str)
+            self.assertIsInstance(ok, bool)
+            self.assertIsInstance(detail, str)
+            self.assertEqual(label, "codex hook")
+            self.assertFalse(ok)
+            self.assertIn("1 consecutive Codex session", detail)
+            self.assertIn("newest: codex_cli_rs", detail)
+            self.assertIn("no trust entry", detail)
+
+    def test_pass_when_the_ledger_has_a_matching_codex_row(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z")
+            rows = CX.CodexCliAdapter(home=home).health(
+                REPO, [{"harness": "codex-cli", "session": "s1"}])
+            self.assertTrue(rows[0][1])
+            self.assertIn("ran for the latest session", rows[0][2])
+
+    def test_pass_when_only_an_older_pre_trust_session_is_missing(self):
+        """리뷰 결함: 신뢰는 config.toml 을 바꾸지 hooks.json 을 바꾸지 않는다 —
+        신뢰 이전 세션이 안 돈 채 남아 있어도, 신뢰 이후(최신) 세션이 돌았다면
+        지금은 신뢰가 성립한 상태이므로 PASS 여야 한다."""
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            self._rollout(home, "before-trust", "2023-11-15T00:00:00.000Z")
+            self._rollout(home, "after-trust", "2023-11-16T00:00:00.000Z")
+            rows = CX.CodexCliAdapter(home=home).health(
+                REPO, [{"harness": "codex-cli", "session": "after-trust"}])
+            self.assertTrue(rows[0][1])
+            self.assertIn("ran for the latest session", rows[0][2])
+
+    def test_fail_when_only_the_newest_session_is_missing(self):
+        """오래된 세션들이 다 돌았어도, 가장 최신이 안 돌았으면 지금은 다시
+        신뢰가 깨진 상태이므로 FAIL 이어야 한다."""
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            self._rollout(home, "ran", "2023-11-15T00:00:00.000Z")
+            self._rollout(home, "newest", "2023-11-16T00:00:00.000Z",
+                          extra_meta={"originator": "codex_work_desktop"})
+            rows = CX.CodexCliAdapter(home=home).health(
+                REPO, [{"harness": "codex-cli", "session": "ran"}])
+            self.assertFalse(rows[0][1])
+            self.assertIn("1 consecutive Codex session", rows[0][2])
+            self.assertIn("newest: codex_work_desktop", rows[0][2])
+
+    def test_pass_when_the_rollout_predates_the_hook_install(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            self._rollout(home, "s1", "2020-01-01T00:00:00.000Z")
+            rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertTrue(rows[0][1])
+            self.assertIn("no Codex sessions", rows[0][2])
+
+    def test_a_scan_backfilled_ledger_row_does_not_count_as_ran(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z")
+            rows = CX.CodexCliAdapter(home=home).health(
+                REPO, [{"harness": "codex-cli", "session": "s1", "via": "scan"}])
+            self.assertFalse(rows[0][1])
+
+    def test_a_subagent_rollout_is_ignored(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z",
+                          extra_meta={"thread_source": "subagent"})
+            rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertTrue(rows[0][1])
+            self.assertIn("no Codex sessions", rows[0][2])
+
+    def test_garbage_rollout_and_config_do_not_raise(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z",
+                          raw=b"\x00\xff{not json\n\n\x80\x81")
+            with open(os.path.join(home, ".codex", "config.toml"), "wb") as fh:
+                fh.write(b"\xff\xfe garbage \x80\x81")
+            rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertIsInstance(rows, tuple)
+
+    def test_config_trust_entry_drops_the_static_hint(self):
+        with tempfile.TemporaryDirectory() as home:
+            hooks_path = self._install_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z")
+            with open(os.path.join(home, ".codex", "config.toml"), "w",
+                     encoding="utf-8") as fh:
+                fh.write('[hooks.state."{}:session_start:deadbeef"]\ntrusted = true\n'
+                         .format(hooks_path))
+            rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertFalse(rows[0][1])
+            self.assertNotIn("no trust entry", rows[0][2])
+
+
+class TestStatusIntegration(unittest.TestCase):
+    """omhc status 가 어댑터 health 행을 실제로 접어 넣는지 — adapters.present()
+    는 실제 $HOME 을 본다(AGENTS.md), 그래서 그 발견 자체는 고정시켜 두고
+    이 테스트가 만드는 임시 $HOME 으로 health() 를 부르는지만 본다."""
+
+    def setUp(self):
+        self.base = tempfile.TemporaryDirectory()
+        self.addCleanup(self.base.cleanup)
+        self.home = os.path.join(self.base.name, "home")
+        self.repo = os.path.join(self.base.name, "repo")
+        os.makedirs(self.home)
+        os.makedirs(self.repo)
+        _repo.git(self.repo, "init", "-q")
+        self.root = os.path.realpath(self.repo)
+
+        hooks_dir = os.path.join(self.home, ".codex")
+        os.makedirs(hooks_dir)
+        hooks_path = os.path.join(hooks_dir, "hooks.json")
+        with open(hooks_path, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+        os.utime(hooks_path, (1700000000.0, 1700000000.0))
+
+        sessions_dir = os.path.join(
+            self.home, ".codex", "sessions", time.strftime("%Y/%m/%d", time.gmtime()))
+        os.makedirs(sessions_dir)
+        with open(os.path.join(sessions_dir, "rollout-s1.jsonl"), "w",
+                 encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "timestamp": "2023-11-15T00:00:00.000Z", "ordinal": 0,
+                "type": "session_meta",
+                "payload": {"session_id": "s1", "cwd": self.root,
+                           "timestamp": "2023-11-15T00:00:00.000Z"},
+            }) + "\n")
+
+        cwd = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, cwd)
+
+    def run_status(self, extra_args=()):
+        out = io.StringIO()
+        with mock.patch.object(cli.adapters, "present", return_value=["codex-cli"]):
+            code = cli.cmd_status(
+                cli.build_parser().parse_args(["status"] + list(extra_args)),
+                home=self.home, out=out)
+        return code, out.getvalue()
+
+    def test_status_fails_when_the_codex_hook_never_ran(self):
+        code, text = self.run_status()
+        self.assertEqual(code, 1)
+        line = next(l for l in text.splitlines() if "codex hook" in l)
+        self.assertTrue(line.startswith("FAIL"))
+
+    def test_json_carries_the_health_list(self):
+        code, text = self.run_status(["--json"])
+        payload = json.loads(text)
+        self.assertIn("health", payload)
+        self.assertEqual(payload["health"][0]["label"], "codex hook")
+        self.assertFalse(payload["health"][0]["ok"])
+
+
+class TestHealthMatchesAcrossNestedGitRoots(unittest.TestCase):
+    """리뷰 결함: 세션은 워크트리 루트 자신의 repo 키로 원장에 기록되지만,
+    status 는 그걸 감싼 상위 레포 키로 조회된다 — 필터가 레포로 걸리면 세션이
+    영원히 "안 돈 것"으로 보인다. 실제 cmd_mark → cmd_status 경로로 재현한다."""
+
+    def setUp(self):
+        self.base = tempfile.TemporaryDirectory()
+        self.addCleanup(self.base.cleanup)
+        self.home = os.path.join(self.base.name, "home")
+        self.repo = os.path.join(self.base.name, "repo")
+        os.makedirs(self.home)
+        os.makedirs(self.repo)
+        _repo.git(self.repo, "init", "-q")
+        self.root = os.path.realpath(self.repo)
+
+        # 자기 .git 을 가진 중첩 디렉터리 — 실물 워크트리(.claude/worktrees/*)와
+        # 같은 모양: resolve_repo_root 가 여기서 멈추고, 이 경로의 repo 키는
+        # 상위 레포의 것과 다르다.
+        self.nested = os.path.join(self.root, ".claude", "worktrees", "sub")
+        os.makedirs(self.nested)
+        _repo.git(self.nested, "init", "-q")
+
+        hooks_dir = os.path.join(self.home, ".codex")
+        os.makedirs(hooks_dir)
+        hooks_path = os.path.join(hooks_dir, "hooks.json")
+        with open(hooks_path, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+        os.utime(hooks_path, (1700000000.0, 1700000000.0))
+
+        sessions_dir = os.path.join(
+            self.home, ".codex", "sessions", time.strftime("%Y/%m/%d", time.gmtime()))
+        os.makedirs(sessions_dir)
+        self.rollout_path = os.path.join(sessions_dir, "rollout-s1.jsonl")
+        with open(self.rollout_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "timestamp": "2023-11-15T00:00:00.000Z", "ordinal": 0,
+                "type": "session_meta",
+                "payload": {"session_id": "s1", "cwd": self.nested,
+                           "timestamp": "2023-11-15T00:00:00.000Z"},
+            }) + "\n")
+
+        self._cwd = os.getcwd()
+        self.addCleanup(os.chdir, self._cwd)
+
+    def _mark(self):
+        os.chdir(self.nested)
+        stdin = json.dumps({"cwd": self.nested, "transcript_path": self.rollout_path,
+                            "session_id": "s1"})
+        out = io.StringIO()
+        code = cli.cmd_mark(
+            cli.build_parser().parse_args(
+                ["mark", "--harness", "codex-cli", "--stdin", stdin]),
+            home=self.home, out=out)
+        self.assertEqual(code, 0)
+
+    def test_a_nested_worktrees_ledger_row_still_counts_as_ran(self):
+        """mark 는 워크트리 쪽 cwd 로 불려 자기 repo 키(다른 키)로 기록한다;
+        status 는 상위 레포에서 불린다. 필터가 레포로 걸리면 이 행이 사라진다."""
+        self._mark()
+
+        from omhc import ledger, locate
+
+        rows = ledger.read(home=self.home)
+        self.assertEqual(len(rows), 1)
+        self.assertNotEqual(rows[0]["repo"], locate.repo_key(self.root))
+
+        os.chdir(self.root)
+        out = io.StringIO()
+        with mock.patch.object(cli.adapters, "present", return_value=["codex-cli"]):
+            code = cli.cmd_status(
+                cli.build_parser().parse_args(["status"]), home=self.home, out=out)
+        line = next(l for l in out.getvalue().splitlines() if "codex hook" in l)
+        self.assertTrue(line.startswith("PASS"), out.getvalue())
+
+
+class TestHealthLedgerWindow(unittest.TestCase):
+    """리뷰 결함: ledger.read 의 기본 limit(2000, 머신 전체 공유)이 다른 레포의
+    행으로 채워지면 이 레포/세션의 행이 창 밖으로 밀려날 수 있다. health 에
+    넘기는 원장은 무제한으로 읽어야 한다."""
+
+    def test_more_than_2000_rows_from_another_repo_do_not_hide_a_match(self):
+        with tempfile.TemporaryDirectory() as home:
+            hooks_dir = os.path.join(home, ".codex")
+            os.makedirs(hooks_dir)
+            hooks_path = os.path.join(hooks_dir, "hooks.json")
+            with open(hooks_path, "w", encoding="utf-8") as fh:
+                json.dump({"hooks": {"SessionStart": [
+                    {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+            os.utime(hooks_path, (1700000000.0, 1700000000.0))
+
+            sessions_dir = os.path.join(
+                home, ".codex", "sessions", time.strftime("%Y/%m/%d", time.gmtime()))
+            os.makedirs(sessions_dir)
+            with open(os.path.join(sessions_dir, "rollout-s1.jsonl"), "w",
+                     encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "timestamp": "2023-11-15T00:00:00.000Z", "ordinal": 0,
+                    "type": "session_meta",
+                    "payload": {"session_id": "s1", "cwd": REPO,
+                               "timestamp": "2023-11-15T00:00:00.000Z"},
+                }) + "\n")
+
+            from omhc import ledger
+
+            for i in range(2500):
+                ledger.append({"repo": "some-other-repo", "harness": "codex-cli",
+                               "session": "unrelated-{}".format(i), "event": "start",
+                               "epoch": i, "path": "", "cwd": "/nope"}, home=home)
+            ledger.append({"repo": "some-other-repo", "harness": "codex-cli",
+                           "session": "s1", "event": "start", "epoch": 3000,
+                           "path": "", "cwd": "/nope"}, home=home)
+
+            all_rows = ledger.read(home=home, limit=0)
+            self.assertEqual(len(all_rows), 2501)
+            rows = CX.CodexCliAdapter(home=home).health(REPO, all_rows)
+            self.assertTrue(rows[0][1])
+            self.assertIn("ran for the latest session", rows[0][2])

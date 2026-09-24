@@ -428,3 +428,9 @@ class ClaudeCodeAdapter:
         상속으로 얻어지지 않는다.
         """
         return ()
+
+    def health(self, repo_root: Optional[str], ledger_rows):
+        """Claude Code 의 SessionStart 훅은 신뢰 문제가 없어 codex 류의 조용한
+        생략이 없다 — 진단할 행태 결함이 없으므로 빈 튜플이다.
+        """
+        return ()

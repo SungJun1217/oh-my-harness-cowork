@@ -335,6 +335,29 @@ class AdapterContract(unittest.TestCase):
                 # 다를 수 있다 — 여기서는 예외가 없다는 것만 본다).
                 adapters.get(adapter_id).classify("/nope/missing.jsonl")
 
+    def test_27_health_is_a_tuple_of_3_tuples_and_never_raises(self):
+        """health 는 선택 메서드다(fallback_channels 와 같은 패턴). 빈 홈에서도
+        절대 던지지 않고, 준 게 있다면 (label, ok, detail) 모양이어야 한다.
+
+        빈 홈에서는 대부분의 어댑터가 (정당하게) 빈 튜플을 준다 — codex-cli 는
+        훅이 설치돼 있지 않으면 행 자체를 생략한다. 여기서 벤더 지식 없이 훅
+        설치 상태를 흉내 낼 방법이 없으므로, 실제로 행이 나오는 경로의 모양
+        검증은 해당 어댑터의 전용 테스트(tests/test_codex_cli.py::TestHealth)가
+        맡는다 — 이 테스트는 "던지지 않는다" 와 "나온 게 있다면 모양이 맞다"
+        만 모든 어댑터에 대해 증명한다.
+        """
+        for adapter_id in adapter_ids():
+            with self.subTest(adapter=adapter_id):
+                with tempfile.TemporaryDirectory() as home:
+                    rows = adapters.get(adapter_id, home=home).health(REPO, [])
+                rows = tuple(rows)
+                for row in rows:
+                    self.assertEqual(len(row), 3)
+                    label, ok, detail = row
+                    self.assertIsInstance(label, str)
+                    self.assertIsInstance(ok, bool)
+                    self.assertIsInstance(detail, str)
+
 
 if __name__ == "__main__":
     unittest.main()

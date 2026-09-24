@@ -206,7 +206,10 @@ def _check(out, label: str, ok: bool, detail: str) -> bool:
 def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     root, key, state = _state_for(home)
     installed = adapters.present(now=time.time)
-    rows = [r for r in ledger.read(home=home) if r.get("repo") == key]
+    # repo_key= 를 쓴다 — read() 는 limit(기본 2000, 머신 전체 공유)보다 먼저
+    # repo 필터를 적용하므로, 여러 레포를 오가는 사람에게서 이 레포의 행이
+    # 슬라이스 밖으로 밀려나지 않는다(ledger.read 문서 참고).
+    rows = ledger.read(home=home, repo_key=key)
     artifact = os.path.join(state, ARTIFACT_NAME)
 
     # watch.lag 가 정확히 이 계산을 소유한다. 두 벌로 두면 고정 레이아웃이
@@ -226,6 +229,22 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     leaked = bool(shared) and managed_block.installed_captured_at(
         agents_md.path_for(root)) is not None
 
+    # 선택적 어댑터 진단(예: codex 신뢰 안 된 훅). 세션 id 는 전역 유일이므로
+    # 레포로 거르지 않은 원장을 넘긴다 — 위 rows 처럼 이 레포로 미리 거르면
+    # 자기 .git 을 가진 중첩 워크트리·서브모듈에서 시작한 세션이 다른 repo 키로
+    # 기록돼 여기서 영원히 "안 돈 것"으로 보인다. limit(기본 2000, 머신 전체
+    # 공유)이 14일 창을 못 덮을 수 있다는 게 알려진 한계다 — 개인용 도구고
+    # status 는 훅 경로가 아니므로 필요하면 여기서만 무제한으로 읽는다.
+    # 한 어댑터가 죽어도 나머지 status 가 죽으면 안 되므로 어댑터별로 감싼다.
+    all_rows = ledger.read(home=home, limit=0)
+    health_rows = []
+    for adapter_id in installed:
+        try:
+            inst = adapters.get(adapter_id, home=home)
+            health_rows.extend(getattr(inst, "health", lambda *a: ())(root, all_rows))
+        except Exception:
+            continue
+
     if args.json:
         out.write(json.dumps({
             "repo_root": root, "repo_key": key, "state_dir": state,
@@ -234,6 +253,8 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
             "injections": injections, "pulls": pulls,
             "off": due.is_off(state), "watcher_pid": watch.read_lock(state),
             "instruction_files": {"shared": shared, "stale_block": leaked},
+            "health": [{"label": label, "ok": ok, "detail": detail}
+                       for label, ok, detail in health_rows],
         }, ensure_ascii=False, indent=2) + "\n")
         return 0
 
@@ -260,6 +281,8 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
                      "AGENTS.md not shared with CLAUDE.md"
                      if os.path.exists(agents_md.path_for(root))
                      else "no AGENTS.md")
+    for label, health_ok, detail in health_rows:
+        ok &= _check(out, label, health_ok, detail)
     # 항상 참인 항목을 ok 에 접으면 독자가 리터럴 True 를 추적해야 안다.
     # watcher 줄처럼 정보로만 출력한다.
     _check(out, "pull rate", True,
