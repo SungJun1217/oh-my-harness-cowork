@@ -9,6 +9,11 @@ on:
   push:
   pull_request:
 
+# 테스트는 체크아웃만 한다 — GITHUB_TOKEN 에 읽기 외 권한을 주지 않는다
+# (CodeQL actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
