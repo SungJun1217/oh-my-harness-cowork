@@ -7,7 +7,10 @@ import sys
 import time
 from typing import List, Optional
 
-from . import adapters, agents_md, brief, due, gate, index, ledger, locate, pin, watch
+from . import (
+    adapters, agents_md, brief, due, gate, index, ledger, locate, managed_block, pin,
+    watch,
+)
 from .adapter import AdapterUnavailable
 
 PROG = "omhc"
@@ -217,6 +220,12 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         with open(delivered, encoding="utf-8", errors="replace") as fh:
             injections = len([line for line in fh if line.strip()])
 
+    # AGENTS.md 가 CLAUDE.md 와 공유되면 Codex Path B 는 절대 쓰면 안 된다 —
+    # 그 파일을 공유 배선 만들기 *전에* 심어 둔 낡은 관리 구간만 실패 사유다.
+    shared = agents_md.shared_with_claude(root)
+    leaked = bool(shared) and managed_block.installed_captured_at(
+        agents_md.path_for(root)) is not None
+
     if args.json:
         out.write(json.dumps({
             "repo_root": root, "repo_key": key, "state_dir": state,
@@ -224,6 +233,7 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
             "archive": lag_rows,
             "injections": injections, "pulls": pulls,
             "off": due.is_off(state), "watcher_pid": watch.read_lock(state),
+            "instruction_files": {"shared": shared, "stale_block": leaked},
         }, ensure_ascii=False, indent=2) + "\n")
         return 0
 
@@ -238,6 +248,18 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
                  or "nothing pinned yet")
     ok &= _check(out, "off switch", not due.is_off(state),
                  "off" if due.is_off(state) else "on")
+    if leaked:
+        ok &= _check(out, "instruction files", False,
+                     "{}; stale omhc block in AGENTS.md would leak into Claude — "
+                     "run `omhc clear`".format(shared))
+    elif shared:
+        ok &= _check(out, "instruction files", True,
+                     "{} -> Codex Path B disabled, falls to .omhc/outbox".format(shared))
+    else:
+        ok &= _check(out, "instruction files", True,
+                     "AGENTS.md not shared with CLAUDE.md"
+                     if os.path.exists(agents_md.path_for(root))
+                     else "no AGENTS.md")
     # 항상 참인 항목을 ok 에 접으면 독자가 리터럴 True 를 추적해야 안다.
     # watcher 줄처럼 정보로만 출력한다.
     _check(out, "pull rate", True,

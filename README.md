@@ -61,6 +61,21 @@ omhc status          # 다섯 검사 전부 PASS/FAIL. SKIP 은 없다
 | Claude Code | `hooks/claude-settings.fragment.json` | `~/.claude/settings.json` 의 `hooks` |
 | Codex CLI | `hooks/codex-hooks.json` | `~/.codex/hooks.json` |
 
+### AGENTS.md 를 Claude Code 와 공유하는 레포
+
+권장 배치는 `AGENTS.md` 를 하네스 중립 원본으로 두고, `CLAUDE.md` 는 실제 파일로
+`@AGENTS.md` 로 시작한 뒤 Claude 전용 내용을 잇는 것입니다(이 레포 자체가 그
+구조입니다). `CLAUDE.md` 를 `AGENTS.md` 로의 심링크로 두는 것도 마찬가지로
+공유입니다 — 어느 쪽이든 `AGENTS.md` 는 심링크여선 안 됩니다.
+
+이런 레포에서는 omhc 가 `AGENTS.md` 에 절대 쓰지 않습니다. Codex 용 관리 구간
+(Path B)이 Claude Code 세션에도 그대로 읽혀 핸드오프가 새고, 심링크를 통해 쓰면
+공유·추적 중인 원본 파일이 바뀌기 때문입니다. Codex 로의 핸드오프는 Codex의
+SessionStart 훅(Path A)으로 전달되거나, 그 훅이 없으면 `.omhc/outbox/` 에
+파일로 떨어지는데 **Codex 는 그 디렉터리를 자동으로 읽지 않으므로** 위 표의
+Codex 훅을 반드시 설치하십시오. `omhc status` 의 `instruction files` 행이 이
+레이아웃을 보여줍니다.
+
 ## 사용
 
 | 명령 | 역할 |

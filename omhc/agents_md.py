@@ -1,15 +1,74 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Optional
 
 from . import managed_block
-from .adapter import InstallReceipt
+from .adapter import InstallReceipt, NoInjectionChannel
 
 FILE_NAME = "AGENTS.md"
+CLAUDE_FILE_NAME = "CLAUDE.md"
 EXCLUDE_REL = os.path.join(".git", "info", "exclude")
 EXCLUDE_MARK = "# omhc: Codex 핸드오프 관리 구간이 들어가는 파일"
+
+# Claude Code 가 읽는 지침 파일 후보. 전부 repo_root 상대경로.
+_CLAUDE_CANDIDATES = (
+    "CLAUDE.md",
+    os.path.join(".claude", "CLAUDE.md"),
+    "CLAUDE.local.md",
+)
+
+# CLAUDE.md 류를 훑어 @AGENTS.md 임포트를 찾는 범위. 이 파일들은 짧은 지침
+# 파일이지 로그가 아니므로, 몇 KB 만 읽어도 임포트 줄을 놓치지 않는다.
+_CLAUDE_SCAN_BYTES = 64 * 1024
+
+# `@AGENTS.md`, `@./AGENTS.md`, `.claude/CLAUDE.md` 안의 `@../AGENTS.md`,
+# 문장 끝 구두점이 붙은 `@AGENTS.md.` 까지 잡는다. 상대경로가 실제로 이
+# 레포의 AGENTS.md 로 resolve 되는지까지는 확인하지 않는다 — 오탐은 outbox 로
+# fail-safe 하므로 정규식 수준의 근사로 충분하다.
+_IMPORT_RE = re.compile(r"(?<![\w@])@(?:\.{1,2}/)*AGENTS\.md\b")
+
+
+def shared_with_claude(repo_root: str) -> Optional[str]:
+    """AGENTS.md 가 Claude Code 로도 새는 배선이면 그 이유를, 아니면 None.
+
+    실패는 모두 '공유 아님'으로 접는다 — 이 판정은 훅 경로(install → deliver)에서
+    불리므로 예외를 던지면 세션 시작이 깨진다.
+    """
+    agents_path = path_for(repo_root)
+    try:
+        if os.path.islink(agents_path):
+            return "AGENTS.md is a symlink"
+    except OSError:
+        pass
+
+    for rel in _CLAUDE_CANDIDATES:
+        claude_path = os.path.join(repo_root, rel)
+        try:
+            if (os.path.islink(claude_path)
+                    and os.path.realpath(claude_path) == os.path.realpath(agents_path)):
+                return "{} is a symlink to AGENTS.md".format(rel)
+        except OSError:
+            pass
+        try:
+            # 하드링크: symlink 는 아니지만 같은 inode. os.path.samefile 은 둘 다
+            # 존재해야 하므로 하드링크는 애초에 그 조건을 만족한다.
+            if (os.path.exists(claude_path) and os.path.exists(agents_path)
+                    and os.path.samefile(claude_path, agents_path)):
+                return "{} is hard-linked to AGENTS.md".format(rel)
+        except OSError:
+            pass
+        try:
+            with open(claude_path, encoding="utf-8", errors="replace") as fh:
+                head = fh.read(_CLAUDE_SCAN_BYTES)
+        except OSError:
+            continue
+        if _IMPORT_RE.search(head):
+            return "{} imports @AGENTS.md".format(rel)
+    return None
+
 
 # 파일 상단 설명 주석을 쓰지 않는다. omhc 가 만든 파일에 omhc 가 아닌 내용이
 # 한 줄이라도 남으면, 구간을 붕괴시킨 뒤에도 파일이 잔여물로 남는다. begin 마커와
@@ -67,6 +126,13 @@ def install(bundle, *, now: Optional[float] = None) -> InstallReceipt:
     hooks.json 을 거부할 수 있으므로, 훅 신뢰도 모델 협조도 필요 없는 유일한
     Codex 방향 경로다. AGENTS.md 는 세션마다 읽히므로 한 번 읽고 사라지지 않는다.
     """
+    reason = shared_with_claude(bundle.repo_root)
+    if reason:
+        raise NoInjectionChannel(
+            "AGENTS.md is shared with Claude Code ({}); writing would leak a Codex "
+            "handoff into Claude sessions and mutate the shared file".format(reason)
+        )
+
     stamp = time.time() if now is None else now
     path = path_for(bundle.repo_root)
     tracked = _is_tracked(bundle.repo_root)
