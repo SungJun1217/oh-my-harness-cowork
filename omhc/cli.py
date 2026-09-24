@@ -8,8 +8,8 @@ import time
 from typing import List, Optional
 
 from . import (
-    adapters, agents_md, brief, due, gate, index, ledger, locate, managed_block, pin,
-    watch,
+    adapters, agents_md, brief, due, gate, hookconf, index, ledger, locate,
+    managed_block, pin, watch,
 )
 from .adapter import AdapterUnavailable
 
@@ -379,12 +379,31 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     # 한 어댑터가 죽어도 나머지 status 가 죽으면 안 되므로 어댑터별로 감싼다.
     all_rows = ledger.read(home=home, limit=0)
     health_rows = []
+    hook_rows = []
     for adapter_id in installed:
         try:
             inst = adapters.get(adapter_id, home=home)
+        except Exception:
+            # 어댑터 생성 자체가 안 되면 health 도 hooks 도 판정할 근거가 없다.
+            continue
+        # health 와 hooks 는 서로 독립적인 판정이다 — 한쪽이 죽어도 다른 쪽 행은
+        # 여전히 나와야 한다(리뷰 결함: 예전엔 health 의 예외가 hooks 판정
+        # 자체를 건너뛰었다).
+        try:
             health_rows.extend(getattr(inst, "health", lambda *a: ())(root, all_rows))
         except Exception:
-            continue
+            pass
+        try:
+            hc = getattr(inst, "hook_config", lambda: None)()
+            if hc is not None:
+                fragment = hookconf.load_fragment(hc.fragment_name)
+                ok, detail = hookconf.inspect(hc.config_path, fragment, inst.home)
+                hook_rows.append(("{} hooks".format(adapter_id), ok, detail))
+        except Exception as exc:
+            # 조용히 버리지 않는다 — 판정이 죽었다는 사실 자체가 FAIL 행이다
+            # (예: hooks/ 디렉터리가 없어 load_fragment 가 실패한 경우).
+            hook_rows.append(("{} hooks".format(adapter_id), False,
+                              "cannot check hooks ({})".format(exc)))
     watcher = watch.read_lock(state)
 
     # 행을 한 번만 만들고 텍스트·JSON 이 같은 목록을 렌더한다 — 따로 만들면
@@ -442,6 +461,8 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
 
     for label, health_ok, detail in health_rows:
         checks.append((label, health_ok, detail))
+    for label, hook_ok, detail in hook_rows:
+        checks.append((label, hook_ok, detail))
 
     checks.append(("pull rate", None,
                    "pulled {} of {} injections".format(pulls, injections)))

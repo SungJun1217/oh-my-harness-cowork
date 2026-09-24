@@ -11,7 +11,7 @@ from unittest import mock
 from omhc import adapter as A
 from omhc import agents_md, cli, managed_block
 
-from ._repo import TempRepo, git
+from ._repo import TempRepo, git, plant_hook_install
 
 
 class TestAgentsMd(unittest.TestCase):
@@ -279,6 +279,9 @@ class TestStatusInstructionFiles(unittest.TestCase):
         patcher = mock.patch.object(cli.adapters, "present", return_value=["claude-code"])
         patcher.start()
         self.addCleanup(patcher.stop)
+        # `claude-code hooks` 행도 이 클래스의 관심사가 아니다 — instruction
+        # files 행만 흔들리게 고정한다.
+        plant_hook_install(self.t.home, "claude-code")
 
     def run_status(self):
         out = io.StringIO()

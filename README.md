@@ -154,7 +154,7 @@ in the Claude → Codex direction.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
-omhc status          # every check gets PASS/FAIL/---- (+ codex hook when installed). Not SKIP
+omhc status          # every check gets PASS/FAIL/---- (+ codex hook, <adapter-id> hooks when detected). Not SKIP
 ```
 
 This unpacks the latest release into `~/.local/share/omhc/<version>` and
@@ -234,6 +234,20 @@ Claude's `mark` backfill. It shows `----` while it cannot judge yet: no
 interactive Codex session here since `hooks.json` changed (the date is shown),
 only headless `codex exec` sessions (they never count — open an interactive
 `codex` here once), or an unknown error.
+
+For every detected harness, status also adds a `<adapter-id> hooks` row
+(e.g. `claude-code hooks`, `codex-cli hooks`) that checks whether omhc's
+SessionStart hooks are actually merged into that harness's own config, not
+just that the harness directory exists. Matching is structural (parsed as
+argv, not a byte-for-byte string compare), so an absolute path, `~`,
+`${HOME}`, a quoted command, or a bare `omhc` found on `PATH` all still
+count as installed. It FAILs (and gates) when the config file is missing
+(pointing at `omhc hooks install`) or unparseable, when the `mark`/`brief`
+commands aren't there in the order and with the flags the shipped fragment
+expects (a stale `--wire sdk`, a missing `mark`, `brief` before `mark`, …
+also pointing at `omhc hooks install`), or when the hook's binary can't be
+found or isn't executable. It PASSes once the installed commands match the
+shipped fragment structurally and the binary is executable.
 
 ### Repos that share AGENTS.md with Claude Code
 

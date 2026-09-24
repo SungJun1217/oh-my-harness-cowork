@@ -190,6 +190,21 @@ class HarnessAdapter:
         """
         return ()
 
+    def hook_config(self):
+        """이 하네스의 SessionStart 훅 설정 위치. 선택 메서드 — `health`/
+        `fallback_channels`/`discover` 와 같은 패턴이다. 기본은 None(훅 개념이
+        없는 하네스, 또는 아직 지원하지 않는 하네스).
+
+        구현하면 `omhc.hookconf.HookConfig`(또는 그와 같은 3개 필드짜리 레코드)를
+        돌려준다: `config_path`(그 조각이 병합될 하네스 설정의 절대 경로),
+        `fragment_name`(`hooks/` 아래 그 하네스 조각 파일명), `post_write_note`
+        (설치 직후 사용자가 봐야 할 안내 — 예: Codex 의 훅 신뢰 재승인 경고;
+        없으면 빈 문자열). `omhc status` 의 `<adapter-id> hooks` 행과 `omhc
+        hooks install` 이 이 레코드 하나로 두 하네스를 동일하게 다룬다 — 코어에
+        벤더 이름이 들어가지 않는다.
+        """
+        return None
+
     def ref_for_path(self, source_path: str, session_id: str,
                      cwd: Optional[str] = None) -> Optional[SessionRef]:
         """알려진 경로 하나를 SessionRef 로 만든다. 부적격이면 None.

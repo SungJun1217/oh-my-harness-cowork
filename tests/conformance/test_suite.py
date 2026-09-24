@@ -360,6 +360,23 @@ class AdapterContract(unittest.TestCase):
                     self.assertTrue(ok is None or isinstance(ok, bool))
                     self.assertIsInstance(detail, str)
 
+    def test_29_hook_config_is_none_or_a_shipped_fragment(self):
+        """hook_config 는 선택 메서드다(health/fallback_channels 와 같은 패턴).
+        None 이 아니면 그 fragment_name 이 배포되는 hooks/ 아래 실재하고 JSON 으로
+        파싱돼야 한다 — 코어(hookconf)와 어댑터가 같은 파일을 가리켜야 한다."""
+        from omhc import hookconf
+
+        for adapter_id in adapter_ids():
+            with self.subTest(adapter=adapter_id):
+                with tempfile.TemporaryDirectory() as home:
+                    hc = adapters.get(adapter_id, home=home).hook_config()
+                if hc is None:
+                    continue
+                self.assertTrue(hc.config_path)
+                fragment = hookconf.load_fragment(hc.fragment_name)
+                self.assertIsInstance(fragment, dict)
+                self.assertIsInstance(hc.post_write_note, str)
+
     def test_28_discover_is_an_iterable_of_session_refs_and_never_raises(self):
         """discover 는 mark 백필 전용 선택 메서드다(fallback_channels/health 와
         같은 패턴). 빈 홈에서도 절대 던지지 않고, 준 게 있다면 SessionRef 여야

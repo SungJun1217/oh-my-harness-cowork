@@ -150,7 +150,7 @@ Codex 자신의 훅이 신뢰된 적이 없어도 그 세션이 원장에 남습
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
-omhc status          # 모든 행이 PASS/FAIL/---- 중 하나(+ 설치 시 codex hook). SKIP 은 없다
+omhc status          # 모든 행이 PASS/FAIL/---- 중 하나(+ codex hook, 감지 시 <adapter-id> hooks). SKIP 은 없다
 ```
 
 최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
@@ -226,6 +226,19 @@ git 체크아웃이라면 레포의 `hooks/` 아래에 있습니다.
 `hooks.json`이 바뀐 뒤 이 레포에 대화형 Codex 세션이 없을 때(날짜 표시), 헤드리스
 `codex exec` 세션만 있을 때(판정에 세지 않습니다 — 여기서 대화형 `codex` 를 한 번
 여십시오), 알 수 없는 오류일 때.
+
+감지된 하네스마다 `<adapter-id> hooks` 행(예: `claude-code hooks`,
+`codex-cli hooks`)도 붙습니다 — 하네스 디렉터리가 존재한다는 것만이 아니라
+omhc 의 SessionStart 훅이 그 하네스 자신의 설정에 실제로 병합돼 있는지를
+봅니다. 판정은 구조적입니다(바이트 단위 문자열 비교가 아니라 argv 로 쪼개
+비교합니다) — 절대경로, `~`, `${HOME}`, 따옴표로 감싼 명령, `PATH` 상의
+bare `omhc` 모두 설치된 것으로 인정됩니다. 설정 파일이 없으면(`omhc hooks
+install` 을 처방으로 보여줍니다) 또는 파싱이 안 되면, `mark`/`brief` 명령이
+배포된 조각이 기대하는 순서·플래그대로 있지 않으면(낡은 `--wire sdk`,
+`mark` 누락, `mark` 보다 앞선 `brief` 등 — 역시 `omhc hooks install` 을
+처방으로 보여줍니다), 또는 훅의 바이너리를 찾을 수 없거나 실행 가능하지
+않으면 FAIL(게이팅)입니다. 설치된 명령이 배포된 조각과 구조적으로 일치하고
+바이너리가 실행 가능하면 PASS 입니다.
 
 ### AGENTS.md 를 Claude Code 와 공유하는 레포
 

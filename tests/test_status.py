@@ -12,7 +12,7 @@ from unittest import mock
 from omhc import cli, due, index
 from omhc.event import Event
 
-from ._repo import TempRepo
+from ._repo import TempRepo, plant_hook_install
 
 
 def _find_row(text: str, label: str):
@@ -36,6 +36,9 @@ class TestStatusRows(unittest.TestCase):
         patcher = mock.patch.object(cli.adapters, "present", return_value=["claude-code"])
         patcher.start()
         self.addCleanup(patcher.stop)
+        # 이 유닛의 관심사가 아닌 `claude-code hooks` 행을 PASS 로 고정한다 —
+        # 안 그러면 이 파일의 모든 exit-code 단정이 hookconf 의 관심사와 섞인다.
+        plant_hook_install(self.t.home, "claude-code")
         os.environ.pop(due.OFF_ENV, None)
         self.addCleanup(os.environ.pop, due.OFF_ENV, None)
 
@@ -175,9 +178,60 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(payload["pulls"], 1)
         self.assertEqual(payload["injections"], 2)
 
+    def test_hooks_row_passes_when_the_shipped_fragment_is_installed(self):
+        """setUp 이 이미 claude-code 훅을 심어 둔다 — 여기서는 그 행이 실제로
+        나타나고 게이팅에 참여할 수 있다는 것만 확인한다."""
+        code, text = self.run_status()
+        self.assertEqual(code, 0)
+        word, detail = _find_row(text, "claude-code hooks")
+        self.assertEqual(word, "PASS")
+        self.assertEqual(detail, "installed")
+
+        code_json, payload = self.run_status_json()
+        row = next(r for r in payload["rows"] if r["label"] == "claude-code hooks")
+        self.assertEqual(row["verdict"], "pass")
+
+    def test_hooks_row_fails_and_gates_when_no_hook_is_installed(self):
+        os.remove(os.path.join(self.t.home, ".claude", "settings.json"))
+
+        code, text = self.run_status()
+        self.assertEqual(code, 1)
+        word, detail = _find_row(text, "claude-code hooks")
+        self.assertEqual(word, "FAIL")
+        self.assertIn("not installed", detail)
+        self.assertIn("omhc hooks install", detail)
+
+    def test_hooks_row_is_still_judged_when_health_raises(self):
+        """리뷰 결함: health() 의 예외가 hooks 판정 자체를 건너뛰면 안 된다 —
+        두 진단은 서로 독립이어야 한다."""
+        from omhc.adapters import claude_code as CC
+
+        with mock.patch.object(CC.ClaudeCodeAdapter, "health",
+                               side_effect=RuntimeError("boom")):
+            code, text = self.run_status()
+        self.assertEqual(code, 0)
+        word, detail = _find_row(text, "claude-code hooks")
+        self.assertEqual(word, "PASS")
+        self.assertEqual(detail, "installed")
+
+    def test_hooks_row_fails_loudly_when_judging_itself_raises(self):
+        """조용히 버리지 않는다 — 판정 자체가 죽으면 그 사실이 FAIL 행으로
+        보고돼야 한다(예: hooks/ 가 없어 load_fragment 가 실패하는 경우)."""
+        with mock.patch.object(cli.hookconf, "load_fragment",
+                               side_effect=OSError("no such file")):
+            code, text = self.run_status()
+        self.assertEqual(code, 1)
+        word, detail = _find_row(text, "claude-code hooks")
+        self.assertEqual(word, "FAIL")
+        self.assertIn("cannot check hooks", detail)
+
     def test_health_row_with_ok_none_is_uninformative_and_never_gates(self):
         fake = mock.Mock()
         fake.health.return_value = (("custom diag", None, "not judgeable yet"),)
+        # hook_config 는 선택 메서드다 — 명시적으로 None 을 줘서 이 유닛의
+        # 관심사가 아닌 hooks 행이 끼어들지 않게 한다(Mock 기본값은 MagicMock
+        # 이라 hook_config()가 None 이 아닌 것처럼 보여 hooks 판정이 돈다).
+        fake.hook_config.return_value = None
         with mock.patch.object(cli.adapters, "get", return_value=fake):
             code, text = self.run_status()
         self.assertEqual(code, 0)

@@ -979,12 +979,13 @@ class TestStatusIntegration(unittest.TestCase):
         _repo.git(self.repo, "init", "-q")
         self.root = os.path.realpath(self.repo)
 
-        hooks_dir = os.path.join(self.home, ".codex")
-        os.makedirs(hooks_dir)
-        hooks_path = os.path.join(hooks_dir, "hooks.json")
-        with open(hooks_path, "w", encoding="utf-8") as fh:
-            json.dump({"hooks": {"SessionStart": [
-                {"hooks": [{"type": "command", "command": "omhc brief"}]}]}}, fh)
+        # 실제 배포 조각 그대로 심는다(+ 실행 가능한 더미 바이너리) — `codex-cli
+        # hooks` 행이 PASS 여야 아래 exit code 단정이 순수하게 health(`codex
+        # hook`) 행만 증명한다(리뷰 결함: 예전엔 `omhc brief` 한 줄뿐이라 hooks
+        # 행도 함께 FAIL 해서 어느 쪽이 code=1 을 냈는지 이 테스트가 증명하지
+        # 못했다).
+        _repo.plant_hook_install(self.home, "codex-cli")
+        hooks_path = os.path.join(self.home, ".codex", "hooks.json")
         os.utime(hooks_path, (1700000000.0, 1700000000.0))
 
         sessions_dir = os.path.join(
