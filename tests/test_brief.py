@@ -320,6 +320,23 @@ class TestWireFormat(unittest.TestCase):
             payload = json.loads(brief.hook_wire("x", wire))
             self.assertEqual(len(payload), 1, wire)
 
+    def test_codex_cli_wire_is_the_nested_shape(self):
+        """실측(codex-cli 0.155.1): 최상위 additionalContext 는 거부되고 아무것도
+
+        주입되지 않는다. hookSpecificOutput 중첩 형식만 rollout 에 실제로 나타난다
+        (content_item_kinds=["hooks.additional_context"]). 어댑터가 다시 "sdk" 로
+        회귀하면 이 테스트가 조용히 깨지지 않고 실패해야 한다.
+        """
+        from omhc import adapters
+
+        adapter = adapters.get("codex-cli")
+        self.assertEqual(adapter.wire, "claude")
+        payload = json.loads(brief.hook_wire("x", adapter.wire))
+        self.assertEqual(
+            payload["hookSpecificOutput"]["hookEventName"], "SessionStart"
+        )
+        self.assertEqual(payload["hookSpecificOutput"]["additionalContext"], "x")
+
     def test_every_adapter_declares_its_own_wire(self):
         """와이어 형식은 코어의 조회표가 아니라 어댑터의 속성이다.
 

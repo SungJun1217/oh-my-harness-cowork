@@ -122,9 +122,10 @@ def _register_exclude(repo_root: str) -> bool:
 def install(bundle, *, now: Optional[float] = None) -> InstallReceipt:
     """Path B: 작업 트리의 AGENTS.md 관리 구간에 핸드오프를 밀어넣는다.
 
-    Codex 훅 신뢰(HookStateToml{enabled, trusted_hash})가 손으로 떨어뜨린
-    hooks.json 을 거부할 수 있으므로, 훅 신뢰도 모델 협조도 필요 없는 유일한
-    Codex 방향 경로다. AGENTS.md 는 세션마다 읽히므로 한 번 읽고 사라지지 않는다.
+    install_handoff (Path A) 가 실패할 때만 불린다 — 대표적으로 hooks.json 에
+    omhc 훅이 없을 때다. **훅 신뢰의 필요를 없애주지는 않는다**: 훅이 신뢰되지
+    않으면 Codex 쪽 brief 호출 자체가 없어 이 함수도 불리지 않는다. Path A 와
+    달리 한 번 읽고 사라지지 않고, AGENTS.md 가 세션마다 다시 읽힌다.
     """
     reason = shared_with_claude(bundle.repo_root)
     if reason:

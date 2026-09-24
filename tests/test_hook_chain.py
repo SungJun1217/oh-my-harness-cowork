@@ -59,6 +59,24 @@ class TestShippedHookFiles(unittest.TestCase):
                 brief_command = shipped_commands(path)[1]
                 self.assertEqual(len(re.findall(r"--wire\s+\S+", brief_command)), 1)
 
+    def test_shipped_wire_matches_the_adapters_declared_wire(self):
+        """조각 파일의 --wire 와 어댑터의 wire 속성이 따로 논다는 것 자체가 이번
+
+        버그가 숨었던 방식이다(어댑터는 sdk, 조각은 sdk, 실제 codex-cli 는 둘 다
+        거부 — 둘이 일치해도 틀릴 수 있다는 것이 아니라, 어댑터를 고치고 조각을
+        안 고치면 다시 벌어지는 종류의 불일치라 자동으로 잡아 둔다).
+        """
+        from omhc import adapters
+
+        for harness, path in FRAGMENTS.items():
+            with self.subTest(harness=harness):
+                brief_command = shipped_commands(path)[1]
+                match = re.search(r"--wire\s+(\S+)", brief_command)
+                self.assertIsNotNone(match, brief_command)
+                shipped_wire = match.group(1)
+                declared_wire = getattr(adapters.get(harness), "wire", None)
+                self.assertEqual(shipped_wire, declared_wire, harness)
+
     def test_fragments_document_the_install_step(self):
         for harness, path in FRAGMENTS.items():
             with self.subTest(harness=harness):

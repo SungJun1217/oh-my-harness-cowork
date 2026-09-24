@@ -2,20 +2,30 @@
   "_comment": [
     "~/.codex/hooks.json 으로 복사한다. 이 머신에는 원래 이 파일이 없었다.",
     "",
-    "⚠️ 미검증: Codex 는 훅 신뢰(HookStateToml{enabled, trusted_hash})를 갖고 있어",
-    "손으로 떨어뜨린 파일을 거부할 수 있다. `codex exec --dangerously-bypass-hook-trust`",
-    "플래그가 존재한다는 것 자체가 그 메커니즘의 근거다. 이 머신은 Codex 인증이",
-    "없어(401) 훅이 실제로 발동하는지 확인하지 못했다.",
+    "실측(codex-cli 0.155.1): 손으로 떨어뜨린 hooks.json 은 기본적으로 신뢰되지",
+    "않고, 신뢰되지 않은 훅은 메시지 없이 조용히 건너뛴다 — brief 가 한 번도",
+    "돌지 않는다. `codex exec --dangerously-bypass-hook-trust` 는 그 검사를 우회해",
+    "실측에 쓴 플래그일 뿐 상시 설치 방법이 아니다. 이 파일을 실제로 쓰려면",
+    "Codex 자체의 훅 신뢰 절차로 한 번 승인해야 한다 — 정확한 절차는 이 레포가",
+    "확인한 바 없으므로 `codex` 자신의 문서/도움말을 따른다.",
     "",
-    "훅이 거부되어도 하루 루프의 절반은 동작한다: Codex→Claude 방향은 훅에",
-    "의존하지 않고 rollout 파일을 직접 읽는다. Codex 로 들어가는 방향은 Path B",
-    "(AGENTS.md 관리 구간)가 받고, 그것도 막히면 <repo>/.omhc/outbox/ 로 떨어진다.",
+    "훅이 신뢰되지 않으면 이 파일의 brief 명령 자체가 안 돈다 — deliver()(Path B",
+    "포함)는 그 brief 호출 안에서만 실행되므로 Codex 로 들어가는 방향은 아무것도",
+    "받지 못한다(Path B/outbox 는 이때 켜지지 않는다, 켜질 게 없다). 그래도 하루",
+    "루프의 절반은 동작한다: Codex→Claude 방향은 이 훅에 의존하지 않고 rollout",
+    "파일을 직접 읽는다. Path B/outbox 는 이 brief 명령이 실제로 실행됐는데",
+    "install_handoff 가 실패할 때 열린다 — 대표적으로 ~/.codex/hooks.json 에",
+    "omhc 훅이 없는데 brief 가 돌 때(예: 수동 `omhc brief --harness codex-cli`)",
+    "이지만, ~/.omhc 쓰기 실패 등 다른 예외도 같은 경로를 탄다.",
     "",
     "Codex 에는 종료 훅도 압축 훅도 없다. 6종 모두 '무언가가 시작될 때' 걸리므로",
     "캡처는 다음 세션 시작의 지연 소급 수집으로만 가능하다 — 그 덕에 Ctrl-C 와",
     "크래시가 정의상 문제가 되지 않는다.",
     "",
-    "--wire sdk 는 최상위 {\"additionalContext\": …} 를 뜻한다(SDK 표준)."
+    "실측(codex-cli 0.155.1, --dangerously-bypass-hook-trust): 최상위",
+    "{\"additionalContext\": …}(--wire sdk) 는 'hook: SessionStart Failed' 로 거부되고",
+    "아무것도 주입되지 않는다. --wire claude(중첩 hookSpecificOutput)만 rollout 에",
+    "content_item_kinds=[\"hooks.additional_context\"] 로 실제로 나타난다."
   ],
   "hooks": {
     "SessionStart": [
@@ -27,7 +37,7 @@
           },
           {
             "type": "command",
-            "command": "$HOME/.local/bin/omhc brief --harness codex-cli --wire sdk"
+            "command": "$HOME/.local/bin/omhc brief --harness codex-cli --wire claude"
           }
         ]
       }
