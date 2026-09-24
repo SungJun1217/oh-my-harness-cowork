@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 import unittest
 
 from omhc import cli, due, index
 from omhc.event import Event
 
-from ._repo import TempRepo
+from ._repo import REPO, TempRepo
 
 
 def _write_idx(state: str, session_id: str, rows) -> None:
@@ -98,11 +99,13 @@ class TestShowSeqRef(unittest.TestCase):
         _write_idx(self.t.state, "aaaaaaaa2222", [(1, "said", "y")])
         code, out, err = self._show("aaaaaaaa#1")
         self.assertEqual(code, 1)
-        self.assertIn("ambiguous", out)
+        # 오류는 stdout 이 아니라 stderr 로 간다(#19) — exit code 는 1 그대로.
+        self.assertEqual(out, "")
+        self.assertIn("ambiguous", err)
         # 후보는 축약하지 않고 전체 id 로 보여준다 — 접두사로 줄이면 그 자체가
         # 다시 모호해질 수 있다(리뷰 결함).
-        self.assertIn("aaaaaaaa1111", out)
-        self.assertIn("aaaaaaaa2222", out)
+        self.assertIn("aaaaaaaa1111", err)
+        self.assertIn("aaaaaaaa2222", err)
 
     def test_ambiguous_prefix_lists_full_ids_even_when_they_share_13_chars(self):
         """13자는 표시상 선호일 뿐이다 — 그 안에서 안 갈리는 두 id 를 후보로 줄여
@@ -113,14 +116,14 @@ class TestShowSeqRef(unittest.TestCase):
         _write_idx(self.t.state, long_b, [(1, "said", "y")])
         code, out, err = self._show("aaaaaaaaaaaaa#1")
         self.assertEqual(code, 1)
-        self.assertIn(long_a, out)
-        self.assertIn(long_b, out)
+        self.assertIn(long_a, err)
+        self.assertIn(long_b, err)
 
     def test_no_default_session_gives_a_hint_not_a_crash(self):
         _write_idx(self.t.state, "aaaaaaaa1111", [(1, "said", "x")])
         code, out, err = self._show("#1")
         self.assertEqual(code, 1)
-        self.assertIn("no default session", out)
+        self.assertIn("no default session", err)
 
     def test_default_session_delivered_but_not_indexed_gives_a_distinct_hint(self):
         """#N 힌트가 "아무것도 전달된 적 없다" 와 "전달은 됐는데 색인이 아직
@@ -128,8 +131,43 @@ class TestShowSeqRef(unittest.TestCase):
         _mark_delivered(self.t.state, "not-indexed-yet")
         code, out, err = self._show("#1")
         self.assertEqual(code, 1)
-        self.assertIn("not-indexed-yet", out)
-        self.assertNotIn("no default session", out)
+        self.assertIn("not-indexed-yet", err)
+        self.assertNotIn("no default session", err)
+
+
+class TestShowRealStdoutIsRawBytes(unittest.TestCase):
+    """#19: 진짜 stdout(`.buffer` 가 있는 스트림)에는 원본 바이트를 그대로
+    쓴다 — 잘못된 UTF-8 을 U+FFFD 로 바꾸지 않고, 없는 줄바꿈도 붙이지 않는다.
+    io.StringIO 로는 이 경로를 확인할 수 없어 실제 바이너리를 서브프로세스로
+    돈다. 오류는 stderr 로, exit code 는 1 로 간다."""
+
+    def setUp(self):
+        self.t = TempRepo()
+        self.addCleanup(self.t.close)
+
+    def _run(self, target, extra=()):
+        return subprocess.run(
+            [os.path.join(REPO, "bin", "omhc"), "show", target] + list(extra),
+            cwd=self.t.root, env=self.t.env, capture_output=True)
+
+    def test_invalid_utf8_and_missing_trailing_newline_survive_unchanged(self):
+        os.makedirs(self.t.state, exist_ok=True)
+        body = b'{"broken":"\xff\xfe no newline here"}'
+        source = os.path.join(self.t.state, "source.jsonl")
+        with open(source, "wb") as fh:
+            fh.write(body)
+        with open(os.path.join(self.t.state, index.REFS_NAME), "w", encoding="utf-8") as fh:
+            fh.write("\t".join(("E1", "s1", source, "0", str(len(body)), "1")) + "\n")
+
+        proc = self._run("E1")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.stdout, body)
+
+    def test_error_goes_to_stderr_and_stdout_stays_empty(self):
+        proc = self._run("E404")
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, b"")
+        self.assertIn(b"unknown reference", proc.stderr)
 
 
 class TestLogRefsAndSaidPreview(unittest.TestCase):

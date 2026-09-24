@@ -321,6 +321,12 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(row["verdict"], "fail")
         self.assertIn("is not a project root", payload["refused"])
         self.assertIsNone(payload["orphaned_state"])
+        # #19: 정상 경로와 같은 최상위 키 집합 — 값은 비어 있어도 소비자가
+        # `/` 에서만 KeyError 로 죽지 않는다. 목록을 손으로 적지 않고 정상
+        # 경로의 실제 출력과 비교한다(손 목록은 #25 의 새 키를 놓쳤다).
+        os.chdir(self.t.root)
+        _code, normal = self.run_status_json()
+        self.assertEqual(set(normal) - set(payload), set())
 
     def test_status_at_slash_reports_an_orphaned_state_dir_in_text_and_json(self):
         from omhc import locate

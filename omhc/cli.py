@@ -198,7 +198,8 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
 # --- note -------------------------------------------------------------------
 
 
-def cmd_note(args, *, home=None, out=sys.stdout, err=sys.stderr) -> int:
+def cmd_note(args, *, home=None, out=sys.stdout, err=None) -> int:
+    err = err or sys.stderr
     root, _key, state = _state_for(home)
     reason = locate.refused_root(root)
     if reason:
@@ -311,7 +312,11 @@ def _session_log_rank(key: str, state: str, home):
 
 
 def cmd_log(args, *, home=None, out=sys.stdout) -> int:
-    _root, key, state = _state_for(home)
+    root, key, state = _state_for(home)
+    reason = locate.refused_root(root)
+    if reason:
+        out.write("{}\n".format(reason))
+        return 1
     _record_pull(key, state, "log", home)
     _session_rank = _session_log_rank(key, state, home)
 
@@ -417,7 +422,8 @@ def _resolve_seq_ref(state: str, prefix: str, seq: int):
     return entry, note
 
 
-def cmd_show(args, *, home=None, out=sys.stdout, err=sys.stderr) -> int:
+def cmd_show(args, *, home=None, out=sys.stdout, err=None) -> int:
+    err = err or sys.stderr
     _root, key, state = _state_for(home)
     target = args.target.strip()
     refs = index.read_refs(state)
@@ -429,11 +435,11 @@ def cmd_show(args, *, home=None, out=sys.stdout, err=sys.stderr) -> int:
         if m:
             entry, err_or_note = _resolve_seq_ref(state, m.group(1), int(m.group(2)))
             if entry is None:
-                out.write("{}\n".format(err_or_note))
+                err.write("{}\n".format(err_or_note))
                 return 1
             note = err_or_note
     if entry is None:
-        out.write("unknown reference {!r}; try `omhc log --last 30`\n".format(target))
+        err.write("unknown reference {!r}; try `omhc log --last 30`\n".format(target))
         return 1
 
     if note:
@@ -443,15 +449,23 @@ def cmd_show(args, *, home=None, out=sys.stdout, err=sys.stderr) -> int:
 
     source = _pinned_path(state, entry["session_id"], entry.get("source_path") or "")
     if not source or not os.path.exists(source):
-        out.write("source bytes are gone for {} (session {})\n".format(
+        err.write("source bytes are gone for {} (session {})\n".format(
             target, entry["session_id"]))
         return 1
     with open(source, "rb") as fh:
         fh.seek(entry["offset"])
         raw = fh.read(entry["length"] if not args.full else -1)
-    out.write(raw.decode("utf-8", "replace"))
-    if not raw.endswith(b"\n"):
-        out.write("\n")
+    buf = getattr(out, "buffer", None)
+    if buf is not None:
+        # 진짜 stdout — 원본 바이트를 그대로 쓴다(`show '#3' --full | jq .` 가
+        # 깨지면 안 된다). 없는 줄바꿈을 붙이지 않는다: 그 자체가 원본 바이트다.
+        buf.write(raw)
+    else:
+        # 테스트의 io.StringIO 처럼 .buffer 가 없는 스트림 — 텍스트로만 비교할
+        # 수 있으므로 디코드하고, 사람이 읽기 좋게 줄바꿈을 보정한다.
+        out.write(raw.decode("utf-8", "replace"))
+        if not raw.endswith(b"\n"):
+            out.write("\n")
     _record_pull(key, state, "show", home, session=entry["session_id"], tag=target)
     return 0
 
@@ -474,6 +488,25 @@ def _check(out, label: str, verdict: Optional[bool], detail: str) -> None:
     out.write("{:<4} {:<22} {}\n".format(_verdict_word(verdict), label, detail))
 
 
+def _status_json_empty() -> dict:
+    """`status --json` 의 최상위 키 전부를 빈 값으로. `/` 처럼 진단을 못 내는
+    경로가 쓴다. 정상 경로에 키를 더하면 여기에도 더해야 한다 —
+    test_status 가 두 경로의 키 집합이 같은지 확인한다(#19 리뷰: #25 가 더한
+    키가 `/` 에서만 빠졌다)."""
+    return {
+        "repo_root": None, "repo_key": None, "state_dir": None,
+        "adapters": [], "ledger_rows": 0,
+        "archive": [],
+        "injections": 0, "pulls": 0,
+        "pull_rate_window": PULL_RATE_WINDOW,
+        "recent_injections": 0, "recent_pulls": 0,
+        "off": False, "watcher_pid": None,
+        "instruction_files": {"shared": None, "stale_block": False},
+        "health": [],
+        "rows": [],
+    }
+
+
 def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     root, key, state = _state_for(home)
     reason = locate.refused_root(root)
@@ -485,11 +518,16 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         # 갈라지는 최소한의 필드(refused, orphaned_state)를 덧붙인다.
         orphaned = state if os.path.isdir(state) else None
         if args.json:
-            out.write(json.dumps({
+            # 정상 경로와 같은 최상위 키 집합을 유지한다 — 빈 값이라도 있어야
+            # 소비자가 `/` 에서만 KeyError 로 죽지 않는다(#19). 값 자체는 의미가
+            # 없다(정상 경로의 진단은 전부 `root` 에 걸려 있어 여기선 못 낸다).
+            payload = _status_json_empty()
+            payload.update({
                 "repo_root": root, "repo_key": key, "state_dir": state,
                 "refused": reason, "orphaned_state": orphaned,
                 "rows": [{"label": "root", "verdict": "fail", "detail": reason}],
-            }, ensure_ascii=False, indent=2) + "\n")
+            })
+            out.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         else:
             _check(out, "root", False, reason)
             if orphaned:
@@ -765,14 +803,16 @@ def hook_config_targets(home) -> List[str]:
     return ids
 
 
-def cmd_hooks(args, *, home=None, out=sys.stdout) -> int:
+def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
     """`omhc hooks install|uninstall`. status 의 `<adapter-id> hooks` 행이
     가리키는 그 설치를 실제로 한다. 코어는 벤더 이름을 모른다 — 대상은
     `hook_config()` 를 구현한, 이 머신에 감지됐거나 설정 디렉터리가 있는
     어댑터들이다."""
     if not getattr(args, "hooks_action", None):
-        out.write("usage: omhc hooks install|uninstall [--harness ID]\n")
-        return 0
+        # argparse 관례: 동작 없이 부르면 사용법은 stderr, exit 2(#19).
+        (err or sys.stderr).write(
+            "usage: omhc hooks install|uninstall [--harness ID]\n")
+        return 2
 
     targets = [args.harness] if args.harness else hook_config_targets(home)
     if not targets:
@@ -841,6 +881,10 @@ def cmd_hooks(args, *, home=None, out=sys.stdout) -> int:
 
 def cmd_clear(args, *, home=None, out=sys.stdout) -> int:
     root, _key, state = _state_for(home)
+    reason = locate.refused_root(root)
+    if reason:
+        out.write("{}\n".format(reason))
+        return 1
     removed = []
     if agents_md.collapse(root, force=True):
         removed.append(agents_md.path_for(root))

@@ -120,6 +120,19 @@ class TestHooksInstallCli(unittest.TestCase):
         self.assertTrue(os.path.exists(settings))  # 그래도 파일은 실제로 쓰였다
 
 
+class TestHooksNoAction(unittest.TestCase):
+    """#19: 동작 없이 `omhc hooks` 만 부르면 argparse 관례대로 사용법은
+    stderr 로, exit 2 로 간다."""
+
+    def test_no_action_prints_usage_to_stderr_and_exits_2(self):
+        out = io.StringIO()
+        err = io.StringIO()
+        code = cli.cmd_hooks(cli.build_parser().parse_args(["hooks"]), out=out, err=err)
+        self.assertEqual(code, 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("usage:", err.getvalue())
+
+
 class TestHooksFreshUser(unittest.TestCase):
     """curl 설치 직후, 어느 하네스도 아직 한 번도 안 돌아 `detect()` 가 보는
     세션 디렉터리(`~/.claude/projects`, `~/.codex/sessions`)가 없는 상태
