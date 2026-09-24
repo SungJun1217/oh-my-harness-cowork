@@ -98,8 +98,13 @@ def compute(
     now: Optional[float] = None,
     budget: int = mint.BUDGET,
     force: bool = False,
+    dry_run: bool = False,
 ) -> str:
     """전달할 표식 본문. 보낼 것이 없으면 빈 문자열.
+
+    dry_run 이면 본문만 만들고 아무것도 쓰지 않는다 — 게이트·아카이브·전달·
+    delivered 기록을 모두 건너뛴다. 수동 확인 한 번이 그 세션의 전달을 소비하면
+    다음 실제 SessionStart 에 아무것도 가지 않는다(#17).
 
     이 함수는 예외를 던질 수 있다 — 호출자(run)가 감싼다. 테스트는 여기를 직접
     불러 실패를 볼 수 있어야 한다.
@@ -125,6 +130,9 @@ def compute(
         # 보낼 것이 없으면 게이트를 쓰지 않는다. 첫 발동이 빈손으로 슬롯을
         # 태우면 밀리초 뒤에 데이터가 도착해도 그 세션은 영구히 못 받는다.
         return ""
+
+    if dry_run:
+        return body
 
     if not force and not gate.claim(state, my_harness, my_session_id):
         # 실측: SessionStart 훅이 한 세션에서 6회 발동했다.
@@ -174,6 +182,7 @@ def emit(
     wire: str = "",
     force: bool = False,
     as_text: bool = False,
+    dry_run: bool = False,
     home: Optional[str] = None,
     now: Optional[float] = None,
     out=None,
@@ -205,6 +214,7 @@ def emit(
             now=now,
             budget=budget,
             force=force,
+            dry_run=dry_run,
         )
         if not body:
             return 0
@@ -213,7 +223,7 @@ def emit(
             _log_failure(home, "body exceeded budget at print time; suppressed")
             return 0
         chosen = wire or _wire_for(harness, home)
-        stream.write(body if as_text else hook_wire(body, chosen) + "\n")
+        stream.write(body if as_text or dry_run else hook_wire(body, chosen) + "\n")
         return 0
     except Exception:
         _log_failure(home, traceback.format_exc())

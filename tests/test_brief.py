@@ -289,6 +289,75 @@ class TestRunWireShape(unittest.TestCase):
         self.assertEqual(second.getvalue(), "")
 
 
+class TestDryRun(unittest.TestCase):
+    """--dry-run 은 본문만 보이고 아무것도 쓰지 않는다(#17). 한 번의 수동 확인이
+    그 세션의 전달을 소비하면 다음 실제 SessionStart 에 아무것도 가지 않는다."""
+
+    def setUp(self):
+        self.h = Harness()
+
+    def tearDown(self):
+        self.h.close()
+
+    def _tree(self):
+        found = {}
+        for base in (self.h.home, self.h.repo_root):
+            for dirpath, _dirs, files in os.walk(base):
+                for name in files:
+                    path = os.path.join(dirpath, name)
+                    st = os.stat(path)
+                    found[path] = (st.st_size, st.st_mtime_ns)
+        return found
+
+    def test_dry_run_writes_nothing(self):
+        self.h.plant_codex_session()
+        before = self._tree()
+        out = io.StringIO()
+        code = brief.emit(
+            harness="claude-code", dry_run=True,
+            stdin_text=json.dumps({"cwd": self.h.repo_root, "session_id": "me1"}),
+            home=self.h.home, now=NOW, out=out)
+        self.assertEqual(code, 0)
+        self.assertTrue(out.getvalue().startswith("[omhc]"))
+        self.assertEqual(self._tree(), before)
+
+    def test_dry_run_does_not_consume_the_real_delivery(self):
+        self.h.plant_codex_session()
+        payload = json.dumps({"cwd": self.h.repo_root, "session_id": "me1"})
+        dry, real = io.StringIO(), io.StringIO()
+        brief.emit(harness="claude-code", dry_run=True, stdin_text=payload,
+                   home=self.h.home, now=NOW, out=dry)
+        brief.emit(harness="claude-code", stdin_text=payload,
+                   home=self.h.home, now=NOW, out=real)
+        self.assertTrue(dry.getvalue())
+        payload = json.loads(real.getvalue())
+        self.assertIn("[omhc]", payload["hookSpecificOutput"]["additionalContext"])
+
+    def test_dry_run_works_without_a_session_id(self):
+        """수동 호출에는 훅 payload 가 없다. 게이트를 쓰지 않으므로 세션 id 도
+        필요 없다."""
+        self.h.plant_codex_session()
+        out = io.StringIO()
+        brief.emit(harness="claude-code", dry_run=True,
+                   stdin_text=json.dumps({"cwd": self.h.repo_root}),
+                   home=self.h.home, now=NOW, out=out)
+        self.assertTrue(out.getvalue().startswith("[omhc]"))
+
+    def test_cli_dry_run_flag_reaches_compute(self):
+        from omhc import cli
+        self.h.plant_codex_session()
+        before = self._tree()
+        out = io.StringIO()
+        args = cli.build_parser().parse_args(
+            ["brief", "--harness", "claude-code", "--dry-run",
+             "--stdin", json.dumps({"cwd": self.h.repo_root})])
+        with mock.patch("omhc.brief.time.time", return_value=NOW):
+            code = cli.cmd_brief(args, home=self.h.home, out=out)
+        self.assertEqual(code, 0)
+        self.assertTrue(out.getvalue().startswith("[omhc]"))
+        self.assertEqual(self._tree(), before)
+
+
 class TestDeliver(unittest.TestCase):
     def setUp(self):
         self.h = Harness()

@@ -48,9 +48,9 @@ behavior with evidence. You do not edit repo files and you do not fix anything.
   - `omhc status --json` exits with the same code as the text form (0 iff no row's verdict is
     `false`). Read `rows[].verdict` (`"pass"`/`"fail"`/`null`) — `null` is informational/not yet
     judgeable and never gates the exit code; it is not the same as `"pass"`.
-  - `omhc brief --dry-run` is **not** dry: it only switches output to text, and still claims the
-    gate, pins, writes `delivered.tsv` and installs the handoff. One "dry" run consumes that
-    session's delivery. Use it only on state you are prepared to reset.
+  - `omhc brief --dry-run` prints the handoff body as text and writes nothing (no gate, pin,
+    index, delivery or `delivered.tsv`), and needs no session id. `--text` alone is **not** dry:
+    it still claims the gate and consumes that session's delivery.
   - Claude Code auth lives in the macOS keychain and does **not** follow the HOME swap — under the
     sandbox HOME it answers "Not logged in". Report it; the user can log in once inside the sandbox.
   - Headless `claude -p` sessions carry `entrypoint:"sdk-cli"` and `codex exec` rollouts carry
