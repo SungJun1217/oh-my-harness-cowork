@@ -197,6 +197,67 @@ class TestSentinelNeverEscapes(unittest.TestCase):
         ])
         self.assertNotIn(SENTINEL, out)
 
+    def test_agent_echoing_the_omhc_header_is_dropped_claude_code(self):
+        """#24: 받는 에이전트가 주입된 [omhc] 헤더를 답변에 그대로 인용하면 반대
+        방향 핸드오프의 PLAN? 에 그 블록이 통째로 중첩된다. guard.HEADER_LINE1_FMT
+        하나로 mint 와 guard 가 같은 문구를 공유하므로, 여기서 만든 헤더가 실제
+        mint() 산출물과 어긋날 수 없다.
+        """
+        header = guard.HEADER_LINE1_FMT.format("codex-cli", "abcd1234", "5m", "2h ago")
+        quoted = "받은 요약을 인용합니다:\n" + header + "\n" + guard.HEADER_LINE2 + "\n계속 진행하겠습니다."
+        out = mint_claude([
+            {"type": "user", "cwd": REPO, "timestamp": "2026-09-22T00:00:00.000Z",
+             "message": {"content": "정상적인 사람의 말"}},
+            {"type": "assistant", "cwd": REPO, "timestamp": "2026-09-22T00:00:01.000Z",
+             "message": {"content": [{"type": "text", "text": quoted}]}},
+        ])
+        # mint() 자신의 헤더도 "notes from a prior session" 을 담으므로 그 문구
+        # 자체가 아니라 인용된 헤더의 식별자(가짜 id8 "abcd1234")로 판정한다.
+        self.assertNotIn("abcd1234", out)
+        self.assertEqual(out.count("notes from a prior session"), 1)
+
+    def test_agent_echoing_the_omhc_header_is_dropped_codex_cli(self):
+        header = guard.HEADER_LINE1_FMT.format("claude-code", "abcd1234", "5m", "2h ago")
+        quoted = "받은 요약을 인용합니다: " + header
+        out = mint_codex([
+            {"timestamp": "2026-09-22T16:30:00.000Z", "ordinal": 0,
+             "type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
+            {"timestamp": "2026-09-22T16:30:01.000Z", "ordinal": 1,
+             "type": "response_item",
+             "payload": {"type": "message", "role": "user", "id": "u",
+                         "content": [{"type": "input_text", "text": "정상적인 말"}]}},
+            {"timestamp": "2026-09-22T16:30:02.000Z", "ordinal": 2,
+             "type": "response_item",
+             "payload": {"type": "message", "role": "assistant", "id": "a",
+                         "content": [{"type": "output_text", "text": quoted}]}},
+        ])
+        self.assertNotIn("abcd1234", out)
+        self.assertEqual(out.count("notes from a prior session"), 1)
+
+    def test_agent_mentioning_omhc_in_passing_is_kept_both_adapters(self):
+        """#24 의 반대쪽: "[omhc]" 라는 낱말만으로 걸면 무해한 언급까지 드롭한다."""
+        mention = "the [omhc] tool을 써서 컨텍스트를 넘겼다"
+        out_cc = mint_claude([
+            {"type": "user", "cwd": REPO, "timestamp": "2026-09-22T00:00:00.000Z",
+             "message": {"content": "정상적인 사람의 말"}},
+            {"type": "assistant", "cwd": REPO, "timestamp": "2026-09-22T00:00:01.000Z",
+             "message": {"content": [{"type": "text", "text": mention}]}},
+        ])
+        self.assertIn("omhc", out_cc)
+        out_cx = mint_codex([
+            {"timestamp": "2026-09-22T16:30:00.000Z", "ordinal": 0,
+             "type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
+            {"timestamp": "2026-09-22T16:30:01.000Z", "ordinal": 1,
+             "type": "response_item",
+             "payload": {"type": "message", "role": "user", "id": "u",
+                         "content": [{"type": "input_text", "text": "정상적인 말"}]}},
+            {"timestamp": "2026-09-22T16:30:02.000Z", "ordinal": 2,
+             "type": "response_item",
+             "payload": {"type": "message", "role": "assistant", "id": "a",
+                         "content": [{"type": "output_text", "text": mention}]}},
+        ])
+        self.assertIn("omhc", out_cx)
+
     def test_sentinel_in_an_unknown_future_record_type_never_reaches_the_artifact(self):
         """모르는 타입은 기본 DROP 이라는 계약을 센티넬로 확인한다."""
         out = mint_claude([
