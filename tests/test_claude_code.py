@@ -27,6 +27,9 @@ def ref_for(path: str, cwd=REPO) -> A.SessionRef:
 
 class TestSlug(unittest.TestCase):
     def test_slug_for_this_repo_matches_the_real_directory_name(self):
+        """이 머신의 실측 값. 다른 경로에서는 건너뛴다."""
+        if REPO != "/home/ec2-user/capstone/oh-my-harness-cowork":
+            self.skipTest("다른 체크아웃 경로: {}".format(REPO))
         self.assertEqual(
             CC.claude_slug(REPO), "-home-ec2-user-capstone-oh-my-harness-cowork"
         )

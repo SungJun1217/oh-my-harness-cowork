@@ -123,7 +123,7 @@ omhc의 가치는 **벤더가 다를 때**입니다. 교차 벤더 재생은 thi
 ## 테스트
 
 ```bash
-python3 -m unittest discover -s tests -t . -q   # 1초 이내, 하네스를 띄우지 않는다
+python3 -m unittest discover -s tests -t . -q   # 약 12초, 하네스를 띄우지 않는다
 bash tests/smoke.sh                             # 적대적 입력 7종
 ```
 
