@@ -34,6 +34,20 @@ def repo_key(repo_root: str) -> str:
     return "{}-{}".format(os.path.basename(repo_root.rstrip("/")), digest)
 
 
+def owning_repo_key(cwd: Optional[str]) -> Optional[str]:
+    """이 cwd 가 실제로 속한 레포의 키. cwd 없으면 None.
+
+    `equal-or-descendant`(is_within) 판정은 `.git` 없는 부모 디렉터리에서
+    호출되면 그 아래 **다른** 레포(자기 `.git` 을 가진 자식, 예: 중첩
+    워크트리·서브모듈)에서 시작한 세션까지 통과시킨다. 이 함수로 후보의
+    실제 소속 레포 키를 다시 계산해 걸러야 한다 — cli._backfill_foreign_sessions
+    가 쓰던 것과 같은 해석이다.
+    """
+    if not cwd:
+        return None
+    return repo_key(resolve_repo_root(cwd))
+
+
 def is_within(repo_root: str, candidate: str) -> bool:
     """equal-or-descendant. list_sessions 의 cwd 일치 규칙."""
     return _within(os.path.realpath(repo_root).rstrip("/"),
