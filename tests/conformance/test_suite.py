@@ -397,6 +397,69 @@ class AdapterContract(unittest.TestCase):
                     for ref in got:
                         self.assertIsInstance(ref, A.SessionRef)
 
+    def test_30_read_session_since_matches_read_session_restricted_to_the_offset(self):
+        """선택 메서드(discover/health 와 같은 패턴) — 구현하는 어댑터만 본다.
+        기본(None) 인 어댑터는 건너뛴다(#22)."""
+        for adapter_id in adapter_ids():
+            if A.Capability.READ not in adapters.REGISTRY[adapter_id].capabilities:
+                continue
+            adapter = adapters.get(adapter_id)
+            with self.subTest(adapter=adapter_id):
+                # 가비지에서 절대 던지지 않는다.
+                with tempfile.NamedTemporaryFile("wb", suffix=".jsonl",
+                                                 delete=False) as fh:
+                    fh.write(b"\x00\xff{not json\n\n\x80\x81")
+                    junk_path = fh.name
+                try:
+                    junk_ref = A.SessionRef(adapter_id=adapter_id, session_id="junk",
+                                            source_path=junk_path, cwd=REPO, epoch=0.0,
+                                            size=os.path.getsize(junk_path))
+                    got = adapter.read_session_since(junk_ref, 0)
+                    if got is None:
+                        continue  # 선택 메서드 미구현 — 나머지도 볼 필요 없다.
+                    self.assertIsInstance(got, A.SessionSince)
+                    self.assertIsInstance(got.end_offset, int)
+                finally:
+                    os.unlink(junk_path)
+
+                for ref in sessions_or_skip(self, adapter_id)[:1]:
+                    full = adapter.read_session(ref)
+                    if not full.events:
+                        continue
+                    # 줄 경계(어떤 이벤트의 offset)에서 자른다 — line-aligned start.
+                    # seq 는 이 부분 읽기가 처음부터 다시 매기므로(구현 자유
+                    # — 색인은 read_session_since 를 쓰지 않는다) 비교에서
+                    # 뺀다; 나머지 필드는 read_session 과 완전히 같아야 한다.
+                    mid = full.events[len(full.events) // 2]
+                    since = adapter.read_session_since(ref, mid.offset)
+                    self.assertIsNotNone(since)
+                    expected = tuple(e._replace(seq=0) for e in full.events
+                                     if e.offset >= mid.offset)
+                    got = tuple(e._replace(seq=0) for e in since.events)
+                    self.assertEqual(got, expected)
+                    # end_offset 은 항상 줄 경계다(리뷰: 개행 없이 끝나는
+                    # 마지막 줄은 아직 "안전히 다 읽은" 것이 아니다) — 실물
+                    # 픽스처는 마지막 줄에 개행이 없을 수도 있으므로 EOF 와
+                    # 같다고 단정하지 않고, 직전 바이트가 개행인지로 본다.
+                    size = os.path.getsize(ref.source_path)
+                    self._assert_line_aligned(ref.source_path, since.end_offset, size)
+
+                    # EOF 에서는 빈 이벤트, end_offset 은 여전히 줄 경계 이하.
+                    eof = adapter.read_session_since(ref, size)
+                    self.assertIsNotNone(eof)
+                    self.assertEqual(eof.events, ())
+                    self._assert_line_aligned(ref.source_path, eof.end_offset, size)
+
+    def _assert_line_aligned(self, path, end_offset, size):
+        self.assertGreaterEqual(end_offset, 0)
+        self.assertLessEqual(end_offset, size)
+        if end_offset == 0:
+            return
+        with open(path, "rb") as fh:
+            fh.seek(end_offset - 1)
+            self.assertEqual(fh.read(1), b"\n",
+                             "end_offset {} is not right after a newline".format(end_offset))
+
 
 if __name__ == "__main__":
     unittest.main()

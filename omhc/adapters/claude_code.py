@@ -367,6 +367,18 @@ class ClaudeCodeAdapter:
         return SessionRead(ref=ref, events=tuple(events), unparsed=unparsed,
                            dropped=dropped)
 
+    def read_session_since(self, ref: SessionRef, offset: int, *,
+                           max_bytes: Optional[int] = None,
+                           stop_at_human_turn: bool = False):
+        """미구현(선택 메서드, discover/health 와 같은 패턴) — Claude 쪽
+        live-continue(핸드오프 뒤 같은 Claude 세션에 새 턴만 이어지는 경우)는
+        아직 감지하지 않는다(#22, README 의 남은 한계). 기본값 None 은
+        "이 어댑터는 구분할 수 없다"이고, 호출자는 그러면 오늘의 전체 스캔
+        경로를 그대로 쓴다 — 인자를 받기만 하고 항상 무시한다(base 계약과
+        같은 키워드 모양을 유지해야 cli.py 가 어댑터를 구분 안 하고 부를 수
+        있다)."""
+        return None
+
     @staticmethod
     def _apply_results(content, pending: Dict[str, int], events: List[Event]) -> None:
         """tool_result 를 id 로 앞선 tool_use Event 에 붙인다.
