@@ -295,9 +295,19 @@ def cmd_show(args, *, home=None, out=sys.stdout) -> int:
 # --- status -----------------------------------------------------------------
 
 
-def _check(out, label: str, ok: bool, detail: str) -> bool:
-    out.write("{:<4} {:<22} {}\n".format("PASS" if ok else "FAIL", label, detail))
-    return ok
+# 세 값만 쓴다: True(PASS, 게이팅), False(FAIL, 게이팅), None(`----`, 게이팅
+# 안 함). SKIP 이 아니다 — "아직 아무 일도 안 일어났다"를 실패로도 성공으로도
+# 위장하지 않고 그대로 보여주려는 세 번째 라벨이다(#8).
+def _verdict_word(verdict: Optional[bool]) -> str:
+    if verdict is True:
+        return "PASS"
+    if verdict is False:
+        return "FAIL"
+    return "----"
+
+
+def _check(out, label: str, verdict: Optional[bool], detail: str) -> None:
+    out.write("{:<4} {:<22} {}\n".format(_verdict_word(verdict), label, detail))
 
 
 def cmd_status(args, *, home=None, out=sys.stdout) -> int:
@@ -341,53 +351,97 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
             health_rows.extend(getattr(inst, "health", lambda *a: ())(root, all_rows))
         except Exception:
             continue
+    watcher = watch.read_lock(state)
+
+    # 행을 한 번만 만들고 텍스트·JSON 이 같은 목록을 렌더한다 — 따로 만들면
+    # 한쪽만 고쳐질 수 있다(#8, status --json 이 항상 exit 0 이던 결함).
+    checks = []
+    checks.append(("adapters", bool(installed), ", ".join(installed) or "none found"))
+    checks.append(("ledger", None,
+                   "{} rows for this repo".format(len(rows)) if rows
+                   else "no sessions recorded here yet — start either harness in this repo"))
+
+    # lag_rows 의 size/lag_bytes 는 pinned/<sid>/source.jsonl 이 없어도 0 으로
+    # 나온다 — "size 0" 과 "고정 성공, 꼬리 0바이트" 를 구분 못 하면 고정이
+    # 실패한 세션도 archive PASS 로 보인다(리뷰 결함). watch.lag 의 `pinned` 로
+    # 실제 존재 여부를 본다.
+    pinned_rows = [r for r in lag_rows if r.get("pinned")]
+    unpinned_rows = [r for r in lag_rows if not r.get("pinned")]
+    if pinned_rows:
+        archive_verdict = True
+        archive_detail = "; ".join(
+            "{} tail={}B".format(r["session"][:8], r["lag_bytes"]) for r in pinned_rows)
+        if unpinned_rows:
+            archive_detail += "; unpinned: " + ", ".join(
+                r["session"][:8] for r in unpinned_rows)
+    elif injections:
+        # 핀은 brief.compute 가 전달 *후에만* 만든다(brief.py) — 원장 행은
+        # 있지만 아직 한 번도 전달받지 못한 사람에게 archive 를 영영 FAIL 로
+        # 두면 안 되지만, 전달은 됐는데(injections>0) 핀이 하나도 없다면
+        # 진짜 결함이다.
+        archive_verdict = False
+        archive_detail = "{} injections but nothing pinned".format(injections)
+        log_path = os.path.join(locate.omhc_root(home), brief.GUARD_LOG)
+        if os.path.exists(log_path):
+            archive_detail += "; details may be in {}".format(log_path)
+    else:
+        archive_verdict = None
+        archive_detail = "nothing handed off to this repo yet"
+    checks.append(("archive", archive_verdict, archive_detail))
+
+    off_reason = due.off_reason(state)
+    checks.append(("off switch", None,
+                   "on" if off_reason is None else "off ({})".format(off_reason)))
+
+    if leaked:
+        checks.append(("instruction files", False,
+                       "{}; stale omhc block in AGENTS.md would leak into Claude — "
+                       "run `omhc clear`".format(shared)))
+    elif shared:
+        checks.append(("instruction files", True,
+                       "{} -> Codex Path B disabled, falls to .omhc/outbox".format(shared)))
+    else:
+        checks.append(("instruction files", True,
+                       "AGENTS.md not shared with CLAUDE.md"
+                       if os.path.exists(agents_md.path_for(root))
+                       else "no AGENTS.md"))
+
+    for label, health_ok, detail in health_rows:
+        checks.append((label, health_ok, detail))
+
+    checks.append(("pull rate", None,
+                   "pulled {} of {} injections".format(pulls, injections)))
+    checks.append(("watcher (optional)", None,
+                   "running pid {}".format(watcher) if watcher
+                   else "not running — brief falls back to inline parsing"))
+
+    code = 1 if any(verdict is False for _label, verdict, _detail in checks) else 0
 
     if args.json:
+        def _verdict_json(verdict: Optional[bool]) -> Optional[str]:
+            if verdict is True:
+                return "pass"
+            if verdict is False:
+                return "fail"
+            return None
+
         out.write(json.dumps({
             "repo_root": root, "repo_key": key, "state_dir": state,
             "adapters": installed, "ledger_rows": len(rows),
             "archive": lag_rows,
             "injections": injections, "pulls": pulls,
-            "off": due.is_off(state), "watcher_pid": watch.read_lock(state),
+            "off": due.is_off(state), "watcher_pid": watcher,
             "instruction_files": {"shared": shared, "stale_block": leaked},
             "health": [{"label": label, "ok": ok, "detail": detail}
                        for label, ok, detail in health_rows],
+            "rows": [{"label": label, "verdict": _verdict_json(verdict), "detail": detail}
+                     for label, verdict, detail in checks],
         }, ensure_ascii=False, indent=2) + "\n")
-        return 0
+        return code
 
     out.write("repo   {}\nkey    {}\nstate  {}\n\n".format(root, key, state))
-    ok = True
-    ok &= _check(out, "adapters", bool(installed), ", ".join(installed) or "none found")
-    ok &= _check(out, "ledger", bool(rows),
-                 "{} rows for this repo".format(len(rows)))
-    ok &= _check(out, "archive", bool(lag_rows),
-                 "; ".join("{} tail={}B".format(r["session"][:8], r["lag_bytes"])
-                           for r in lag_rows)
-                 or "nothing pinned yet")
-    ok &= _check(out, "off switch", not due.is_off(state),
-                 "off" if due.is_off(state) else "on")
-    if leaked:
-        ok &= _check(out, "instruction files", False,
-                     "{}; stale omhc block in AGENTS.md would leak into Claude — "
-                     "run `omhc clear`".format(shared))
-    elif shared:
-        ok &= _check(out, "instruction files", True,
-                     "{} -> Codex Path B disabled, falls to .omhc/outbox".format(shared))
-    else:
-        ok &= _check(out, "instruction files", True,
-                     "AGENTS.md not shared with CLAUDE.md"
-                     if os.path.exists(agents_md.path_for(root))
-                     else "no AGENTS.md")
-    for label, health_ok, detail in health_rows:
-        ok &= _check(out, label, health_ok, detail)
-    # 항상 참인 항목을 ok 에 접으면 독자가 리터럴 True 를 추적해야 안다.
-    # watcher 줄처럼 정보로만 출력한다.
-    _check(out, "pull rate", True,
-           "pulled {} of {} injections".format(pulls, injections))
-    watcher = watch.read_lock(state)
-    _check(out, "watcher (optional)", True,
-           "running pid {}".format(watcher) if watcher
-           else "not running — brief falls back to inline parsing")
+    for label, verdict, detail in checks:
+        _check(out, label, verdict, detail)
     verbs = {}
     for path in _index_files(state):
         for row in index.rows(path):
@@ -398,7 +452,7 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     out.write("artifact {}\n".format(
         "{}B".format(os.path.getsize(artifact)) if os.path.exists(artifact)
         else "none"))
-    return 0 if ok else 1
+    return code
 
 
 # --- brief ------------------------------------------------------------------

@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from omhc import adapter as A
 from omhc import agents_md, cli, managed_block
@@ -272,6 +273,12 @@ class TestStatusInstructionFiles(unittest.TestCase):
         cwd = os.getcwd()
         os.chdir(self.t.root)
         self.addCleanup(os.chdir, cwd)
+        # adapters 행은 이 클래스의 관심사가 아니다 — 실제 $HOME 을 보는
+        # adapters.present() 가 CI(홈에 ~/.claude 없음)와 개발 머신에서 다른
+        # 결과를 주면 이 아래 exit code 단정이 환경에 따라 흔들린다(리뷰 결함).
+        patcher = mock.patch.object(cli.adapters, "present", return_value=["claude-code"])
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def run_status(self):
         out = io.StringIO()
@@ -329,7 +336,9 @@ class TestStatusInstructionFiles(unittest.TestCase):
         code, text = self.run_status()
         line = next(l for l in text.splitlines() if "instruction files" in l)
         self.assertTrue(line.startswith("PASS"))
-        self.assertEqual(code, 1)  # ledger/archive 는 여전히 비어 FAIL 이다; 이 행만 본다
+        # C1: 빈 ledger/archive 는 이제 게이팅하지 않는 `----` 다 — 나머지 행이
+        # 모두 통과하면 exit 0 이다(예전엔 이 둘이 FAIL 이라 여기서 1 이었다).
+        self.assertEqual(code, 0)
 
     def test_status_recovers_to_pass_after_clear_on_a_hardlinked_agents_md(self):
         """라운드 2 리뷰 결함: 하드링크를 갈라놓으면 status 가 거짓으로 '공유 아님' PASS 를 낸다."""

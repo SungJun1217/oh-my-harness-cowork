@@ -41,7 +41,9 @@ behavior with evidence. You do not edit repo files and you do not fix anything.
 - Known sandbox traps (measured 2026-09-24, Claude Code 2.1.281 / codex-cli 0.155.1):
   - `codex exec` waits on stdin ("Reading additional input from stdin...") until the alarm
     fires unless stdin is closed — always append `< /dev/null`.
-  - `omhc status --json` always exits 0; read `ok` fields, not the exit code.
+  - `omhc status --json` exits with the same code as the text form (0 iff no row's verdict is
+    `false`). Read `rows[].verdict` (`"pass"`/`"fail"`/`null`) — `null` is informational/not yet
+    judgeable and never gates the exit code; it is not the same as `"pass"`.
   - `omhc brief --dry-run` is **not** dry: it only switches output to text, and still claims the
     gate, pins, writes `delivered.tsv` and installs the handoff. One "dry" run consumes that
     session's delivery. Use it only on state you are prepared to reset.

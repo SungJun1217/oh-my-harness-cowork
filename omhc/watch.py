@@ -136,12 +136,16 @@ def lag(state_dir: str) -> List[Dict[str, object]]:
         session = name[: -len(".idx")]
         watermark = index.watermark(os.path.join(directory, name))
         source = os.path.join(pin.pinned_dir(state_dir, session), "source.jsonl")
+        # "pinned" 는 pin_session 이 실제로 하드링크를 걸었는지를 뜻한다 — 이게
+        # 없으면 브리핑을 보냈지만 고정에 실패한 세션도 size=0/lag_bytes=0 으로
+        # 보여 status 의 archive 행이 거짓 PASS 를 낸다(리뷰 결함).
+        pinned = os.path.exists(source)
         try:
-            size = os.path.getsize(source)
+            size = os.path.getsize(source) if pinned else 0
         except OSError:
             size = 0
         out.append({"session": session, "watermark": watermark, "size": size,
-                    "lag_bytes": size - watermark})
+                    "lag_bytes": size - watermark, "pinned": pinned})
     return out
 
 

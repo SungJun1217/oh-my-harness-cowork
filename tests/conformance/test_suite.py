@@ -355,7 +355,9 @@ class AdapterContract(unittest.TestCase):
                     self.assertEqual(len(row), 3)
                     label, ok, detail = row
                     self.assertIsInstance(label, str)
-                    self.assertIsInstance(ok, bool)
+                    # ok 는 True/False/None 이다 — None 은 아직 판단할 근거가
+                    # 없는 정보성 진단(status 의 `----`, 게이팅 안 함).
+                    self.assertTrue(ok is None or isinstance(ok, bool))
                     self.assertIsInstance(detail, str)
 
     def test_28_discover_is_an_iterable_of_session_refs_and_never_raises(self):

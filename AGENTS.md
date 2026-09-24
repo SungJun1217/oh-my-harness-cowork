@@ -18,7 +18,7 @@ python3 -m unittest tests.test_mint                   # one module
 python3 -m unittest tests.test_mint.TestBudget.test_output_never_exceeds_the_budget   # one test
 bash tests/smoke.sh                                   # 7 adversarial inputs: hook path must give empty stdout + exit 0
 python3 tests/harvest.py [--force]                    # regenerate fixtures from this machine's real sessions
-bin/omhc status                                       # the one human dashboard (all checks PASS/FAIL, no SKIP)
+bin/omhc status                                       # the one human dashboard: every check gets PASS/FAIL/`----` (never SKIP)
 ```
 
 - ~60 tests skip without fixtures. Fixtures (`tests/fixtures/`) are real conversations and are **never committed**; run `harvest.py` locally to enable them.

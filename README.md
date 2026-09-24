@@ -154,7 +154,7 @@ in the Claude → Codex direction.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
-omhc status          # 5 gated checks (+ codex hook when installed), all PASS/FAIL. No SKIP
+omhc status          # every check gets PASS/FAIL/---- (+ codex hook when installed). Not SKIP
 ```
 
 This unpacks the latest release into `~/.local/share/omhc/<version>` and
@@ -221,11 +221,14 @@ in the repo.
 > (top-level `additionalContext`) is rejected by codex-cli 0.155.1 with
 > `hook: SessionStart Failed` and nothing gets injected.
 
-`omhc status` shows 5 gated checks (adapters/ledger/archive/off switch/
-instruction files, all PASS/FAIL) plus 2 informational rows (pull rate,
-watcher). When the omhc Codex hook is installed, a `codex hook` row is added: it
-FAILs when the newest Codex session for this repo since the hook was installed never
-ran it — the untrusted-hook case — and names that session's originator.
+`omhc status` gives every row one of three labels: **PASS** or **FAIL** for
+checks that were actually judged and can gate the exit code (adapters,
+archive, instruction files, and adapter health rows such as `codex hook`),
+and **`----`** for rows that are informational or not judgeable yet (ledger,
+off switch, pull rate, watcher) — `----` never gates. When the omhc Codex
+hook is installed, a `codex hook` row is added: it FAILs when the newest
+Codex session for this repo since the hook was installed never ran it — the
+untrusted-hook case — and names that session's originator.
 
 ### Repos that share AGENTS.md with Claude Code
 
