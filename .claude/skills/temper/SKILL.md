@@ -1,11 +1,11 @@
 ---
-name: unit
-description: Develop one unit of work end-to-end in omhc — analyze (if needed) → implement → review → commit. Use when the user runs /unit <task>. Never pushes.
+name: temper
+description: Develop one unit of work end-to-end in omhc — analyze (if needed) → implement → review → commit. Use when the user runs /temper <task>. Never pushes.
 argument-hint: <what to build or fix>
 disable-model-invocation: true
 ---
 
-# /unit — one unit of work, reviewed, then committed
+# /temper — one unit of work, hardened by review, then committed
 
 Task: $ARGUMENTS
 
@@ -15,7 +15,7 @@ make the judgment calls, and write the commit. Talk to the user in Korean.
 ## 0. Scope check
 
 - If `$ARGUMENTS` is empty or too vague to define "done", ask the user one focused question and stop.
-- If it is clearly several independent units, propose the split and ask which to do first. One `/unit` = one commit.
+- If it is clearly several independent units, propose the split and ask which to do first. One `/temper` = one commit.
 - If the working tree already has uncommitted changes unrelated to this task, stop and ask — do not fold them into this commit.
 
 ## 1. Analyze (only when needed)
