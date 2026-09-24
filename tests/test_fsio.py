@@ -118,6 +118,56 @@ class TestReadHelpers(unittest.TestCase):
         self.assertIsNone(fsio.same_inode(path, "/nope/missing"))
 
 
+class TestLineAlignedSize(unittest.TestCase):
+    """#22 리뷰: baseline 으로 os.stat 크기를 그대로 쓰면 레코드 중간일 수
+    있다 — 마지막 완전한 줄 끝으로 스냅한다."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "f.jsonl")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_size_ending_exactly_on_a_newline_is_unchanged(self):
+        with open(self.path, "wb") as fh:
+            fh.write(b"aaa\nbb\n")
+        size = os.path.getsize(self.path)
+        self.assertEqual(fsio.line_aligned_size(self.path, size), size)
+
+    def test_size_mid_line_snaps_back_to_the_previous_newline(self):
+        with open(self.path, "wb") as fh:
+            fh.write(b"aaa\nbb")  # 마지막 줄이 개행 없이 끝난다(쓰는 중)
+        size = os.path.getsize(self.path)
+        self.assertEqual(fsio.line_aligned_size(self.path, size), 4)  # "aaa\n" 뒤
+
+    def test_a_single_line_longer_than_the_window_falls_back_to_size(self):
+        with open(self.path, "wb") as fh:
+            fh.write(b"x" * 200)  # 개행이 전혀 없다
+        size = os.path.getsize(self.path)
+        self.assertEqual(fsio.line_aligned_size(self.path, size, window=64), size)
+
+    def test_missing_file_falls_back_to_size(self):
+        self.assertEqual(fsio.line_aligned_size("/nope/missing", 42), 42)
+
+    def test_a_given_fallback_wins_over_size_when_no_newline_is_found(self):
+        """리뷰(3차) #3: window 안에 개행이 없으면 과대평가(size 그대로)
+        대신 호출자가 준 안전한 fallback(예: 이전 baseline)을 쓴다."""
+        with open(self.path, "wb") as fh:
+            fh.write(b"x" * 200)
+        size = os.path.getsize(self.path)
+        self.assertEqual(
+            fsio.line_aligned_size(self.path, size, window=64, fallback=17), 17)
+
+    def test_missing_file_uses_the_given_fallback(self):
+        self.assertEqual(
+            fsio.line_aligned_size("/nope/missing", 42, fallback=9), 9)
+
+    def test_zero_or_negative_size_returns_zero(self):
+        self.assertEqual(fsio.line_aligned_size(self.path, 0), 0)
+        self.assertEqual(fsio.line_aligned_size(self.path, -5), 0)
+
+
 class TestClaimExclusive(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
