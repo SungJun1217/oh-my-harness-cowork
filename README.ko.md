@@ -254,9 +254,22 @@ git 체크아웃이라면 레포의 `hooks/` 아래에 있습니다. 조각의 `
 
 `omhc status`의 모든 행은 세 라벨 중 하나입니다: 실제로 판정되어 exit code 를
 게이팅할 수 있는 **PASS**/**FAIL**(adapters, archive, instruction files,
-`codex hook` 같은 어댑터 health 행), 그리고 정보성이거나 아직 판단할 근거가
-없는 행을 위한 **`----`**(ledger, off switch, pull rate, watcher) — `----`
-는 게이팅하지 않습니다. omhc Codex 훅이 설치돼 있으면 `codex hook` 행이
+`ledger rejects`, `codex hook` 같은 어댑터 health 행), 그리고 정보성이거나
+아직 판단할 근거가 없는 행을 위한 **`----`**(ledger, off switch, pull rate,
+watcher) — `----` 는 게이팅하지 않습니다.
+
+원장은 세션 시작마다 JSON 한 줄을 덧붙이고, 그 한 줄은 반드시 `write(2)`
+호출 한 번 안에 들어가야 합니다(append-only 라 잠금이 필요 없다 — `O_APPEND`
+fd 에 대한 단일 write(2) 는 크기와 무관하게 POSIX 상 원자적이고, 이건
+`PIPE_BUF` 와는 무관하다 — `PIPE_BUF` 는 파이프 전용이다). 그 상한을 넘는
+행은 잘라내지 않고 통째로 버립니다(`path`/`session` 을 자르면 아무것도
+가리키지 않는 줄이 조용히 남기 때문) — 대신 버렸다는 사실 자체를 남겨
+안 보이게 사라지지 않게 합니다; 같은 세션이 재시도돼도 `mark` 마다 또
+남기지 않고 한 번만 기록합니다. `ledger rejects` 는 이 레포에서 최근 7일
+안에 버려졌고 지금 상한으로도 여전히 못 들어가는 행이 있으면 FAIL, 없으면
+`----` 입니다; `omhc clear` 로 이 레포의 기록을 지울 수 있습니다(예: 상한을
+올려 고친 뒤). omhc Codex 훅이
+설치돼 있으면 `codex hook` 행이
 붙습니다. `hooks.json`이 마지막으로 바뀐 뒤 이 레포의 가장 최근 대화형 Codex
 세션이 훅을 돌리지 않았으면(신뢰되지 않은 훅) FAIL 이고, 그 세션의 originator 를
 함께 보여줍니다. 이때 Claude→Codex 는 전달되지 않지만 Codex→Claude 는 Claude 쪽
