@@ -10,3 +10,8 @@ tests/fixtures/
 
 # 개발용 샌드박스 스크립트(sandbox/setup.sh, run.sh). 로컬 전용.
 sandbox/
+
+# pyproject 빌드 산출물
+build/
+dist/
+*.egg-info/
