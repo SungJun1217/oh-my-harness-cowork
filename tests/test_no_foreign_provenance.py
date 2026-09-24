@@ -109,6 +109,59 @@ class TestSentinelNeverEscapes(unittest.TestCase):
         ])
         self.assertNotIn(SENTINEL, out)
 
+    def test_sentinel_in_a_synthetic_model_assistant_record_never_reaches_the_artifact(self):
+        path = write_jsonl([
+            {"type": "user", "cwd": REPO, "timestamp": "2026-09-22T00:00:00.000Z",
+             "message": {"content": "정상적인 사람의 말"}},
+            {"type": "assistant", "cwd": REPO,
+             "timestamp": "2026-09-22T00:00:01.000Z",
+             "message": {"model": "<synthetic>",
+                         "content": [{"type": "text", "text": SENTINEL}]}},
+        ])
+        try:
+            read = CC.ClaudeCodeAdapter().read_session(ref_for("claude-code", path))
+            out = mint.mint(read, to_adapter_id="codex-cli", budget=900, now=NOW)
+        finally:
+            os.unlink(path)
+        self.assertNotIn(SENTINEL, out)
+        self.assertEqual(read.dropped.get("synthetic"), 1)
+
+    def test_sentinel_in_an_api_error_assistant_record_never_reaches_the_artifact(self):
+        path = write_jsonl([
+            {"type": "user", "cwd": REPO, "timestamp": "2026-09-22T00:00:00.000Z",
+             "message": {"content": "정상적인 사람의 말"}},
+            {"type": "assistant", "cwd": REPO, "isApiErrorMessage": True,
+             "timestamp": "2026-09-22T00:00:01.000Z",
+             "message": {"model": "claude-opus-4",
+                         "content": [{"type": "text", "text": SENTINEL}]}},
+        ])
+        try:
+            read = CC.ClaudeCodeAdapter().read_session(ref_for("claude-code", path))
+            out = mint.mint(read, to_adapter_id="codex-cli", budget=900, now=NOW)
+        finally:
+            os.unlink(path)
+        self.assertNotIn(SENTINEL, out)
+        self.assertEqual(read.dropped.get("synthetic"), 1)
+
+    def test_sentinel_in_a_synthetic_tool_use_record_never_reaches_the_artifact(self):
+        path = write_jsonl([
+            {"type": "user", "cwd": REPO, "timestamp": "2026-09-22T00:00:00.000Z",
+             "message": {"content": "정상적인 사람의 말"}},
+            {"type": "assistant", "cwd": REPO,
+             "timestamp": "2026-09-22T00:00:01.000Z",
+             "message": {"model": "<synthetic>",
+                         "content": [{"type": "tool_use", "id": "t1",
+                                      "name": "Bash",
+                                      "input": {"command": SENTINEL}}]}},
+        ])
+        try:
+            read = CC.ClaudeCodeAdapter().read_session(ref_for("claude-code", path))
+            out = mint.mint(read, to_adapter_id="codex-cli", budget=900, now=NOW)
+        finally:
+            os.unlink(path)
+        self.assertNotIn(SENTINEL, out)
+        self.assertEqual(read.dropped.get("synthetic"), 1)
+
     def test_sentinel_in_a_codex_developer_record_never_reaches_the_artifact(self):
         out = mint_codex([
             {"timestamp": "2026-09-22T16:30:00.000Z", "ordinal": 0,

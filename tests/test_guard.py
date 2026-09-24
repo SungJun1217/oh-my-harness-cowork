@@ -139,6 +139,12 @@ class TestSafeScopedByProvenance(unittest.TestCase):
     def test_harness_text_is_always_dropped(self):
         self.assertFalse(guard.safe("무해해 보이는 문장", "harness"))
 
+    def test_synthetic_interrupted_for_tool_use_is_dropped(self):
+        """실물 세션에서 목격된 문자열이다 — 구조적 마커 없이 정확한 텍스트로만 식별된다."""
+        self.assertFalse(
+            guard.safe("[Request interrupted by user for tool use]", "human")
+        )
+
     def test_agent_plain_text_is_kept(self):
         self.assertTrue(guard.safe("테스트 3개가 실패했다", "agent"))
 

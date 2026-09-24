@@ -29,7 +29,10 @@ CLAUDE_DIR = os.path.join(HOME, ".claude", "projects", SLUG)
 _ONE_TAG = re.compile(r"^<([a-zA-Z][\w:-]*)(\s[^>]*)?>.*?</\1>\s*", re.S)
 
 # 사람이 쓰지 않았는데 사람 턴처럼 보이는 합성 문자열. 실물에서 목격된 것만 넣는다.
-SYNTHETIC = ("[Request interrupted by user]",)
+SYNTHETIC = (
+    "[Request interrupted by user]",
+    "[Request interrupted by user for tool use]",
+)
 
 # 슬래시 명령 봉투 안의 <command-args> 는 사람이 실제로 타이핑한 말이므로 회수한다.
 # omhc.guard 와 같은 규칙을 의도적으로 중복 구현한다 — 이 스크립트가 어댑터를
