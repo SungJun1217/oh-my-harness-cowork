@@ -35,7 +35,7 @@ class TestLocate(unittest.TestCase):
         self.assertTrue(all(c in "0123456789abcdef" for c in suffix))
 
     def test_resolve_repo_root_from_subdirectory_returns_toplevel(self):
-        sub = os.path.join(REPO, "docs", "superpowers")
+        sub = os.path.join(REPO, "omhc", "adapters")
         self.assertEqual(locate.resolve_repo_root(sub), REPO)
 
     def test_resolve_repo_root_outside_git_returns_realpath_of_cwd(self):

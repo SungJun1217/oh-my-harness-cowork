@@ -143,5 +143,3 @@ v1은 어댑터 2개만 구현합니다. 3번째를 붙이는 비용은 **파일
 코어 수정은 없습니다. 읽기와 쓰기는 독립 capability라서, 세션 훅이 없는 하네스는
 **읽기 전용 어댑터가 정상 상태**이고 결함이 아닙니다. 주입 경로가 아예 없으면
 `<repo>/.omhc/outbox/` 로 떨어지는 보편 바닥이 받습니다.
-
-설계 근거: [`docs/superpowers/specs/2026-09-22-omhc-design.md`](docs/superpowers/specs/2026-09-22-omhc-design.md)
