@@ -18,7 +18,7 @@ from ..adapter import (
     SessionRef,
 )
 from ..event import ARG_LIMIT, Event
-from . import _register, install_state_artifact, iso_epoch
+from . import _register, allow_headless, install_state_artifact, iso_epoch
 
 ARTIFACT_NAME = "omhc.txt"
 
@@ -207,7 +207,8 @@ class ClaudeCodeAdapter:
             except OSError:
                 continue
             head = head_of(path)
-            if str(head.get("entrypoint") or "") in NON_INTERACTIVE_ENTRYPOINTS:
+            if (str(head.get("entrypoint") or "") in NON_INTERACTIVE_ENTRYPOINTS
+                    and not allow_headless()):
                 continue
             if head.get("sidechain") or head.get("agentId"):
                 continue
@@ -391,7 +392,8 @@ class ClaudeCodeAdapter:
         sdk-py(보안 리뷰 훅 등이 남긴 것)였다.
         """
         head = head_of(source_path)
-        if str(head.get("entrypoint") or "") in NON_INTERACTIVE_ENTRYPOINTS:
+        if (str(head.get("entrypoint") or "") in NON_INTERACTIVE_ENTRYPOINTS
+                and not allow_headless()):
             return False
         return not (head.get("sidechain") or head.get("agentId"))
 

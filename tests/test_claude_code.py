@@ -103,6 +103,53 @@ class TestListSessions(unittest.TestCase):
         self.assertNotIn("cli", CC.NON_INTERACTIVE_ENTRYPOINTS)
 
 
+class TestHeadlessOverride(unittest.TestCase):
+    """OMHC_ALLOW_HEADLESS 는 헤드리스(sdk-cli 등)를 되살리지만 사이드체인은
+    절대 되살리지 않는다 — 발화자가 다른 문제라서 오버라이드로 풀 대상이 아니다."""
+
+    def setUp(self):
+        self._backup = os.environ.pop("OMHC_ALLOW_HEADLESS", None)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._backup is not None:
+            os.environ["OMHC_ALLOW_HEADLESS"] = self._backup
+        else:
+            os.environ.pop("OMHC_ALLOW_HEADLESS", None)
+
+    def _plant(self, home: str, cwd: str, *, entrypoint="sdk-cli", sidechain=False):
+        root = os.path.realpath(cwd)
+        directory = os.path.join(home, ".claude", "projects", CC.claude_slug(root))
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "s1.jsonl")
+        row = {"type": "user", "cwd": root, "entrypoint": entrypoint,
+              "sessionId": "s1", "message": {"content": "hi"}}
+        if sidechain:
+            row["isSidechain"] = True
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+        return path
+
+    def test_without_override_a_headless_session_is_excluded(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._plant(home, REPO)
+            self.assertEqual(CC.ClaudeCodeAdapter(home=home).list_sessions(REPO), [])
+
+    def test_override_admits_a_headless_sdk_cli_session(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._plant(home, REPO)
+            os.environ["OMHC_ALLOW_HEADLESS"] = "1"
+            refs = CC.ClaudeCodeAdapter(home=home).list_sessions(REPO)
+            self.assertEqual(len(refs), 1)
+            self.assertTrue(CC.ClaudeCodeAdapter(home=home).classify(refs[0].source_path))
+
+    def test_override_never_admits_a_sidechain(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._plant(home, REPO, entrypoint="cli", sidechain=True)
+            os.environ["OMHC_ALLOW_HEADLESS"] = "1"
+            self.assertEqual(CC.ClaudeCodeAdapter(home=home).list_sessions(REPO), [])
+
+
 @unittest.skipUnless(have_fixtures, MISSING)
 class TestReadSession(unittest.TestCase):
     def setUp(self):
