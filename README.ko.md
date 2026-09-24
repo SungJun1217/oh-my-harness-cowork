@@ -147,7 +147,7 @@ PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
-omhc status          # 게이트된 검사 5개 전부 PASS/FAIL. SKIP 은 없다
+omhc status          # 게이트된 검사 5개(+ 설치 시 codex hook) 전부 PASS/FAIL. SKIP 은 없다
 ```
 
 최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
@@ -184,7 +184,9 @@ ln -s "$PWD/bin/omhc" ~/.local/bin/omhc
 
 `omhc status`는 게이트된 검사 5개(adapters/ledger/archive/off switch/
 instruction files, 전부 PASS/FAIL)와 정보성 행 2개(pull rate, watcher)를
-보여줍니다.
+보여줍니다. omhc Codex 훅이 설치돼 있으면 `codex hook` 행이 붙습니다. 훅 설치 뒤
+이 레포의 가장 최근 Codex 세션이 훅을 한 번도 돌리지 않았으면(신뢰되지 않은 훅)
+FAIL 이고, 그 세션의 originator 를 함께 보여줍니다.
 
 ### AGENTS.md 를 Claude Code 와 공유하는 레포
 
