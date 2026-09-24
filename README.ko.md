@@ -297,8 +297,8 @@ outbox 가 대신 받는 게 아니라 Codex 쪽 `brief` 호출 자체가 없어
 | 명령 | 역할 |
 |---|---|
 | `omhc status [--json]` | 유일한 사람용 대시보드. 아카이브 지연(`lag_bytes`, `tail=…B`)과 인출률 포함 |
-| `omhc log [--last N] [--grep P] [--verb V] [--file P]` | 색인된 이벤트를 한 줄씩 |
-| `omhc show <E1\|#137> [--full]` | **원본 바이트를 오프셋으로 조회** (tier (b) 진입점) |
+| `omhc log [--last N] [--grep P] [--verb V] [--file P]` | 색인된 이벤트를 한 줄씩. 각 줄은 `<session>#N` 참조로 시작하며 그대로 `show`에 넘길 수 있음 |
+| `omhc show <E1\|#137\|abcdef01#137> [--full]` | **원본 바이트를 오프셋으로 조회** (tier (b) 진입점). 맨 `#N`은 가장 최근 전달된 세션 기준(`log`의 인출률 회계와 같은 규칙)이고, `<prefix>#N`은 세션을 직접 지정함 — 접두사가 모호하면 후보를 나열함 |
 | `omhc note "<text>"` | 메모. 두 하네스의 에이전트가 맨 명령줄로 호출 가능 |
 
 **인출률**("pulled X of N injections")은 omhc 의 부담이 값을 하는지 판단할

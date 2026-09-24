@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from typing import List, Optional
@@ -231,6 +232,25 @@ def _index_files(state: str) -> List[str]:
     return [os.path.join(directory, n) for n in names if n.endswith(".idx")]
 
 
+def _all_session_ids(state: str) -> List[str]:
+    return [os.path.basename(p)[: -len(".idx")] for p in _index_files(state)]
+
+
+def _unique_prefix_len(ids: List[str], minlen: int = 8) -> int:
+    """이 id 들을 서로 구분하는 가장 짧은 접두 길이(>=minlen). Codex 의 UUIDv7 은
+    앞 8자가 ~65초마다만 바뀌어 고정폭 8자 자르기로는 같은 레포에서 짧게 연달아
+    시작한 세션들이 자주 충돌한다(#15c). 13자쯤이 보기 좋은 상한이지만 그건
+    표시상 취향일 뿐이다 — 그 안에서 안 갈리면 유일해질 때까지 계속 늘린다.
+    안 그러면 log 가 찍은 ref 를 show 가 "모호하다"며 거부하면서, 정작 후보
+    목록에는 똑같은 문자열이 두 번 찍히는 리뷰 결함이 생긴다."""
+    uniq = list(dict.fromkeys(ids))
+    n = minlen
+    longest = max((len(i) for i in uniq), default=minlen)
+    while n < longest and len({i[:n] for i in uniq}) < len(uniq):
+        n += 1
+    return n
+
+
 def cmd_log(args, *, home=None, out=sys.stdout) -> int:
     _root, key, state = _state_for(home)
     _record_pull(key, state, "log", home)
@@ -253,14 +273,24 @@ def cmd_log(args, *, home=None, out=sys.stdout) -> int:
     if args.last is not None and args.last >= 0:
         rows = rows[len(rows) - args.last :] if args.last else []
 
+    # 이 배치가 아니라 상태 디렉터리 전체에서 유일하게 만든다 — 안 그러면
+    # 필터링으로 짧아진 접두사가 화면 밖의 다른 세션과 겹칠 수 있고, 그 ref 를
+    # `show` 에 그대로 넘기면 모호해진다(#10).
+    n = _unique_prefix_len(_all_session_ids(state)) if rows else 8
+
     for session, row in rows:
+        ref = "{}#{}".format(session[:n], row.seq)
+        content = row.arg or ",".join(row.paths)
+        if not content and row.verb == "said":
+            # index 는 본문을 담지 않는다(아카이브 이중화 방지) — 빈 줄 대신
+            # 힌트를 보여준다(#15a).
+            content = "(text: omhc show {})".format(ref)
         out.write(
-            "#{} {} {} {} {}\n".format(
-                row.seq,
-                session[:8],
+            "{} {} {} {}\n".format(
+                ref,
                 row.verb,
                 "ok" if row.ok else "FAIL",
-                row.arg or ",".join(row.paths),
+                content,
             )
         )
     if not rows:
@@ -276,28 +306,77 @@ def _pinned_path(state: str, session_id: str, fallback: str) -> str:
     return pinned if os.path.exists(pinned) else fallback
 
 
-def cmd_show(args, *, home=None, out=sys.stdout) -> int:
+_SEQ_REF_RE = re.compile(r"^([^#]*)#(\d+)$")
+
+
+def _default_log_session(state: str) -> Optional[str]:
+    """pull 회계가 `log` 를 돌리는 세션 — 가장 최근 전달된 세션(due.last_delivered,
+    §9). `log` 자체엔 "기본 세션" 이 없다(색인 전부를 나열한다); `#N` 만 받았을 때
+    그 회계 규칙을 그대로 재사용해 하나로 좁힌다(#10)."""
+    return due.last_delivered(state)
+
+
+def _resolve_seq_ref(state: str, prefix: str, seq: int):
+    """`#N` 또는 `<prefix>#N` 을 (entry, note) 로 푼다. note 는 자동으로 고른
+    세션을 사람에게 알려줄 문구, 없으면 None. 못 풀면 (None, error message)."""
+    ids = _all_session_ids(state)
+    note = None
+    if prefix:
+        matches = [sid for sid in ids if sid.startswith(prefix)]
+        if not matches:
+            return None, "unknown session prefix {!r}".format(prefix)
+        if len(matches) > 1:
+            # 접두사로 줄이면 그 자체가 다시 모호해질 수 있다(리뷰 결함) — 후보는
+            # 항상 전체 id 로 보여준다.
+            candidates = ", ".join(sorted(matches))
+            return None, "ambiguous session prefix {!r}; candidates: {}".format(
+                prefix, candidates)
+        session = matches[0]
+    else:
+        session = _default_log_session(state)
+        if session is None:
+            return None, ("no default session yet (nothing delivered here) — "
+                          "use `<session-prefix>#{}` or `omhc log --last 30`".format(seq))
+        if session not in ids:
+            return None, ("most recently delivered session {} has no index yet — "
+                          "use `<session-prefix>#{}` or `omhc log --last 30`".format(
+                              session, seq))
+        n = _unique_prefix_len(ids)
+        note = "{} -> {}#{} (most recently delivered session)".format(
+            "#{}".format(seq), session[:n], seq)
+
+    path = os.path.join(state, "index", session + ".idx")
+    row = index.find(path, seq)
+    if row is None:
+        return None, "no event #{} in session {}".format(seq, session)
+    entry = {"session_id": session, "source_path": "",
+             "offset": row.offset, "length": row.length, "seq": seq}
+    return entry, note
+
+
+def cmd_show(args, *, home=None, out=sys.stdout, err=sys.stderr) -> int:
     _root, key, state = _state_for(home)
     target = args.target.strip()
     refs = index.read_refs(state)
 
     entry = refs.get(target) or refs.get(target.upper())
-    if entry is None and target.startswith("#"):
-        try:
-            seq = int(target[1:])
-        except ValueError:
-            seq = None
-        if seq is not None:
-            for path in _index_files(state):
-                row = index.find(path, seq)
-                if row:
-                    session = os.path.basename(path)[: -len(".idx")]
-                    entry = {"session_id": session, "source_path": "",
-                             "offset": row.offset, "length": row.length, "seq": seq}
-                    break
+    note = None
+    if entry is None:
+        m = _SEQ_REF_RE.match(target)
+        if m:
+            entry, err_or_note = _resolve_seq_ref(state, m.group(1), int(m.group(2)))
+            if entry is None:
+                out.write("{}\n".format(err_or_note))
+                return 1
+            note = err_or_note
     if entry is None:
         out.write("unknown reference {!r}; try `omhc log --last 30`\n".format(target))
         return 1
+
+    if note:
+        # stdout 은 원본 바이트 그대로여야 한다(`omhc show '#3' --full | jq .` 가
+        # 깨지면 안 된다) — 자동으로 고른 세션을 알리는 메모는 stderr 로만 보낸다.
+        err.write("# {}\n".format(note))
 
     source = _pinned_path(state, entry["session_id"], entry.get("source_path") or "")
     if not source or not os.path.exists(source):
@@ -426,13 +505,17 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     # 실제 존재 여부를 본다.
     pinned_rows = [r for r in lag_rows if r.get("pinned")]
     unpinned_rows = [r for r in lag_rows if not r.get("pinned")]
+    # 고정폭 8자는 Codex UUIDv7 앞 8자가 ~65초마다만 바뀌어 자주 충돌한다
+    # (#15c) — 이 레포에 지금 보이는 id 들 사이에서만 유일하면 된다.
+    archive_n = _unique_prefix_len([r["session"] for r in lag_rows]) if lag_rows else 8
     if pinned_rows:
         archive_verdict = True
         archive_detail = "; ".join(
-            "{} tail={}B".format(r["session"][:8], r["lag_bytes"]) for r in pinned_rows)
+            "{} tail={}B".format(r["session"][:archive_n], r["lag_bytes"])
+            for r in pinned_rows)
         if unpinned_rows:
             archive_detail += "; unpinned: " + ", ".join(
-                r["session"][:8] for r in unpinned_rows)
+                r["session"][:archive_n] for r in unpinned_rows)
     elif injections:
         # 핀은 brief.compute 가 전달 *후에만* 만든다(brief.py) — 원장 행은
         # 있지만 아직 한 번도 전달받지 못한 사람에게 archive 를 영영 FAIL 로
@@ -725,7 +808,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_mark)
 
     p = sub.add_parser("show", help="표식의 태그로 원본 바이트를 조회")
-    p.add_argument("target")
+    p.add_argument("target", help="E1 같은 표식 태그, 또는 `omhc log` 가 출력한 "
+                   "<session>#N / #N 참조")
     p.add_argument("--full", action="store_true")
     p.set_defaults(func=cmd_show)
 
