@@ -224,3 +224,12 @@ def collapse(repo_root: str, *, now: Optional[float] = None, force: bool = False
     if not force and not managed_block.is_stale(path, now=stamp):
         return False
     return managed_block.strip(path)
+
+
+def collapse_if_captured(repo_root: str, expected_captured: float) -> bool:
+    """`collapse(force=True)` 의 조건부 버전 — 지금 설치된 구간의 `captured`
+    가 호출자가 이미 판정에 쓴 `expected_captured` 와 여전히 같을 때만
+    지운다(managed_block.strip_if_captured 참고, #36 리뷰: check-then-act
+    경합을 좁힌다). Codex 의 `on_session_start_mark` 처럼, 판정과 실제
+    삭제 사이에 다른 프로세스가 새 구간을 써 놓았을 수 있는 자리에서 쓴다."""
+    return managed_block.strip_if_captured(path_for(repo_root), expected_captured)

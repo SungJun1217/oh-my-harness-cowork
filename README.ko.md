@@ -197,6 +197,30 @@ git 이 아닌 프로젝트라면 최상위 디렉터리에서 `touch .omhc-root
 > 유닉스 epoch 와 사람이 읽는 UTC 시각을 함께 담아, 본문에 적힌("3m ago" 같은,
 > mint 시점에 얼어붙는) 상대 나이가 실제로 얼마나 낡았는지 확인할 수 있습니다.
 
+> [!NOTE]
+> 실측(codex-cli 0.156.1): Codex 는 자기 SessionStart 훅보다 **먼저**
+> `AGENTS.md` 를 읽습니다 — 세션의 첫 턴은 훅이 그 파일을 뭘 하든 세션이
+> 시작할 때 디스크에 있던 그대로를 읽습니다. **같은** 세션의 이후 턴만
+> (resume 으로 확인) `AGENTS.md` 를 다시 확인하고, 바뀐 부분만 알려줍니다.
+> 내용이 바뀌었으면 "These AGENTS.md instructions replace all previously
+> provided AGENTS.md instructions." 와 새 본문을, 블록이 없어졌으면 "The
+> previously provided AGENTS.md instructions no longer apply." 를, 그대로면
+> 아무것도 넣지 않습니다. 즉 어떤 Codex 세션이 시작하기 전부터 있던 구간은
+> 그 세션의 `startup` 턴에만 읽히고(아직 안 지워졌다면 그 세션의 이후 턴에
+> diff 로 다시 보일 수 있습니다) — **다음** Codex 세션이 그 낡은 구간을 또
+> 읽는 일만 막습니다: `omhc mark` 가 그 세션 자신의 `startup`(`resume` 은
+> 제외 — "훅보다 먼저 읽는다"는 순서를 startup 에서만 실측했습니다; 같은
+> 세션이 이어지는 것뿐인 `compact` 도 제외)에서, 이 mark 호출보다 이미 먼저
+> 적힌 구간을 평소의 24시간을 기다리지 않고 그 자리에서 붕괴시킵니다. 이는
+> Path A 의 같은 세션 붕괴, 24시간 노후화 정리와 별개로 더해지는 것입니다.
+> 같은 SessionStart 안에서 다른 훅이 병렬로(Codex 는 SessionStart 훅을
+> 병렬로 돌립니다, 실측) 방금 쓴 구간은 캡처 시각에 작은 margin 을 둬
+> 건드리지 않으며 — 그 margin 이 "낡았다고 판정한 시점"과 "실제로 지우는
+> 시점" 사이의 창을 완전히 닫지는 못하므로, 지우는 동작 자체도 판정에 쓴
+> 캡처 시각이 그대로인 경우에만 실행됩니다 — 그 사이에 새로 쓰인 구간은
+> 잃지 않습니다. `AGENTS.md` 가 Claude Code 와 공유되는 레포에서는 여기서도
+> 아예 손대지 않습니다.
+
 최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
 심링크합니다. pip·pipx 를 쓰지 않습니다(의존성이 0 이라 소스 트리가 곧
 설치물입니다). 다시 실행하면 업데이트(`~/.local/share/omhc` 아래 구버전은

@@ -193,6 +193,62 @@ def strip(path: str) -> bool:
     return True
 
 
+def strip_if_captured(path: str, expected_captured: float) -> bool:
+    """`strip` 의 조건부 버전(#36 리뷰) — 지우려는 구간의 `captured` 가
+    `expected_captured` 와 여전히 같을 때만 지운다. 호출자가 "이 값이면 낡은
+    것"이라고 이미 한 번 판정한 뒤 이 함수를 부르는 사이(check-then-act),
+    다른 프로세스(같은 SessionStart 안에서 병렬로 도는 `brief` 등)가 그 새
+    구간으로 이미 덮어썼으면, 그 값이 달라져 있으므로 손대지 않는다.
+
+    경합 창은 두 군데다: (a) 호출자의 판정과 이 함수의 첫 읽기 사이 — 여기
+    아래 첫 읽기가 이미 새 값을 보게 되므로 `expected_captured` 비교에서
+    자연히 걸러진다. (b) 이 함수의 첫 읽기와 실제로 지우는 쓰기 사이 — 쓰기
+    직전에 `installed_captured_at` 로 한 번 더 읽어 그새 바뀌지 않았는지
+    재확인한다. 파일 잠금 없이는 (b) 도 이론상 완전히 닫히지 않지만(재확인과
+    쓰기 사이에도 찰나의 창이 남는다), 재확인 지점을 쓰기 바로 앞으로 당겨
+    실제로 남는 창을 최소화한다 — 이 도구 규모(개인용, v1 순차 사용 가정)에
+    파일 잠금은 과하다. 남는 틈은 재확인부터 os.replace 까지다 — 그 안에
+    임시 파일 쓰기와 fsync 가 들어 있어 몇 밀리초쯤이다(리뷰에서 fsio 안에 끼워
+    넣어 확인). 그 사이에 쓴 블록은 여전히 잃을 수 있다."""
+    try:
+        is_link = os.path.islink(path)
+    except OSError:
+        is_link = False
+    try:
+        with open(path, encoding="utf-8", errors="replace", newline="") as fh:
+            existing = fh.read()
+    except OSError:
+        return False
+    m = _BLOCK.search(existing)
+    if not m:
+        return False
+    try:
+        captured = float(m.group("captured"))
+    except (TypeError, ValueError):
+        return False
+    if captured != expected_captured:
+        return False
+    if installed_captured_at(path) != captured:
+        return False
+    rest = _without_block(existing)
+    target = _write_target(path)
+    shared = is_link or _has_multiple_links(target)
+    if not rest.strip():
+        if shared:
+            try:
+                _write(target, "")
+            except OSError:
+                return False
+            return True
+        try:
+            os.unlink(path)
+        except OSError:
+            return False
+        return True
+    _write(target, rest)
+    return True
+
+
 def installed_block_end_bytes(path: str) -> Optional[int]:
     """설치된 구간이 끝나는 지점의 UTF-8 바이트 오프셋. 구간이 없으면 None.
 

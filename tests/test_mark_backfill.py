@@ -442,6 +442,12 @@ class TestReactivateGrownSessions(unittest.TestCase):
     def setUp(self):
         self.h = Harness()
         self.addCleanup(self.h.close)
+        # 성장 판정은 훅 예산(80ms) 안에서 돈다. 실제 시계로 재면 부하가 큰
+        # 머신에서 전체 스위트 중에만 예산에 걸려 grew 행이 안 생겼다
+        # (TestRebaseMarker 와 같은 원인). 예산 초과 경로는 따로 확인한다.
+        patcher = mock.patch.object(cli, "BACKFILL_TIME_BUDGET", 60.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _append_human_turn(self, path, text, ordinal=90):
         with open(path, "a", encoding="utf-8") as fh:
@@ -1205,6 +1211,77 @@ class TestCompactSessionStart(unittest.TestCase):
         self.h.mark(harness="codex-cli", session_id="cx1", source="startup")
         self.h.mark(harness="codex-cli", session_id="cx1", source="resume")
         self.assertEqual(len(self._starts("codex-cli", "cx1")), 2)
+
+
+class TestOnSessionStartMarkCli(unittest.TestCase):
+    """#36: `omhc mark` 가 startup/resume 에서 "이미 읽힌" AGENTS.md 블록을
+    붕괴시켜 다음 Codex 세션이 못 읽게 한다 — 어댑터 선택 메서드가 cmd_mark
+    를 거쳐 실제로 불리는 것까지 확인한다(단위 테스트는 test_codex_cli.py
+    ::TestOnSessionStartMark)."""
+
+    def setUp(self):
+        self.h = Harness()
+        self.addCleanup(self.h.close)
+
+    def _captured_at(self):
+        from omhc import agents_md, managed_block
+
+        return managed_block.installed_captured_at(agents_md.path_for(self.h.root))
+
+    def test_old_block_collapses_on_codex_startup_mark(self):
+        from omhc import agents_md, managed_block
+
+        managed_block.splice(agents_md.path_for(self.h.root), "[omhc] old\n",
+                             captured_at=time.time() - 3600)
+        self.h.mark(harness="codex-cli", session_id="cx1", source="startup")
+        self.assertIsNone(self._captured_at())
+
+    def test_old_block_is_kept_on_codex_resume_mark(self):
+        """리뷰 #2: "훅보다 먼저 읽는다"는 순서는 startup 에서만 실측했다 —
+        resume 에서 Codex 가 AGENTS.md diff 를 언제 계산하는지는 모르므로
+        resume 은 붕괴시키지 않는다."""
+        from omhc import agents_md, managed_block
+
+        managed_block.splice(agents_md.path_for(self.h.root), "[omhc] old\n",
+                             captured_at=time.time() - 3600)
+        self.h.mark(harness="codex-cli", session_id="cx1", source="resume")
+        self.assertIsNotNone(self._captured_at())
+
+    def test_block_written_by_this_same_burst_is_kept(self):
+        """brief(Path B) 가 병렬로 이 세션 몫을 방금 썼다고 흉내낸다 — mark
+        가 그걸 "낡은 블록"으로 오인해 지우면 이 세션조차 못 읽는다."""
+        from omhc import agents_md, managed_block
+
+        managed_block.splice(agents_md.path_for(self.h.root), "[omhc] just written\n",
+                             captured_at=time.time())
+        self.h.mark(harness="codex-cli", session_id="cx1", source="startup")
+        self.assertIsNotNone(self._captured_at())
+
+    def test_shared_with_claude_is_kept(self):
+        from omhc import agents_md, managed_block
+
+        agents_path = agents_md.path_for(self.h.root)
+        claude_path = os.path.join(self.h.root, "CLAUDE.md")
+        managed_block.splice(agents_path, "[omhc] old\n", captured_at=time.time() - 3600)
+        os.symlink(agents_path, claude_path)
+        self.h.mark(harness="codex-cli", session_id="cx1", source="startup")
+        self.assertIsNotNone(self._captured_at())
+
+    def test_claude_mark_never_collapses_via_this_path(self):
+        from omhc import agents_md, managed_block
+
+        managed_block.splice(agents_md.path_for(self.h.root), "[omhc] old\n",
+                             captured_at=time.time() - 3600)
+        self.h.mark(harness="claude-code", session_id="cc1", source="startup")
+        self.assertIsNotNone(self._captured_at())
+
+    def test_compact_source_never_collapses(self):
+        from omhc import agents_md, managed_block
+
+        managed_block.splice(agents_md.path_for(self.h.root), "[omhc] old\n",
+                             captured_at=time.time() - 3600)
+        self.h.mark(harness="codex-cli", session_id="cx1", source="compact")
+        self.assertIsNotNone(self._captured_at())
 
 
 if __name__ == "__main__":

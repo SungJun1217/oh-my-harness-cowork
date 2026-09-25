@@ -360,6 +360,18 @@ class AdapterContract(unittest.TestCase):
                     self.assertTrue(ok is None or isinstance(ok, bool))
                     self.assertIsInstance(detail, str)
 
+    def test_30_on_session_start_mark_never_raises(self):
+        """on_session_start_mark 는 선택 메서드다(discover/health 와 같은
+        패턴). 훅 경로(cmd_mark)에서 불리므로 어떤 source/repo 조합에도 절대
+        던지지 않아야 한다 — 기본은 no-op 이고, 구현이 있어도 방어해야 한다."""
+        for adapter_id in adapter_ids():
+            with self.subTest(adapter=adapter_id):
+                with tempfile.TemporaryDirectory() as home:
+                    inst = adapters.get(adapter_id, home=home)
+                    for source in ("startup", "resume", "compact", ""):
+                        self.assertIsNone(
+                            inst.on_session_start_mark(REPO, source=source, epoch=1.0))
+
     def test_29_hook_config_is_none_or_a_shipped_fragment(self):
         """hook_config 는 선택 메서드다(health/fallback_channels 와 같은 패턴).
         None 이 아니면 그 fragment_name 이 배포되는 hooks/ 아래 실재하고 JSON 으로

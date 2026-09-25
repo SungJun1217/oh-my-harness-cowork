@@ -203,6 +203,33 @@ its own project.
 > body ("3m ago", frozen at mint time) can be checked against the real
 > capture time.
 
+> [!NOTE]
+> Measured (codex-cli 0.156.1): Codex reads `AGENTS.md` **before** its own
+> SessionStart hooks run — the first turn of a session always sees whatever
+> was on disk when the session started, no matter what the hook does to the
+> file afterwards. Only later turns of the *same* session (confirmed on
+> resume) re-check `AGENTS.md`, and only report a diff: "These AGENTS.md
+> instructions replace all previously provided AGENTS.md instructions." plus
+> the new text if it changed, "The previously provided AGENTS.md instructions
+> no longer apply." if the block is gone, nothing if it's unchanged. So a
+> block installed before a given Codex session starts is read only by that
+> session's own `startup` turn (plus, if it's still there, echoed as a diff
+> to its own later turns) — the *next* Codex session that would otherwise
+> read the same stale block never gets the chance: `omhc mark` on this
+> session's own `startup` (never `resume` — the before-hooks read order is
+> only measured for `startup`; never `compact` — same session, no new turn)
+> collapses a block whose capture time is already older than this mark call,
+> instead of waiting the usual 24 hours. This is on top of, not instead of,
+> Path A's own-session collapse and the 24-hour staleness sweep above. A
+> block a concurrent hook in *this same* SessionStart just wrote (Codex runs
+> SessionStart hooks in parallel, measured) is left alone by a small margin
+> on the capture timestamp, and — since that margin narrows but can't close
+> the window between judging a block stale and actually removing it — the
+> removal itself is conditional on the block's capture time still matching
+> what was judged, so a block written in that gap is never lost. As always,
+> nothing is ever touched in a repo where `AGENTS.md` is shared with Claude
+> Code.
+
 This unpacks the latest release into `~/.local/share/omhc/<version>` and
 symlinks `~/.local/bin/omhc` — no pip, no pipx (zero dependencies, so the
 source tree *is* the install). Re-run to update (old versions under
