@@ -31,6 +31,7 @@ running, and measuring only — no repo writes, no git writes (no `commit`, `che
 8. `from == to` short-circuit preserved.
 9. Adapter changes don't leak into the core; fixtures (real conversations) are not added to git.
 10. No new summarization/rewrite stage on the handoff path — that would launder provenance (arXiv 2607.29167; OWASP ASI06). `guard.py` only drops text, never rewrites it.
+11. Provenance stays structural: don't fence/quote agent-derived slots (`PLAN?`, `FAIL`) as a "data" marker — the slot name already carries it and it costs budget. `NOTE` keeps its name; notes are stamped and expire after `due.MAX_AGE_SECONDS` (#36).
 
 **2. Correctness bugs** — logic errors, off-by-one on byte offsets, wrong file/inode assumptions around `os.link()` and append-in-progress sessions, partial/torn-line reads of JSONL, non-atomic writes (should go through `omhc/fsio.py`), path/slug handling, silent behavior changes for existing callers.
 

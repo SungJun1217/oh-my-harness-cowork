@@ -810,8 +810,9 @@ def cmd_note(args, *, home=None, out=sys.stdout, err=None) -> int:
     if not text:
         out.write("nothing to note\n")
         return 0
+    # 쓴 시각을 붙인다 — 7일이 지난 메모는 핸드오프에 붙지 않는다(#36).
     with open(path, "a", encoding="utf-8") as fh:
-        fh.write(text + "\n")
+        fh.write("{:.0f}\t{}\n".format(time.time(), text.replace("\t", " ")))
     with open(path, encoding="utf-8", errors="replace") as fh:
         lines = [line for line in fh if line.strip()]
     out.write("noted ({} notes, {}B)\n".format(len(lines), os.path.getsize(path)))

@@ -41,6 +41,7 @@ If a conclusion touches any of these, **say so explicitly**.
 8. `from == to` short-circuits the pipeline.
 9. A new adapter = one file + one fixture. A conclusion that requires touching the core signals a contract defect.
 10. Never add a summarization/rewrite stage to the handoff — summarizing launders provenance (arXiv 2607.29167; OWASP ASI06, agent memory/context poisoning). `guard.py` only drops text, it never rewrites it.
+11. Provenance stays structural: don't fence/quote agent-derived slots (`PLAN?`, `FAIL`) as a "data" marker — the slot name already carries it and it costs budget. `NOTE` keeps its name; notes are stamped and expire after `due.MAX_AGE_SECONDS` (#36).
 
 ## How to work
 

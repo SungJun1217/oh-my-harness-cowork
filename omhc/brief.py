@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -30,14 +31,34 @@ def log_failure(home: Optional[str], detail: str) -> None:
         pass
 
 
-def _notes(state_dir: str, limit: int = 2) -> list:
+# `omhc note` 가 적는 줄: "<epoch>\t<text>". 옛 줄(시각 없음)도 읽는다.
+_NOTE_STAMP = re.compile(r"^(\d{9,11})\t(.*)$")
+
+
+def _notes(state_dir: str, limit: int = 2, now: Optional[float] = None) -> list:
+    """핸드오프에 붙일 최근 메모. 나이 기한(due.MAX_AGE_SECONDS)이 지난 메모는
+    뺀다(#36) — 메모는 파일로 남아 모든 핸드오프에 다시 붙으므로, 지난주의 메모가
+    오늘 세션에 "지금 사실" 처럼 들어가면 안 된다. 핸드오프 자체의 나이 기한과
+    같게 맞춘다. 시각이 없는 옛 줄은 언제 썼는지 모르므로 예전처럼 보인다."""
     try:
         with open(os.path.join(state_dir, NOTES_NAME), encoding="utf-8",
                   errors="replace") as fh:
-            lines = [line.strip() for line in fh if line.strip()]
+            lines = [line.strip("\r\n") for line in fh if line.strip()]
     except OSError:
         return []
-    return lines[-limit:]
+    stamp = time.time() if now is None else now
+    kept = []
+    for line in lines:
+        m = _NOTE_STAMP.match(line)
+        if m:
+            if stamp - float(m.group(1)) > due.MAX_AGE_SECONDS:
+                continue
+            text = m.group(2).strip()
+        else:
+            text = line.strip()
+        if text:
+            kept.append(text)
+    return kept[-limit:]
 
 
 # 세 형식을 동시에 내보내면 안 된다. Claude Code 는 additional_context 와
@@ -168,7 +189,7 @@ def compute(
         return ""
 
     body = mint.mint(read, to_adapter_id=my_harness, budget=budget, now=stamp,
-                     notes=_notes(state))
+                     notes=_notes(state, now=stamp))
     if not body:
         # 보낼 것이 없으면 게이트를 쓰지 않는다. 첫 발동이 빈손으로 슬롯을
         # 태우면 밀리초 뒤에 데이터가 도착해도 그 세션은 영구히 못 받는다.
