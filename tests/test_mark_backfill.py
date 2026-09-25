@@ -399,6 +399,31 @@ class TestResumeReopensDelivery(unittest.TestCase):
         self.assertIsNone(
             due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
 
+    def test_fork_after_delivery_does_not_reopen(self):
+        """source:"fork" 는 새 session_id 로 오므로 cmd_mark 는 그저 평범한
+        start 행을 남긴다(#34) — resume 처럼 이미 전달된 세션을 reopen 하지
+        않는다. Claude 쪽 fork 적격성은 어댑터의 classify() 가 판정한다."""
+        now = time.time()
+        self._deliver(now, "필드 경로부터 다시 확인해줘")
+        code, out = self.h.mark(harness="codex-cli", session_id="cx1", source="fork")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertIsNone(
+            due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
+
+    def test_claude_receiving_side_with_source_fork_is_unaffected(self):
+        """cmd_mark 의 source 분기는 harness 를 가리지 않는다 — Claude 자신의
+        포크가 SessionStart 를 source:"fork" 로 낼 때도 그저 새 start 행
+        하나일 뿐, resume 취급으로 새지 않는다."""
+        now = time.time()
+        code, out = self.h.mark(harness="claude-code", session_id="fork1", source="fork")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        starts = [r for r in rows if r.get("harness") == "claude-code"
+                 and r.get("session") == "fork1" and r.get("event") == "start"]
+        self.assertEqual(len(starts), 1)
+
     def test_resume_of_a_never_delivered_session_is_unchanged(self):
         now = time.time()
         self.h.plant("cx1", now - 600)
@@ -417,6 +442,12 @@ class TestReactivateGrownSessions(unittest.TestCase):
     def setUp(self):
         self.h = Harness()
         self.addCleanup(self.h.close)
+        # 성장 판정은 훅 예산(80ms) 안에서 돈다. 실제 시계로 재면 부하가 큰
+        # 머신에서 전체 스위트 중에만 예산에 걸려 grew 행이 안 생겼다
+        # (TestRebaseMarker 와 같은 원인). 예산 초과 경로는 따로 확인한다.
+        patcher = mock.patch.object(cli, "BACKFILL_TIME_BUDGET", 60.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _append_human_turn(self, path, text, ordinal=90):
         with open(path, "a", encoding="utf-8") as fh:
@@ -765,6 +796,13 @@ class TestRebaseMarker(unittest.TestCase):
     def setUp(self):
         self.h = Harness()
         self.addCleanup(self.h.close)
+        # 마커 개수는 한 번의 판정을 끝까지 마쳤을 때만 센다. 훅 예산(80ms)을
+        # 실제 시계로 재면 부하가 큰 머신(load 7)에서 세션 60개 판정이 예산에
+        # 걸려 마커를 안 쓰고, 테스트가 3번 중 2번 실패했다. 예산 초과는
+        # _deadline_trips_after_first_stat 이 시계를 건너뛰어 따로 확인한다.
+        patcher = mock.patch.object(cli, "BACKFILL_TIME_BUDGET", 60.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _seed_known_unchanged(self, n, base):
         """이미 알려진, 이번 판정에서 안 자랄 세션 n 개를 원장에 직접 심는다
@@ -1173,6 +1211,77 @@ class TestCompactSessionStart(unittest.TestCase):
         self.h.mark(harness="codex-cli", session_id="cx1", source="startup")
         self.h.mark(harness="codex-cli", session_id="cx1", source="resume")
         self.assertEqual(len(self._starts("codex-cli", "cx1")), 2)
+
+
+class TestOnSessionStartMarkCli(unittest.TestCase):
+    """#36: `omhc mark` 가 startup/resume 에서 "이미 읽힌" AGENTS.md 블록을
+    붕괴시켜 다음 Codex 세션이 못 읽게 한다 — 어댑터 선택 메서드가 cmd_mark
+    를 거쳐 실제로 불리는 것까지 확인한다(단위 테스트는 test_codex_cli.py
+    ::TestOnSessionStartMark)."""
+
+    def setUp(self):
+        self.h = Harness()
+        self.addCleanup(self.h.close)
+
+    def _captured_at(self):
+        from omhc import agents_md, managed_block
+
+        return managed_block.installed_captured_at(agents_md.path_for(self.h.root))
+
+    def test_old_block_collapses_on_codex_startup_mark(self):
+        from omhc import agents_md, managed_block
+
+        managed_block.splice(agents_md.path_for(self.h.root), "[omhc] old\n",
+                             captured_at=time.time() - 3600)
+        self.h.mark(harness="codex-cli", session_id="cx1", source="startup")
+        self.assertIsNone(self._captured_at())
+
+    def test_old_block_is_kept_on_codex_resume_mark(self):
+        """리뷰 #2: "훅보다 먼저 읽는다"는 순서는 startup 에서만 실측했다 —
+        resume 에서 Codex 가 AGENTS.md diff 를 언제 계산하는지는 모르므로
+        resume 은 붕괴시키지 않는다."""
+        from omhc import agents_md, managed_block
+
+        managed_block.splice(agents_md.path_for(self.h.root), "[omhc] old\n",
+                             captured_at=time.time() - 3600)
+        self.h.mark(harness="codex-cli", session_id="cx1", source="resume")
+        self.assertIsNotNone(self._captured_at())
+
+    def test_block_written_by_this_same_burst_is_kept(self):
+        """brief(Path B) 가 병렬로 이 세션 몫을 방금 썼다고 흉내낸다 — mark
+        가 그걸 "낡은 블록"으로 오인해 지우면 이 세션조차 못 읽는다."""
+        from omhc import agents_md, managed_block
+
+        managed_block.splice(agents_md.path_for(self.h.root), "[omhc] just written\n",
+                             captured_at=time.time())
+        self.h.mark(harness="codex-cli", session_id="cx1", source="startup")
+        self.assertIsNotNone(self._captured_at())
+
+    def test_shared_with_claude_is_kept(self):
+        from omhc import agents_md, managed_block
+
+        agents_path = agents_md.path_for(self.h.root)
+        claude_path = os.path.join(self.h.root, "CLAUDE.md")
+        managed_block.splice(agents_path, "[omhc] old\n", captured_at=time.time() - 3600)
+        os.symlink(agents_path, claude_path)
+        self.h.mark(harness="codex-cli", session_id="cx1", source="startup")
+        self.assertIsNotNone(self._captured_at())
+
+    def test_claude_mark_never_collapses_via_this_path(self):
+        from omhc import agents_md, managed_block
+
+        managed_block.splice(agents_md.path_for(self.h.root), "[omhc] old\n",
+                             captured_at=time.time() - 3600)
+        self.h.mark(harness="claude-code", session_id="cc1", source="startup")
+        self.assertIsNotNone(self._captured_at())
+
+    def test_compact_source_never_collapses(self):
+        from omhc import agents_md, managed_block
+
+        managed_block.splice(agents_md.path_for(self.h.root), "[omhc] old\n",
+                             captured_at=time.time() - 3600)
+        self.h.mark(harness="codex-cli", session_id="cx1", source="compact")
+        self.assertIsNotNone(self._captured_at())
 
 
 if __name__ == "__main__":

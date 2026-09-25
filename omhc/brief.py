@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -15,7 +16,7 @@ NOTES_NAME = "notes.txt"
 ARTIFACT_NAME = "omhc.txt"
 
 
-def _log_failure(home: Optional[str], detail: str) -> None:
+def log_failure(home: Optional[str], detail: str) -> None:
     """실패를 남기되 절대 던지지 않는다. 훅 경로에서 죽으면 세션 시작이 깨진다."""
     try:
         root = locate.omhc_root(home)
@@ -24,19 +25,40 @@ def _log_failure(home: Optional[str], detail: str) -> None:
         # (ValueError)로 터진다. 로그 한 줄 때문에 전달이 끊기면 안 된다.
         with open(os.path.join(root, GUARD_LOG), "a", encoding="utf-8",
                   errors="backslashreplace") as fh:
-            fh.write("--- {}\n{}\n".format(time.strftime("%Y-%m-%dT%H:%M:%SZ"), detail))
+            fh.write("--- {}\n{}\n".format(
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), detail))
     except OSError:
         pass
 
 
-def _notes(state_dir: str, limit: int = 2) -> list:
+# `omhc note` 가 적는 줄: "<epoch>\t<text>". 옛 줄(시각 없음)도 읽는다.
+_NOTE_STAMP = re.compile(r"^(\d{9,11})\t(.*)$")
+
+
+def _notes(state_dir: str, limit: int = 2, now: Optional[float] = None) -> list:
+    """핸드오프에 붙일 최근 메모. 나이 기한(due.MAX_AGE_SECONDS)이 지난 메모는
+    뺀다(#36) — 메모는 파일로 남아 모든 핸드오프에 다시 붙으므로, 지난주의 메모가
+    오늘 세션에 "지금 사실" 처럼 들어가면 안 된다. 핸드오프 자체의 나이 기한과
+    같게 맞춘다. 시각이 없는 옛 줄은 언제 썼는지 모르므로 예전처럼 보인다."""
     try:
         with open(os.path.join(state_dir, NOTES_NAME), encoding="utf-8",
                   errors="replace") as fh:
-            lines = [line.strip() for line in fh if line.strip()]
+            lines = [line.strip("\r\n") for line in fh if line.strip()]
     except OSError:
         return []
-    return lines[-limit:]
+    stamp = time.time() if now is None else now
+    kept = []
+    for line in lines:
+        m = _NOTE_STAMP.match(line)
+        if m:
+            if stamp - float(m.group(1)) > due.MAX_AGE_SECONDS:
+                continue
+            text = m.group(2).strip()
+        else:
+            text = line.strip()
+        if text:
+            kept.append(text)
+    return kept[-limit:]
 
 
 # 세 형식을 동시에 내보내면 안 된다. Claude Code 는 additional_context 와
@@ -167,7 +189,7 @@ def compute(
         return ""
 
     body = mint.mint(read, to_adapter_id=my_harness, budget=budget, now=stamp,
-                     notes=_notes(state))
+                     notes=_notes(state, now=stamp))
     if not body:
         # 보낼 것이 없으면 게이트를 쓰지 않는다. 첫 발동이 빈손으로 슬롯을
         # 태우면 밀리초 뒤에 데이터가 도착해도 그 세션은 영구히 못 받는다.
@@ -187,7 +209,7 @@ def compute(
             # 조용히 넘기면 `omhc status` 의 archive 행이 핀 없이도 PASS 를
             # 낸다(리뷰 결함) — 훅 경로의 유일한 실패 로그에 남겨야 사람이
             # 원인을 알 수 있다. 여기서 던지면 안 되므로(invariant 2) 로그만.
-            _log_failure(home, "pin failed: {}".format(pin_result.error))
+            log_failure(home, "pin failed: {}".format(pin_result.error))
         # watch.sweep 과 같은 증분 규칙을 쓴다. 전부 다시 덧붙이면 데몬이 돌고
         # 있을 때 같은 이벤트가 두 번 색인되어 `omhc log` 가 중복을 보이고
         # `omhc show #N` 이 낡은 행을 가리킬 수 있다.
@@ -195,7 +217,7 @@ def compute(
         index.append_new(idx, read.events)
         index.write_refs(state, ref, mint.failure_tags(read))
     except OSError as exc:
-        _log_failure(home, "archive failed: {}".format(exc))
+        log_failure(home, "archive failed: {}".format(exc))
 
     # 전달은 deliver 가 라우팅한다. 여기서 파일을 직접 쓰면 채널 추상이 프로덕션
     # 경로를 우회해, receipt·Path B·보편 바닥이 단위 테스트에서만 동작한다.
@@ -207,9 +229,9 @@ def compute(
             home=home, now=stamp,
         )
         if receipt.channel == "nowhere":
-            _log_failure(home, "delivery found no channel: " + receipt.cleanup_hint)
+            log_failure(home, "delivery found no channel: " + receipt.cleanup_hint)
     except Exception as exc:  # deliver 는 던지지 않아야 하지만 훅을 깨뜨릴 수는 없다
-        _log_failure(home, "delivery failed: {}".format(exc))
+        log_failure(home, "delivery failed: {}".format(exc))
 
     end_offset = max((e.offset + e.length for e in read.events), default=0)
     due.mark_delivered(state, watermark, to_harness=my_harness, epoch=stamp,
@@ -263,11 +285,11 @@ def emit(
             return 0
         if len(body.encode("utf-8")) > budget:
             # 출력 직전 재검사. 버그가 과대 페이로드를 주입하지 못하게 한다.
-            _log_failure(home, "body exceeded budget at print time; suppressed")
+            log_failure(home, "body exceeded budget at print time; suppressed")
             return 0
         chosen = wire or _wire_for(harness, home)
         stream.write(body if as_text or dry_run else hook_wire(body, chosen) + "\n")
         return 0
     except Exception:
-        _log_failure(home, traceback.format_exc())
+        log_failure(home, traceback.format_exc())
         return 0

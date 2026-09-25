@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import glob
 import hashlib
 import json
@@ -68,6 +69,40 @@ _SYNTHETIC_MODEL = "<synthetic>"
 _PATH_KEYS = ("file_path", "path", "notebook_path")
 _ARG_KEYS = ("command", "file_path", "pattern", "query", "prompt", "description", "path")
 
+# /branch, --fork-session, /fork 백그라운드 복사가 만드는 트랜스크립트: 새
+# session_id 로 시작해 부모의 현재 메시지 사슬을 복사한다. 복사된 레코드는
+# 원본에 sessionId/parentUuid/isSidechain/sessionKind 를 덮어쓰고 forkedFrom:
+# {sessionId, messageUuid} 을 얹은 것이고(uuid/timestamp/type/message 는 원본
+# 그대로), history-suppression(cause:"fork_inherit") 레코드가 맨 앞에 붙을 수
+# 있다. 부모가 이미 상대 하네스에 전달됐었다면 포크 자신의 사람 턴이 없어도
+# 그 사람 턴이 새 session_id 아래 "새 일"처럼 다시 나간다(#34, 실측: 425B 가
+# 두 번 전달됨) — #27 의 offset 가드는 delivered 행이 이 새 session_id 에는
+# 아예 없어서 적용되지 않는다.
+_FORKED_FROM_MARK = b'"forkedFrom"'
+_FORK_INHERIT_MARK = b'"fork_inherit"'
+
+# fork 판정 비용 상한. own tail(복사 구간을 벗어난 뒤)이 이 바이트를 넘도록
+# 새 턴을 못 찾으면, 또는 전체 스캔이 이 시간을 넘으면 판정을 포기하고 예전
+# 동작(적격)으로 연다 — 훅 경로에서 판정 실패가 세션 시작을 막으면 안 된다
+# (invariant 2). 복사 구간 자체는 줄당 값싼 substring 검사뿐이라 바이트 상한에
+# 넣지 않는다(리뷰 지적: 넣으면 8MB 넘는 부모의 포크가 own tail 을 보기도
+# 전에 항상 fail-open 됐다 — 6.9MB 부모를 포크로 다시 쓴 12.6MB 픽스처가
+# 재현) — 실측(synthetic, 이 머신): 복사만 있는 6.3MB 6.7ms, 12.6MB 13.2ms,
+# 25.1MB 26.3ms, 30MB(tail 없이 EOF 까지) 32.3ms, own turn 이 있는 현실적인
+# 2MB 복사 구간 + tail 은 2.3ms. 전부 시간 상한(50ms) 안이다.
+_FORK_SCAN_BYTE_LIMIT = 8 * 1024 * 1024
+_FORK_SCAN_TIME_LIMIT = 0.05
+
+# classify() 결과의 프로세스당 캐시. brief 한 번마다 같은 파일이 두 번
+# 스캔된다 — ref_for_path() 가 한 번(적격이면 그대로 쓰고), 적격이 아닐 때는
+# brief.eligible() 이 adapter.classify(mark.path) 로 다시 부른다. adapters.get()
+# 이 호출마다 새 인스턴스를 만들므로(레지스트리가 클래스를 들고 있다) 캐시는
+# 인스턴스가 아니라 모듈에 둔다. 키에 size·mtime_ns 를 넣어 포크가 자라
+# (own turn 이 생기면) 자동으로 무효화되게 한다. watch.py 데몬처럼 오래 도는
+# 프로세스에서 무한히 늘지 않도록 LRU 로 크기를 제한한다.
+_CLASSIFY_CACHE_MAX = 256
+_classify_cache = collections.OrderedDict()  # (path, size, mtime_ns, headless) -> bool
+
 
 def claude_slug(path: str) -> str:
     """cwd → ~/.claude/projects/<slug>. 이 변환은 파일 어디에도 기록되지 않으므로
@@ -110,7 +145,9 @@ def head_of(path: str, limit: int = 200) -> Dict[str, object]:
                     break
                 try:
                     row = json.loads(line)
-                except ValueError:
+                except (ValueError, RecursionError):
+                    # 깊게 중첩된 줄은 json 이 RecursionError 를 낸다 — 깨진 줄과
+                    # 같이 건너뛴다(#34 리뷰: classify/list_sessions 가 죽었다).
                     continue
                 if not isinstance(row, dict):
                     continue
@@ -166,6 +203,99 @@ def _paths_of(tool_input) -> Tuple[str, ...]:
     return tuple(found)
 
 
+def _looks_like_fork(path: str) -> bool:
+    """싸구려 사전판정. 포크의 복사 구간은 파일 맨 앞에서 시작하므로(선택적
+    history-suppression 프리펜드 한 줄 포함) 앞 몇 줄만 보면 된다 — 전체
+    스캔은 포크로 보일 때만 아래에서 한다."""
+    try:
+        with open(path, "rb") as fh:
+            for i, raw in enumerate(fh):
+                if i >= 4:
+                    break
+                if _FORKED_FROM_MARK in raw or _FORK_INHERIT_MARK in raw:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _forked_lacks_own_turn(path: str) -> bool:
+    """포크인데 포크 자신의 사람 턴이 아직 하나도 없는가.
+
+    복사된 레코드는 전부 forkedFrom 을 달고 파일 앞쪽에 연속으로 온다(분석
+    근거). forkedFrom 이 끊기는 지점부터가 포크 자신이 새로 쓴 구간이고, 거기
+    안에서 read_session 과 같은 화이트리스트로 사람의 말을 찾는다 — 하나라도
+    있으면 적격이다.
+
+    바이트/시간 상한을 넘기면 판정을 포기하고 False(예전 동작인 적격)로
+    돌아간다. 안 여는 쪽(과대판정으로 진짜 새 턴을 계속 숨김)보다 여는 쪽이
+    싸다 — 최악이 "부모 턴이 한 번 더 나간다"는 이미 있던 결함이지 새 결함이
+    아니다.
+
+    바이트 상한은 **복사 구간을 벗어난 뒤(own tail)** 만 센다 — 복사 구간은
+    줄당 값싼 substring 검사뿐이고(리뷰 실측: 6.3MB 7ms, 12.6MB 9.5ms,
+    25.1MB 9.8ms) 그 바이트까지 상한에 넣으면 부모가 조금만 커도(8MB 넘으면)
+    own tail 을 보기도 전에 늘 포기해 재전달 버그를 못 고친 채로 둔다(리뷰
+    확인: 6.9MB 부모를 포크로 다시 쓴 12.6MB 픽스처가 항상 fail-open 됐다).
+    시간 상한은 복사 구간을 포함해 매 줄마다 확인한다 — 전체 스캔 시간의
+    유일한 안전망이다.
+
+    예상 밖의 레코드 모양(message 가 dict 가 아니거나 text 블록의 text 가
+    문자열이 아닌 등)은 여기서 예외를 낸다 — classify()/list_sessions() 를
+    깨뜨려 그 하네스의 세션 전체를 잃는 것(watch 가 그 레포의 Claude ref 를
+    전부 드롭)보다는 판정 하나를 포기하고 여는 쪽이 싸므로 한 줄 단위로
+    감싸 fail-open 한다.
+    """
+    if not _looks_like_fork(path):
+        return False
+    start = time.time()
+    scanned = 0
+    in_copy = False
+    try:
+        with open(path, "rb") as fh:
+            for raw in fh:
+                if time.time() - start > _FORK_SCAN_TIME_LIMIT:
+                    return False
+                if _FORKED_FROM_MARK in raw:
+                    in_copy = True
+                    continue
+                if not in_copy:
+                    # history-suppression 프리펜드 등 복사 구간 진입 전이다.
+                    continue
+                # 복사 구간을 벗어난 첫 레코드부터 포크 자신의 새 내용이다.
+                scanned += len(raw)
+                if scanned > _FORK_SCAN_BYTE_LIMIT:
+                    return False
+                try:
+                    row = json.loads(raw.decode("utf-8", "replace"))
+                except (ValueError, RecursionError):
+                    continue
+                try:
+                    if not isinstance(row, dict) or row.get("type") != "user":
+                        continue
+                    if (row.get("isSidechain") or row.get("agentId")
+                            or row.get("isMeta") or row.get("isCompactSummary")):
+                        continue
+                    message = row.get("message") or {}
+                    text = _text_of(message.get("content"))
+                    if text is None:
+                        continue
+                    text = text.strip()
+                    if guard.is_envelope(text):
+                        inner = guard.unwrap_command_args(text)
+                        text = inner.strip() if inner else ""
+                        if not text:
+                            continue
+                    if not guard.safe(text, "human"):
+                        continue
+                    return False
+                except Exception:
+                    return False
+    except OSError:
+        return False
+    return True
+
+
 @_register
 class ClaudeCodeAdapter:
     adapter_id = "claude-code"
@@ -206,12 +336,9 @@ class ClaudeCodeAdapter:
                 stat = os.stat(path)
             except OSError:
                 continue
+            if not self.classify(path):
+                continue
             head = head_of(path)
-            if (str(head.get("entrypoint") or "") in NON_INTERACTIVE_ENTRYPOINTS
-                    and not allow_headless()):
-                continue
-            if head.get("sidechain") or head.get("agentId"):
-                continue
             cwd = head.get("cwd")
             refs.append(
                 SessionRef(
@@ -398,16 +525,49 @@ class ClaudeCodeAdapter:
             events[idx] = events[idx]._replace(ok=False)
 
     def classify(self, source_path: str) -> bool:
-        """사람이 대화한 세션인가. entrypoint 와 서브체인 표식으로 판정한다.
+        """사람이 대화한 세션인가. entrypoint·서브체인 표식에 더해, 포크(#34)면
+        포크 자신의 사람 턴이 하나라도 있어야 적격이다 — 없으면 부모 세션의
+        전달 이력을 그대로 물려받아 이미 전달된 턴이 새 session_id 아래 또
+        나간다.
 
         실측: 이 레포의 최상위 세션 31개 중 1개만 entrypoint=cli 이고 30개가
         sdk-py(보안 리뷰 훅 등이 남긴 것)였다.
+
+        brief 한 번에 이 메서드가 같은 파일에 두 번 불릴 수 있다 —
+        ref_for_path() 가 한 번, 그게 거절하면 brief.eligible() 이 다시 한 번.
+        결과를 (path, size, mtime_ns) 로 캐싱해 두 번째 호출이 다시 스캔하지
+        않게 한다(리뷰 지적) — 파일이 자라면(포크가 own turn 을 얻으면) 키가
+        바뀌므로 자동으로 무효화된다.
         """
+        try:
+            stat = os.stat(source_path)
+            # allow_headless() 도 판정을 바꾸므로 키에 넣는다(#34 리뷰) — 실제
+            # 프로세스에선 환경이 안 바뀌지만, 한 프로세스에서 켰다 끄는 쪽에도 안전하다.
+            key = (source_path, stat.st_size, stat.st_mtime_ns, allow_headless())
+        except OSError:
+            key = None
+        if key is not None and key in _classify_cache:
+            _classify_cache.move_to_end(key)
+            return _classify_cache[key]
+
+        result = self._classify_uncached(source_path)
+
+        if key is not None:
+            _classify_cache[key] = result
+            _classify_cache.move_to_end(key)
+            if len(_classify_cache) > _CLASSIFY_CACHE_MAX:
+                _classify_cache.popitem(last=False)
+        return result
+
+    @staticmethod
+    def _classify_uncached(source_path: str) -> bool:
         head = head_of(source_path)
         if (str(head.get("entrypoint") or "") in NON_INTERACTIVE_ENTRYPOINTS
                 and not allow_headless()):
             return False
-        return not (head.get("sidechain") or head.get("agentId"))
+        if head.get("sidechain") or head.get("agentId"):
+            return False
+        return not _forked_lacks_own_turn(source_path)
 
     def ref_for_path(self, source_path: str, session_id: str,
                      cwd: Optional[str] = None) -> Optional[SessionRef]:
@@ -461,3 +621,10 @@ class ClaudeCodeAdapter:
             fragment_name="claude-settings.fragment.json",
             post_write_note="",
         )
+
+    def on_session_start_mark(self, repo_root: str, *, source: str, epoch: float) -> None:
+        """Claude Code 가 CLAUDE.md 류를 언제 읽는지는 아직 실측하지 못했다
+        (#36) — 안다는 근거가 없으니 no-op 이다. 기반 클래스를 아무도
+        상속하지 않으므로(#36 이전에도 이미 그랬듯) 기본값이 상속으로
+        얻어지지 않는다."""
+        return None

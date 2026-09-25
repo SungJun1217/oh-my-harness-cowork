@@ -260,7 +260,40 @@ def inspect(config_path: str, fragment: Dict[str, list], home: str) -> Tuple[boo
     if not isinstance(conf, dict):
         return False, "cannot parse {}".format(config_path)
 
-    installed_entries = _extract_entries(conf.get("hooks"))
+    return _judge(conf.get("hooks"), fragment, home, config_path)
+
+
+def inspect_toml(config_path: str, fragment: Dict[str, list], home: str) -> Tuple[bool, str]:
+    """`inspect()` 의 TOML 판(공식 문서: config.toml 의 인라인 `[[hooks.<Event>]]`
+    도 hooks.json 과 같은 `hooks.<Event>[].hooks[]` 구조로 로드된다). 3.9 엔
+    tomllib 이 없으므로 `parse_toml_hooks` 로 이 구조 하나만 뽑아 같은 판정
+    함수(`_judge`)에 넘긴다 — 비교 로직을 두 벌 두지 않는다. 절대 던지지
+    않는다: 실패는 전부 "not installed"(설치 안 됨과 파싱 불가를 구분하지
+    않는다, has_runnable_call 과 같은 원칙)."""
+    try:
+        with open(config_path, encoding="utf-8-sig", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return False, "not installed in {} — run `omhc hooks install`".format(config_path)
+    try:
+        hooks_by_event = parse_toml_hooks(text)
+    except Exception:
+        # parse_toml_hooks 는 제 몸을 fail-open 하게 짰지만(never raise 를
+        # 목표로), 이 함수 자신도 훅 경로 근처(status/install)에서 불리므로
+        # 한 번 더 감싼다 — 방어의 마지막 층.
+        return False, "cannot parse {}".format(config_path)
+    if not hooks_by_event:
+        return False, "not installed in {} — run `omhc hooks install`".format(config_path)
+    return _judge(hooks_by_event, fragment, home, config_path)
+
+
+def _judge(hooks_by_event, fragment: Dict[str, list], home: str,
+           config_path: str) -> Tuple[bool, str]:
+    """`inspect`/`inspect_toml` 공유 — 설치된 hooks.SessionStart 모양을 배포
+    조각과 비교한다. 소스가 JSON 이든(위) TOML 이든(parse_toml_hooks) 같은
+    `{event: [{"matcher":…, "hooks":[{"type":…, "command":…}]}]}` 모양이면
+    똑같이 판정한다."""
+    installed_entries = _extract_entries(hooks_by_event)
     installed_omhc_any = _omhc_calls(installed_entries)
     if not installed_omhc_any:
         return False, "not installed in {} — run `omhc hooks install`".format(config_path)
@@ -330,6 +363,192 @@ def has_runnable_call(config_path: str, sub: str, flags: Optional[Dict[str, str]
         return False
     except Exception:
         return False
+
+
+def has_runnable_call_toml(config_path: str, sub: str,
+                          flags: Optional[Dict[str, str]] = None) -> bool:
+    """`has_runnable_call` 의 TOML 판 — config.toml 의 인라인 `[[hooks.<Event>]]`
+    를 본다(#32). 절대 던지지 않는다: 실패는 전부 False."""
+    try:
+        with open(config_path, encoding="utf-8-sig", errors="replace") as fh:
+            text = fh.read()
+        hooks_by_event = parse_toml_hooks(text)
+        if not hooks_by_event:
+            return False
+        for call in _omhc_calls(_extract_entries(hooks_by_event), runnable_only=True):
+            if call.sub != sub:
+                continue
+            if flags and any(call.flags.get(k) != v for k, v in flags.items()):
+                continue
+            return True
+        return False
+    except Exception:
+        return False
+
+
+# --- TOML 헤더 스캐너 + 인라인 [hooks] ------------------------------------
+
+# 이 모듈이 아는 TOML 스키마는 딱 하나 — `hooks.<Event>[].hooks[].command`
+# 가 array-of-tables 로 펼쳐진 모양이다:
+#   [[hooks.PreToolUse]]
+#   matcher = "^Bash$"
+#
+#   [[hooks.PreToolUse.hooks]]
+#   type = "command"
+#   command = '...'
+#   timeout = 30
+#   statusMessage = "..."
+# 어느 하네스가 이 TOML 인라인 표현을 쓰든(3.9 엔 tomllib 이 없으므로 전체
+# TOML 을 파싱하지 않는다) 여기 하나로 판정한다 — 하네스 이름은 모른다.
+
+# 문자열·주석·배열/문자열 안의 대괄호를 건너뛰며 최상위(줄 맨 앞, 배열 깊이
+# 0) 헤더만 찾는다. `toml_header_lines` 가 문서 전체에서 전부(첫 것뿐 아니라)
+# 문서 순서대로 낸다 — 이 모듈의 인라인 [hooks] 판정과, 어댑터가 자기만의
+# 단일 키 하나만 뽑을 때(예: 특정 최상위 키가 첫 헤더 앞에 있는지) 둘 다
+# 이 스캐너 하나를 공유한다.
+_TOML_STRING_OR_BRACKET_RE = re.compile(
+    r'"""|\'\'\'|"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\'|#[^\n]*|[\[\]]')
+
+# 헤더 한 줄: `[a.b.c]` 또는 `[[a.b.c]]`. 안쪽에 문자열이 있어도(예:
+# `[projects."/a/b"]`) 여기서는 dotted key 만 대충 뽑는다 — hooks.<Event>
+# 패턴은 항상 bare key 라 정밀 parsing 이 필요 없고, 다른 헤더(예: projects)
+# 는 이 파서의 관심사가 아니므로(패턴에 안 걸려 조용히 무시된다) 정확도가
+# 떨어져도 안전하다.
+_TOML_HEADER_RE = re.compile(r'^[ \t]*(\[{1,2})([^\]]*)\]{1,2}[ \t\r]*(?:#.*)?$')
+
+# 본문의 `key = "value"` 한 줄(문자열 값만 인식한다 — matcher/type/command
+# 는 실측(위 예시)상 전부 문자열이고, timeout(정수)·statusMessage 는 여기서
+# 관심사가 아니다). bare/quoted 키, basic/literal 문자열 값 모두 받는다.
+_TOML_KV_RE = re.compile(
+    r'^[ \t]*([\w-]+|"[^"\\\n]*"|\'[^\'\n]*\')[ \t]*=[ \t]*'
+    r'("(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\')[ \t\r]*(?:#.*)?$')
+
+# parse_toml_hooks 의 두 target 모양이 받아들이는 키 — group(=[[hooks.<E>]])
+# 은 matcher 만, hook(=[[hooks.<E>.hooks]])은 type/command 만. "hooks" 같은
+# group 의 내부 키를 본문 key=value 로 덮어쓰면(예: `hooks = "oops"`) 다음
+# `[[hooks.<E>.hooks]]` 가 그 리스트에 append 하려다 죽는다(리뷰 #2) — 그래서
+# `key in target` 대신 이 허용목록으로 가른다.
+_TOML_GROUP_KEYS = frozenset({"matcher"})
+_TOML_HOOK_KEYS = frozenset({"type", "command"})
+
+
+def toml_header_lines(text: str):
+    """최상위(줄 맨 앞, 문자열/배열 밖) `[...]`/`[[...]]` 헤더가 있는 줄의
+    (bracket_pos, line_end) 오프셋을 문서 순서대로 낸다. `bracket_pos` 는
+    그 줄의 `[` 자체가 시작하는 위치(줄 시작이 아니다 — 선행 공백을 뺀다),
+    `line_end` 는 그 줄 개행 앞까지."""
+    out = []
+    depth = 0
+    in_multi = None
+    line_start = True
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_multi:
+            if in_multi == '"""' and ch == "\\":
+                i += 2
+                continue
+            if text.startswith(in_multi, i):
+                i += 3
+                in_multi = None
+            else:
+                i += 1
+            continue
+        if ch == "\n":
+            line_start = True
+            i += 1
+            continue
+        if ch in " \t\r":
+            i += 1
+            continue
+        if line_start and depth == 0 and ch == "[":
+            bracket_pos = i
+            line_end = text.find("\n", i)
+            if line_end == -1:
+                line_end = n
+            out.append((bracket_pos, line_end))
+            i = line_end
+            continue
+        line_start = False
+        m = _TOML_STRING_OR_BRACKET_RE.match(text, i)
+        if not m:
+            i += 1
+            continue
+        tok = m.group(0)
+        if tok in ('"""', "'''"):
+            in_multi = tok
+        elif tok == "[":
+            depth += 1
+        elif tok == "]":
+            depth = max(0, depth - 1)
+        i = m.end()
+    return out
+
+
+def parse_toml_hooks(text: str) -> Dict[str, list]:
+    """config.toml 텍스트에서 인라인 `[hooks]` 테이블만 뽑아 hooks.json 과
+    같은 `{event: [{"matcher":…, "hooks":[{"type":…, "command":…}]}]}` 모양
+    으로 돌려준다. 그 밖의 모든 TOML(`[projects...]`, `[model]` 등)은 이
+    파서의 관심사가 아니다 — 헤더가 hooks.<Event> / hooks.<Event>.hooks
+    패턴에 안 걸리면 조용히 건너뛴다.
+
+    `[hooks]` 가 전혀 없으면(진짜 없거나, 못 알아보는 모양이거나) 빈 dict를
+    돌려준다 — has_runnable_call_toml/inspect_toml 양쪽 다 "빈 dict = 설치
+    안 됨" 으로 취급하므로 fail-open 이 저절로 된다. 절대 던지지 않는다."""
+    hooks_by_event: Dict[str, list] = {}
+    groups_by_event: Dict[str, dict] = {}  # event -> 가장 최근 그룹(문서 순서상 마지막)
+    headers = toml_header_lines(text)
+
+    def _read_body(body_start: int, body_end: int, target, allowed_keys) -> None:
+        """[header_end, next_header_start) 구간에서 `allowed_keys` 에 있는
+        키만 `target` 에 얹는다. `target` 이 None 이면(관심 없는 헤더 아래)
+        아무것도 하지 않는다."""
+        if target is None:
+            return
+        for line in text[body_start:body_end].split("\n"):
+            m = _TOML_KV_RE.match(line)
+            if not m:
+                continue
+            key = m.group(1).strip('"\'')
+            if key not in allowed_keys:
+                continue
+            raw_value = m.group(2)
+            value = raw_value[1:-1]
+            if raw_value[0] == '"':
+                value = value.replace('\\"', '"').replace("\\\\", "\\")
+            target[key] = value
+
+    for idx, (start, end) in enumerate(headers):
+        line = text[start:end]
+        m = _TOML_HEADER_RE.match(line)
+        body_start = end
+        body_end = headers[idx + 1][0] if idx + 1 < len(headers) else len(text)
+        if not m:
+            continue
+        is_array = m.group(1) == "[["
+        path = [p.strip() for p in m.group(2).split(".") if p.strip()]
+        target = None
+        allowed_keys = frozenset()
+        if is_array and len(path) == 2 and path[0] == "hooks":
+            event = path[1].strip('"\'')
+            group = {"matcher": None, "hooks": []}
+            hooks_by_event.setdefault(event, []).append(group)
+            groups_by_event[event] = group
+            target = group
+            allowed_keys = _TOML_GROUP_KEYS
+        elif is_array and len(path) == 3 and path[0] == "hooks" and path[2] == "hooks":
+            event = path[1].strip('"\'')
+            group = groups_by_event.get(event)
+            if group is not None:
+                hook = {"type": None, "command": None}
+                group["hooks"].append(hook)
+                target = hook
+                allowed_keys = _TOML_HOOK_KEYS
+            # else: 부모 그룹 없이 나온 hooks 테이블 — 고아, 버린다(target=None).
+        _read_body(body_start, body_end, target, allowed_keys)
+
+    return hooks_by_event
 
 
 # --- install/uninstall (`omhc hooks install|uninstall`) ---------------------

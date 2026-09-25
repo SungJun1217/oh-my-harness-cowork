@@ -151,6 +151,43 @@ class TestCompute(unittest.TestCase):
                              repo_root=self.h.repo_root, home=self.h.home, now=NOW)
         self.assertIn("source of truth", body)
 
+    def test_old_stamped_notes_expire_but_legacy_lines_stay(self):
+        """#36: 7일이 지난 메모는 핸드오프에 붙지 않는다. 시각 없는 옛 줄은 남는다."""
+        from omhc import due
+        self.h.plant_codex_session()
+        os.makedirs(self.h.state, exist_ok=True)
+        with open(os.path.join(self.h.state, "notes.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("옛 형식 메모\n")
+            fh.write("{:.0f}\t지난달 메모\n".format(NOW - due.MAX_AGE_SECONDS - 60))
+            fh.write("{:.0f}\t어제 메모\n".format(NOW - 86400))
+        body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("어제 메모", body)
+        self.assertIn("옛 형식 메모", body)
+        self.assertNotIn("지난달 메모", body)
+        self.assertNotIn("\t", body)
+
+    def test_omhc_note_writes_a_stamp_that_the_reader_expires(self):
+        """쓰는 쪽과 읽는 쪽이 같은 형식을 쓰는지 고정한다(리뷰)."""
+        import time as _time
+        from omhc import cli, due
+        cwd = os.getcwd()
+        os.chdir(self.h.repo_root)
+        self.addCleanup(os.chdir, cwd)
+        out, err = io.StringIO(), io.StringIO()
+        code = cli.cmd_note(cli.build_parser().parse_args(["note", "탭\t포함 메모"]),
+                            home=self.h.home, out=out, err=err)
+        self.assertEqual(code, 0)
+        with open(os.path.join(self.h.state, "notes.txt"), encoding="utf-8") as fh:
+            line = fh.read().strip("\n")
+        m = brief._NOTE_STAMP.match(line)
+        self.assertIsNotNone(m, line)
+        self.assertEqual(m.group(2), "탭 포함 메모")
+        self.assertEqual(brief._notes(self.h.state, now=_time.time()), ["탭 포함 메모"])
+        self.assertEqual(brief._notes(self.h.state,
+                                      now=_time.time() + due.MAX_AGE_SECONDS + 60), [])
+
     def test_same_vendor_yields_empty(self):
         self.h.plant_codex_session()
         body = brief.compute(my_harness="codex-cli", my_session_id="me1",
@@ -626,6 +663,87 @@ class TestDeliver(unittest.TestCase):
         with open(path, encoding="utf-8") as fh:
             self.assertIn("because", fh.read())
 
+    def test_file_drop_header_carries_a_readable_utc_stamp_next_to_the_epoch(self):
+        """#36: 본문의 상대 나이("3m ago")는 mint 시점에 얼어붙는다 — 헤더에
+        절대시각이 있어야 나중에 읽는 사람이 그게 낡았는지 가늠할 수 있다."""
+        receipt = deliver.file_drop(self.bundle(), "because", now=NOW)
+        with open(receipt.paths_written[0], encoding="utf-8") as fh:
+            header = fh.readline()
+        self.assertIn('captured="{:.0f}"'.format(NOW), header)
+        self.assertIn("captured_utc=\"2025-09-22T", header)
+
+    def test_file_drop_neutralizes_a_comment_terminator_in_why(self):
+        """리뷰 #3: `why` 에 `-->` 가 섞이면 주석이 거기서 끝나고 그 뒤의
+        captured=/captured_utc= 가 본문으로 새 버린다."""
+        receipt = deliver.file_drop(
+            self.bundle(), "boom --> <script>evil</script>", now=NOW)
+        with open(receipt.paths_written[0], encoding="utf-8") as fh:
+            header = fh.readline()
+        self.assertNotIn("-->", header[:-len(" -->\n")])
+        self.assertTrue(header.rstrip("\n").endswith(" -->"))
+        self.assertIn('captured="{:.0f}"'.format(NOW), header)
+        self.assertTrue(deliver._is_own_outbox_file(receipt.paths_written[0]))
+
+    def test_file_drop_collapses_newlines_in_why(self):
+        receipt = deliver.file_drop(self.bundle(), "line1\nline2\r\nline3", now=NOW)
+        with open(receipt.paths_written[0], encoding="utf-8") as fh:
+            lines = fh.readlines()
+        self.assertTrue(lines[0].startswith(deliver.FILE_DROP_HEADER_PREFIX))
+        self.assertIn("line1 line2  line3", lines[0])
+
+    def test_file_drop_registers_omhc_dir_in_git_info_exclude_once(self):
+        deliver.file_drop(self.bundle(), "because", now=NOW)
+        deliver.file_drop(self.bundle(), "because again", now=NOW + 1)
+        exclude_path = os.path.join(self.h.repo_root, ".git", "info", "exclude")
+        with open(exclude_path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(text.count(".omhc/"), 1)
+
+    def test_file_drop_registers_a_pre_existing_omhc_dir_too(self):
+        """리뷰 #1: 예전엔 `.omhc/` 를 새로 만들 때만 등재를 시도해서, 이미
+        outbox 가 있던 기존 사용자는 영영 등재되지 않았다."""
+        os.makedirs(os.path.join(self.h.repo_root, deliver.OUTBOX_DIR), exist_ok=True)
+        deliver.file_drop(self.bundle(), "because", now=NOW)
+        exclude_path = os.path.join(self.h.repo_root, ".git", "info", "exclude")
+        with open(exclude_path, encoding="utf-8") as fh:
+            self.assertIn(".omhc/", fh.read())
+
+    def test_second_drop_does_not_spawn_a_subprocess_once_excluded(self):
+        """리뷰 #1: 이미 등재됐으면 `.git/info/exclude` 파일 한 번 읽는 것만으로
+        끝나야 한다 — git check-ignore subprocess 를 또 부르면 안 된다."""
+        deliver.file_drop(self.bundle(), "first", now=NOW)
+        with mock.patch("subprocess.run") as run:
+            deliver.file_drop(self.bundle(), "second", now=NOW + 1)
+            run.assert_not_called()
+
+    def test_prune_outbox_deletes_own_files_older_than_the_ttl_and_keeps_fresh_ones(self):
+        old = deliver.file_drop(self.bundle(), "old", now=NOW).paths_written[0]
+        fresh = deliver.file_drop(self.bundle(), "fresh", now=NOW + 1).paths_written[0]
+        old_time = NOW - deliver.OUTBOX_TTL_SECONDS - 10
+        os.utime(old, (old_time, old_time))
+        removed = deliver.prune_outbox(self.h.repo_root, now=NOW)
+        self.assertEqual(removed, [old])
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.exists(fresh))
+
+    def test_prune_outbox_never_deletes_a_file_it_did_not_write(self):
+        directory = os.path.join(self.h.repo_root, deliver.OUTBOX_DIR)
+        os.makedirs(directory, exist_ok=True)
+        stray = os.path.join(directory, "2020-to-somewhere.md")
+        with open(stray, "w", encoding="utf-8") as fh:
+            fh.write("not omhc's file\n")
+        old_time = NOW - deliver.OUTBOX_TTL_SECONDS - 10
+        os.utime(stray, (old_time, old_time))
+        removed = deliver.prune_outbox(self.h.repo_root, now=NOW)
+        self.assertEqual(removed, [])
+        self.assertTrue(os.path.exists(stray))
+
+    def test_prune_outbox_with_force_removes_fresh_files_too(self):
+        fresh = deliver.file_drop(self.bundle(), "fresh", now=NOW).paths_written[0]
+        removed = deliver.prune_outbox(self.h.repo_root, now=NOW, force=True)
+        self.assertEqual(removed, [fresh])
+        self.assertFalse(os.path.exists(fresh))
+
     def test_read_only_adapter_falls_through_to_the_file_drop(self):
         from omhc import adapters
 
@@ -714,7 +832,58 @@ class TestWireFormat(unittest.TestCase):
 class TestLogFailureNeverRaises(unittest.TestCase):
     def test_a_non_utf8_filename_in_the_detail_is_logged_not_raised(self):
         with tempfile.TemporaryDirectory() as home:
-            brief._log_failure(home, "pin failed: source missing: /x/\udcff.jsonl")
+            brief.log_failure(home, "pin failed: source missing: /x/\udcff.jsonl")
             with open(os.path.join(locate.omhc_root(home), brief.GUARD_LOG),
                       encoding="utf-8") as fh:
                 self.assertIn("\\udcff", fh.read())
+
+    def test_timestamp_is_stamped_with_gmtime_not_the_bare_local_call(self):
+        """리뷰: `time.strftime(fmt)` 하나만 쓰면(구조체 없이) 로컬 시각에
+        `Z`(UTC) 접미가 잘못 붙는다 — `time.gmtime()` 을 명시로 넘겨야 한다."""
+        with tempfile.TemporaryDirectory() as home, \
+             mock.patch.object(brief.time, "gmtime", side_effect=time.gmtime) as spy:
+            brief.log_failure(home, "x")
+        spy.assert_called_once_with()
+
+
+class TestOutboxHygieneIntegration(unittest.TestCase):
+    """`omhc mark`(훅 경로) 와 `omhc clear` 가 outbox 를 어떻게 청소하는지."""
+
+    def setUp(self):
+        self.h = Harness()
+
+    def tearDown(self):
+        self.h.close()
+
+    def bundle(self, to="claude-code"):
+        return HandoffBundle(body_md="[omhc] hi\n", repo_root=self.h.repo_root,
+                             to_adapter_id=to)
+
+    def test_cmd_mark_prunes_outbox_files_older_than_24h(self):
+        from omhc import cli
+
+        old = deliver.file_drop(self.bundle(), "old", now=NOW).paths_written[0]
+        old_time = NOW - deliver.OUTBOX_TTL_SECONDS - 10
+        os.utime(old, (old_time, old_time))
+
+        args = cli.build_parser().parse_args(
+            ["mark", "--harness", "claude-code", "--stdin",
+             json.dumps({"cwd": self.h.repo_root, "session_id": "me1"})])
+        cli.cmd_mark(args, home=self.h.home, out=io.StringIO())
+
+        self.assertFalse(os.path.exists(old))
+
+    def test_cmd_clear_removes_every_omhc_outbox_file(self):
+        from omhc import cli
+
+        fresh = deliver.file_drop(self.bundle(), "fresh", now=NOW).paths_written[0]
+
+        cwd = os.getcwd()
+        os.chdir(self.h.repo_root)
+        try:
+            args = cli.build_parser().parse_args(["clear"])
+            cli.cmd_clear(args, home=self.h.home, out=io.StringIO())
+        finally:
+            os.chdir(cwd)
+
+        self.assertFalse(os.path.exists(fresh))

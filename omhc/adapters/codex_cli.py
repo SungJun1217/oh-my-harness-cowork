@@ -96,57 +96,24 @@ _ROOT_MARKERS_KEY_RE = re.compile(
 # 리뷰 #2: `[projects."..."]` 같은 테이블 헤더는 그 아래 키의 스코프를 바꾼다
 # (`[table]\nproject_root_markers = …` 는 최상위 키가 아니다) — 첫 헤더 앞까지만
 # 최상위로 본다.
-_STRING_OR_BRACKET_RE = re.compile(
-    r'"""|\'\'\'|"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\'|#[^\n]*|[\[\]]')
+
+# `~/.codex/config.toml` 의 `project_doc_max_bytes = N`(#33). Codex 가 AGENTS.md
+# 체인 전체(레포 루트부터 cwd 까지)를 머리부터 읽는 총 예산이다(deep-research,
+# 2026-09-25 — 문서에 값이 없어 임베디드 기본값 32768 을 실측 근사로 쓴다).
+# 정수 값만 인식한다 — 실측/문서 모두 정수 외의 꼴을 보인 적이 없다.
+DEFAULT_PROJECT_DOC_MAX_BYTES = 32768
+_PROJECT_DOC_MAX_BYTES_KEY_RE = re.compile(
+    r'(?m)^[ \t]*[\'"]?project_doc_max_bytes[\'"]?[ \t]*=[ \t]*(-?\d+)')
 
 
 def _first_table_header(text: str) -> int:
-    """첫 `[section]`/`[[section]]` 머리가 시작하는 위치, 없으면 -1.
+    """첫 `[section]`/`[[section]]` 머리(`[` 자체)가 시작하는 위치, 없으면 -1.
 
-    줄 맨 앞의 `[` 만으로는 안 된다(리뷰): 여러 줄 배열 값 안의 `["a", "b"],`
-    원소나 여러 줄 문자열 안의 `[x]` 도 줄 맨 앞에 온다. `["x"]` 는 TOML 에서
-    인용 키 머리일 수도 배열 원소일 수도 있어 정규식 하나로 못 가른다. 그래서
-    문자열·주석을 건너뛰며 값 배열의 괄호 깊이를 추적하고, 깊이 0 인 줄의 첫
-    `[` 만 머리로 본다."""
-    depth = 0
-    in_multi = None
-    line_start = True
-    i = 0
-    while i < len(text):
-        ch = text[i]
-        if in_multi:
-            if in_multi == '"""' and ch == "\\":
-                i += 2  # basic 문자열의 이스케이프(\""" 포함)는 끝이 아니다
-                continue
-            if text.startswith(in_multi, i):
-                i += 3
-                in_multi = None
-            else:
-                i += 1
-            continue
-        if ch == "\n":
-            line_start = True
-            i += 1
-            continue
-        if ch in " \t\r":
-            i += 1
-            continue
-        if line_start and depth == 0 and ch == "[":
-            return i
-        line_start = False
-        m = _STRING_OR_BRACKET_RE.match(text, i)
-        if not m:
-            i += 1
-            continue
-        tok = m.group(0)
-        if tok in ('"""', "\'\'\'"):
-            in_multi = tok
-        elif tok == "[":
-            depth += 1
-        elif tok == "]":
-            depth = max(0, depth - 1)
-        i = m.end()
-    return -1
+    문자열·주석을 건너뛰며 값 배열의 괄호 깊이를 추적하는 스캐너
+    (`hookconf.toml_header_lines`, #32 에서 인라인 `[hooks]` 판정과 이걸
+    공유하도록 뽑아냈다)를 그대로 쓴다 — 첫 것만 필요하면 결과의 첫 원소."""
+    headers = hookconf.toml_header_lines(text)
+    return headers[0][0] if headers else -1
 
 
 # TOML basic("...", 이스케이프 있음)과 literal('...', 이스케이프 없음) 문자열
@@ -209,6 +176,12 @@ def session_meta(path: str) -> Optional[dict]:
 # 대신 새 프로그래매틱 originator 는 여기에 손으로 더해야 한다.
 _PROGRAMMATIC_ORIGINATORS = frozenset({"applecider", "codex_exec"})
 _PROGRAMMATIC_ORIGINATOR_PREFIXES = ("splitlane",)
+
+# managed_block 의 captured 는 초 단위로 반올림된다(#36) — 같은 SessionStart
+# 안에서 병렬로 도는 mark 와 brief 가 같은 초나 그 인접 초에 각자 epoch 를
+# 재면, 이 margin 없이는 brief 가 이 세션 몫으로 방금 쓴 블록을 mark 가
+# "이미 읽힌 낡은 블록"으로 오인해 지울 수 있다(on_session_start_mark 참고).
+_CONSUMED_BLOCK_MARGIN_SECONDS = 2.0
 
 
 def _is_headless_originator(originator) -> bool:
@@ -880,6 +853,9 @@ class CodexCliAdapter:
     def hooks_path(self) -> str:
         return os.path.join(self.home, ".codex", "hooks.json")
 
+    def toml_config_path(self) -> str:
+        return os.path.join(self.home, ".codex", "config.toml")
+
     def hook_config(self):
         return hookconf.HookConfig(
             config_path=self.hooks_path(),
@@ -890,26 +866,274 @@ class CodexCliAdapter:
             ),
         )
 
-    def hook_is_installed(self) -> bool:
+    def _project_trust_level(self, repo_root: str) -> Optional[str]:
+        """`~/.codex/config.toml` 의 `[projects."<repo_root>"]` 아래
+        `trust_level` 값 (#32). 전체 TOML 을 파싱하지 않는다 — 공유 스캐너
+        (`hookconf.toml_header_lines`, 문자열·주석 인식)로 최상위 헤더를 모두
+        찾은 뒤, 이 레포 경로와 정확히 같은 헤더 하나를 골라 그 본문(다음
+        헤더 전까지)에서 `trust_level` 키만 정규식으로 읽는다 — 리뷰: 예전
+        엔 본문 끝을 `^[ \\t]*\\[` 로 다시 찾았는데, 이건 #31 이 이미 걸러낸
+        "여러 줄 배열 값 안의 `[` 도 줄 맨 앞에 올 수 있다" 문제를 그대로
+        반복한다. 못 찾으면(파일 없음, 이 레포의 헤더가 아예 없음, 못 읽음)
+        None — "신뢰 여부를 모른다" 이지 "신뢰 안 됨" 이 아니다(호출자가
+        project 레이어를 아예 무시하는 근거가 된다).
+        """
+        real = os.path.realpath(repo_root)
+        try:
+            with open(self.toml_config_path(), encoding="utf-8-sig", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            return None
+        try:
+            headers = hookconf.toml_header_lines(text)
+        except Exception:
+            return None
+        needle = 'projects."{}"'.format(real)
+        for idx, (start, end) in enumerate(headers):
+            line = text[start:end].strip()
+            if not (line.startswith("[") and line.endswith("]")):
+                continue
+            if line.strip("[]") != needle:
+                continue
+            body_end = headers[idx + 1][0] if idx + 1 < len(headers) else len(text)
+            body = text[end:body_end]
+            tm = re.search(r'(?m)^[ \t]*trust_level[ \t]*=[ \t]*"([^"]*)"', body)
+            return tm.group(1) if tm else None
+        return None
+
+    def _hook_layers(self, repo_root: Optional[str]):
+        """omhc brief 를 실제로 부를 수 있는 네 위치 각각의 (path, 거기에
+        세션 시작 시점에 도는 omhc 호출이 있는가) — 공식 문서(config-advanced,
+        "Hooks" 절, #32): `~/.codex/hooks.json`, `~/.codex/config.toml` 의
+        인라인 `[hooks]`, `<repo>/.codex/hooks.json`, `<repo>/.codex/config.toml`
+        (project 쪽은 그 `.codex/` 레이어가 trusted 일 때만). `hook_is_installed`
+        와 `_install_source`(#32 리뷰 2 — mtime 판정이 hooks.json 하나만
+        보던 결함) 가 이 목록 하나를 공유한다."""
+        flags = {"--harness": self.adapter_id}
+        layers = [
+            (self.hooks_path(), hookconf.has_runnable_call(
+                self.hooks_path(), "brief", flags)),
+            (self.toml_config_path(), self.inline_hook_present()),
+        ]
+        if repo_root and self._project_trust_level(repo_root) == "trusted":
+            project_dir = os.path.join(repo_root, ".codex")
+            project_json = os.path.join(project_dir, "hooks.json")
+            project_toml = os.path.join(project_dir, "config.toml")
+            layers.append((project_json,
+                           hookconf.has_runnable_call(project_json, "brief", flags)))
+            layers.append((project_toml,
+                           hookconf.has_runnable_call_toml(project_toml, "brief", flags)))
+        return layers
+
+    def hook_is_installed(self, repo_root: Optional[str] = None) -> bool:
         """omhc 를 부르는 SessionStart 훅이 설치돼 있는가.
 
         pull 채널(state 산출물)은 훅이 그것을 읽어갈 때만 전달이 성립한다.
         훅이 없으면 산출물을 써도 아무도 보지 않으므로 전달이 아니다 — 그것을
-        성공으로 보고하면 Path B 가 영원히 발동하지 않는다.
+        성공으로 보고하면 Path B 가 영원히 발동하지 않는다. `repo_root` 가
+        주어지고 그 레포가 trusted 로 확인될 때만 project 레이어까지 본다 —
+        신뢰를 확인 못 하면 project 레이어는 보지 않는다(과다 신뢰보다
+        무시가 안전하다).
         """
         try:
-            return hookconf.has_runnable_call(
-                self.hooks_path(), "brief", {"--harness": self.adapter_id})
+            return any(present for _path, present in self._hook_layers(repo_root))
         except Exception:
             return False
 
+    def _install_source(self, repo_root: Optional[str]):
+        """훅이 실제로 설치된 파일들(`_hook_layers` 가 present=True 로 표시한
+        것들) 중 mtime 이 가장 최근인 (epoch, path) — `_hook_health` 가
+        "이 시각 이후 세션이 돌았는가" 를 재는 기준점이다(#32 리뷰 1).
+
+        예전엔 이 기준점을 언제나 `hooks_path()` 의 mtime으로 삼았다 —
+        인라인 전용 설치(hooks.json 자체가 없는 경우)에서는 그 stat 이
+        ENOENT 로 죽어 `_hook_health` 가 매번 `----(unknown)` 으로만
+        남고, 정작 신뢰 안 된 인라인 훅이 조용히 스킵되는 걸 잡아야 할
+        행이 그 역할을 못 했다.
+
+        둘 다 설치돼 있으면 둘 중 더 최근에 바뀐 쪽을 쓴다 — 어느 쪽이든
+        최근에 손을 댔다는 신호이기 때문이다. Codex 자신도 config.toml 을
+        자주 고쳐 쓴다(hooks.state 신뢰 해시, `[projects...]` trust_level
+        등) — 그러면 이 mtime 이 실제 훅 설치 시점보다 훨씬 뒤로 밀려
+        판정 창(install_epoch 이후)이 좁아지고, `----`(미판정)로 남는
+        경우가 늘어난다. 그건 보수적인 실패 방향이라 안전하다(FAIL 을
+        놓치는 대신 그냥 못 판정한 것으로 남는다) — 그래서 굳이 "이 mtime
+        변화가 진짜 훅 재설치였는지" 를 더 정교하게 가려내지 않는다.
+        """
+        candidates = []
+        for path, present in self._hook_layers(repo_root):
+            if not present:
+                continue
+            try:
+                candidates.append((os.path.getmtime(path), path))
+            except OSError:
+                continue
+        if not candidates:
+            return None
+        return max(candidates, key=lambda c: c[0])
+
+    def inline_hook_present(self) -> bool:
+        """config.toml 의 인라인 `[hooks]` 에 (배포 조각과 정확히 같지 않아도)
+        세션 시작 시점에 실제로 도는 omhc brief 호출이 있는가 — "존재하는가"
+        와 "배포 조각과 똑같은가" 는 다른 질문이다(리뷰 #1: 이 둘을 섞어
+        쓰면 인라인 훅이 깨져 있어도(예: mark 가 빠짐) `hooks_status()` 가
+        "not found" 라고 잘못 말하고, `omhc hooks install` 이 그 위에 다시
+        hooks.json 을 겹쳐 써 Codex 가 두 층 다 로드하며 경고하는 상태를
+        만든다). `omhc hooks install` 이 hooks.json 에 중복을 쓸지 판단하는
+        데 이 함수 하나만 쓴다 — "존재" 판정은 여기, "제대로 됐는가" 판정은
+        `hooks_status()`."""
+        return hookconf.has_runnable_call_toml(
+            self.toml_config_path(), "brief", {"--harness": self.adapter_id})
+
+    def hooks_status(self):
+        """`omhc status` 의 `codex-cli hooks` 행 전용 — 일반
+        `hookconf.inspect` 는 hooks.json 하나만 본다. Codex 는 그 옆에 인라인
+        `config.toml [hooks]` 도 읽으므로(#32) 여기서 둘 다 본다.
+
+        "설치돼 있다" 고 부를 층은 존재 여부(`has_runnable_call*`, 세션 시작
+        시점에 실제로 도는 omhc brief 호출이 있는가)로 가른다 — 기존 결함
+        (리뷰 #1)은 이걸 `inspect`/`inspect_toml` 의 "배포 조각과 완전히
+        같은가" 판정과 섞어 썼다: 인라인이 있는데 mark 가 빠졌거나 플래그가
+        달라 "differs" 여야 할 상황을 "not found" 라고 잘못 말했다. 존재하는
+        층에 대해서만 `inspect`/`inspect_toml` 로 "제대로 됐는가" 를 덧붙인다.
+
+        두 층 다 존재하면 문서(config-advanced, Hooks 절)가 "Codex 는 둘 다
+        로드하고 경고한다"고 명시한다 — 둘 다 정확하면 PASS 대신 미판정
+        (`----`)으로 그 경고를 드러내고, 하나라도 깨져 있으면 FAIL 로 어느
+        쪽인지 짚는다. project 레이어(`<repo>/.codex/…`)는 이 행이 안 본다 —
+        이 행은 특정 레포 문맥이 없는 범용 상태 행이고, project 훅은
+        `hook_is_installed(repo_root)` 가 `install_handoff` 시점에 따로 본다.
+        """
+        fragment = hookconf.load_fragment(self.hook_config().fragment_name)
+        flags = {"--harness": self.adapter_id}
+        json_path = self.hooks_path()
+        toml_path = self.toml_config_path()
+
+        json_present = hookconf.has_runnable_call(json_path, "brief", flags)
+        toml_present = self.inline_hook_present()
+        json_ok, json_detail = hookconf.inspect(json_path, fragment, self.home)
+        toml_ok, toml_detail = hookconf.inspect_toml(toml_path, fragment, self.home)
+        if toml_present and not toml_ok:
+            # hookconf 의 일반 detail 은 "... — run `omhc hooks install`" 로
+            # 끝난다 — hooks.json 대상이면 맞는 조언이지만, 인라인이 이미
+            # 존재하면(리뷰 #1 이후) `omhc hooks install` 은 그 위에
+            # hooks.json 을 덧쓰지 않고 그냥 실패한다 — 이 조언을 따라가면
+            # 제자리다(리뷰 #2). 실제로 맞는 조언으로 바꾼다.
+            toml_detail = self._inline_advice(toml_path, toml_detail)
+
+        if json_present and toml_present:
+            if json_ok and toml_ok:
+                return None, (
+                    "installed in both {} and inline [hooks] in {} — Codex loads both "
+                    "and warns (see config-advanced docs, Hooks section); keep one"
+                    .format(json_path, toml_path))
+            broken = []
+            if not json_ok:
+                broken.append("{}: {}".format(json_path, json_detail))
+            if not toml_ok:
+                broken.append(toml_detail)
+            return False, "installed in both layers but {}".format("; ".join(broken))
+        if json_present:
+            if json_ok:
+                return True, "installed ({})".format(json_path)
+            return False, "{}: {}".format(json_path, json_detail)
+        if toml_present:
+            if toml_ok:
+                return True, "installed via inline [hooks] in {}".format(toml_path)
+            return False, toml_detail
+        return False, "{} / also not found via inline [hooks] in {} ({})".format(
+            json_detail, toml_path, toml_detail)
+
+    def _inline_advice(self, toml_path: str, detail: str) -> str:
+        """`hookconf.inspect_toml` 의 일반적인 "... — run `omhc hooks install`"
+        조언을, 인라인이 이미 존재하는 상태에서 실제로 맞는 조언으로 바꾼다
+        (#32 리뷰 2 — 그 명령은 인라인이 있으면 hooks.json 을 덧쓰지 않고
+        그냥 실패하므로, 그 조언을 따르면 같은 자리를 맴돈다)."""
+        circular_suffix = " — run `omhc hooks install`"
+        if detail.endswith(circular_suffix):
+            detail = detail[:-len(circular_suffix)]
+        return (
+            "inline [hooks] in {}: {} — fix or remove the omhc entries in the "
+            "inline [hooks] of {} (or remove them and run `omhc hooks install`)"
+        ).format(toml_path, detail, toml_path)
+
     def install_handoff(self, bundle: HandoffBundle) -> InstallReceipt:
-        if not self.hook_is_installed():
+        if not self.hook_is_installed(bundle.repo_root):
             raise NoInjectionChannel(
                 "no omhc SessionStart hook at {}; the artifact would be written but "
                 "never read".format(self.hooks_path())
             )
-        return install_state_artifact(bundle, home=self._home)
+        receipt = install_state_artifact(bundle, home=self._home)
+        self._collapse_stale_agents_md_block(bundle.repo_root)
+        return receipt
+
+    def _collapse_stale_agents_md_block(self, repo_root: str) -> None:
+        """Path A(신선한 훅 핸드오프) 가 성공했는데 그 옆에 예전 Path B 구간
+        (#33 예산 초과나 훅이 한동안 안 돌던 시기에 깔린 것)이 남아 있으면,
+        다음 Codex 세션이 신선한 훅 핸드오프와 낡은 AGENTS.md 지시를 동시에
+        읽는다(#36) — collapse() 자체는 24시간 지나야 지우므로 여기서
+        force=True 로 즉시 지운다. `#33` 거절 경로와 똑같은 가드를 쓴다:
+        AGENTS.md 가 Claude Code 와 공유되면 절대 건드리지 않는다. 이 메서드는
+        훅 경로(brief → deliver → install_handoff)에서 불리므로 무엇을 하든
+        절대 던지지 않는다(invariant 2)."""
+        from .. import agents_md
+
+        try:
+            if not agents_md.shared_with_claude(repo_root):
+                agents_md.collapse(repo_root, force=True)
+        except Exception:
+            pass
+
+    def on_session_start_mark(self, repo_root: str, *, source: str, epoch: float) -> None:
+        """#36: Codex 는 AGENTS.md 를 자기 SessionStart 훅보다 **먼저** 읽는다
+        (실측, codex-cli 0.156.1 sandbox, rollout 증거) — 첫 턴은 훅이 파일을
+        고치든 지우든 이미 읽은 뒤라, 여기서 블록을 지워도 "이 세션이 이미
+        읽었다"는 사실 자체는 바꿀 수 없다. 그래도 지금 지워 두면 **다음**
+        Codex 세션은 이 블록을 못 읽는다 — 블록 수명이 "이 세션이 소비할 때
+        까지"로 줄어든다(예전엔 24시간 staleness 뿐이었다). 다음 턴엔 Codex
+        가 스스로 "이전 AGENTS.md 지시는 더 이상 적용되지 않는다"를 알려준다
+        (실측) — 핸드오프의 '지시가 아니다' 성격과도 맞는다.
+
+        `source` 는 "startup" 만 본다 — "읽기가 훅보다 먼저"라는 순서는
+        **startup 에서만 실측했다**(리뷰). resume(같은 세션의 다음 턴)에서
+        Codex 가 AGENTS.md diff 를 언제 계산하는지(사람의 첫 턴 입력 시점일
+        수도 있다)는 아직 실측하지 못했다 — 만약 그게 훅보다 뒤라면, resume
+        에서도 붕괴시키면 그 턴이 아직 보지도 못한, 이 세션 자신의 brief 가
+        방금 쓴 블록을 지워 버릴 수 있다. 그래서 resume 은 건드리지 않는다.
+        "compact" 는 새 턴이 아니므로(#30 과 같은 구분) 호출자(cmd_mark)가
+        아예 부르지 않지만, 여기서도 다시 확인해 방어한다.
+
+        경합(리뷰 #1): 같은 SessionStart 안에서 Codex 는 자기 훅들을 병렬로
+        돌린다(실측) — mark(이 메서드)와 brief(Path B 설치)가 동시에 실행될
+        수 있다. brief 가 hooks.json 미신뢰 등으로 Path B 를 골라 **이 세션**
+        몫의 새 블록을 이미 써 놓았는데, mark 가 그걸 "이미 읽힌 낡은 블록"
+        으로 오인해 지우면 이 세션조차 못 읽는 핸드오프가 된다. 블록의
+        captured_at 은 초 단위로 반올림되므로(managed_block), `epoch`(mark
+        가 이 세션에 대해 기록한 원장 epoch)와 같은 초이거나 그 이후, 혹은
+        `_CONSUMED_BLOCK_MARGIN_SECONDS` 안쪽이면 이 세션(또는 이후) 것일
+        수 있어 건드리지 않는다. 그래도 여기서 판정한 뒤 실제로 지우기까지는
+        여전히 시간차가 있다(check-then-act) — `agents_md.collapse_if_captured`
+        가 그 값을 들고 다시 확인한 뒤에만 지운다(managed_block.strip_if_captured
+        참고): 그 사이 다른 프로세스가 새 구간을 써 놓았으면 값이 달라져
+        있으므로 손대지 않는다. `#33` 거절 경로와 같은 가드도 쓴다: AGENTS.md
+        가 Claude Code 와 공유되면(먼저 확인) 절대 건드리지 않는다. 훅
+        경로에서 불리므로 절대 던지지 않는다(invariant 2)."""
+        if source != "startup":
+            return
+        from .. import agents_md, managed_block
+
+        try:
+            if agents_md.shared_with_claude(repo_root):
+                return
+            path = agents_md.path_for(repo_root)
+            captured = managed_block.installed_captured_at(path)
+            if captured is None:
+                return
+            if captured > epoch - _CONSUMED_BLOCK_MARGIN_SECONDS:
+                return
+            agents_md.collapse_if_captured(repo_root, captured)
+        except Exception:
+            pass
 
     def fallback_channels(self):
         """Path B: install_handoff 가 실패할 때만 열린다 —
@@ -922,24 +1146,84 @@ class CodexCliAdapter:
         훅 자체가 신뢰되지 않아 brief 가 한 번도 안 돌면 deliver() 호출 자체가
         없으므로 Path B 도 열리지 않는다 — 그 경우 Codex 로 들어가는 방향은
         아무것도 받지 못한다."""
-        from .. import agents_md
+        return (self._install_agents_md,)
 
-        return (agents_md.install,)
+    def _install_agents_md(self, bundle: HandoffBundle) -> InstallReceipt:
+        """`agents_md.install` 을 부르기 전에 #33 예산을 미리 잰다.
 
-    def _config_trusts_hook(self) -> bool:
-        """`~/.codex/config.toml` 에 이 hooks.json 을 신뢰한다는 항목이 있는가.
+        구간은 이제 항상 파일 맨 앞이라(managed_block.splice) 끝나는 지점은
+        기존 AGENTS.md 크기와 무관하게 `len(prefix+block)` 하나로 정해진다.
+        조상 디렉터리의 AGENTS.md 바이트까지 더하는 건 하지 않는다 — Codex
+        프로젝트 루트는 이 레포의 `repo_root` 로 근사하고(개인용 도구, 서브
+        디렉터리에서 시작하는 사용이 드물다), 조상에 큰 AGENTS.md 가 있는
+        경우까지 재는 건 이 파일 하나만 보는 것보다 훨씬 비싸다(각 조상마다
+        파일을 열어야 한다) — 넘으면 install 을 아예 claim 하지 않고
+        deliver() 가 보편 바닥(outbox)으로 떨어지게 한다(invariant 2: 여기서
+        죽지 않는다, deliver() 의 예외 캐치가 이미 있지만 사유를 guard.log 에도
+        남긴다).
 
-        3.9 에는 tomllib 이 없으므로 평문 부분 문자열 검색으로 충분하다 — 해시
-        의미론(codex 가 훅 내용의 무엇을 해시하는지)은 확인된 바 없으므로, 이
-        신호 하나만으로 실패 판정을 내리지 않는다(정적 힌트일 뿐이다).
-        """
-        config_path = os.path.join(self.home, ".codex", "config.toml")
-        needle = 'hooks.state."{}:session_start:'.format(self.hooks_path())
+        `project_doc_max_bytes = 0` 은 (codex-rs project_doc.rs 실측 근거로,
+        미확인) Codex 가 AGENTS.md 자체를 아예 안 읽는다는 뜻이라 항상 거절한다
+        — 그 외 0 미만/파싱 불가는 `_project_doc_max_bytes` 가 이미 기본값으로
+        접는다.
+
+        리뷰 결함: 예산 초과로 거절만 하고 이미 설치된(더 작았던 시절의) 낡은
+        구간을 그대로 두면, Codex 는 outbox 로 떨어진 새 핸드오프 대신 그
+        낡은 구간을 계속 읽는다 — 거절할 때 낡은 구간도 지운다. AGENTS.md 가
+        Claude 와 공유되면(agents_md.install 과 같은 가드) 건드리지 않는다."""
+        from .. import agents_md, brief, managed_block
+
+        limit = self._project_doc_max_bytes(self.toml_config_path())
+        if limit <= 0:
+            reason = (
+                "project_doc_max_bytes={} in {} — Codex does not load AGENTS.md at all"
+            ).format(limit, self.toml_config_path())
+        else:
+            path = agents_md.path_for(bundle.repo_root)
+            end = managed_block.prospective_block_end_bytes(
+                path, bundle.body_md, captured_at=time.time())
+            reason = None
+            if end > limit:
+                reason = (
+                    "AGENTS.md omhc block would end at byte {} in {}, past Codex's "
+                    "project_doc_max_bytes={} ({}) — Codex would not see it"
+                ).format(end, path, limit, self.toml_config_path())
+
+        if reason is None:
+            return agents_md.install(bundle)
+
+        brief.log_failure(self.home, reason)
+        if not agents_md.shared_with_claude(bundle.repo_root):
+            agents_md.collapse(bundle.repo_root, force=True)
+        raise NoInjectionChannel(reason)
+
+    def _config_trusts(self, hook_file_path: str) -> bool:
+        """`~/.codex/config.toml` 에 `hook_file_path`(보통 hooks.json — 실측상
+        인라인은 아래 참고)의 훅을 신뢰한다는 `hooks.state` 항목이 있는가.
+        이건 `[projects."<repo>"] trust_level` 과는 다른 메커니즘이다 —
+        저건 project 쪽 `.codex/` 레이어(hooks.json 이든 인라인이든) 전체를
+        읽을지 말지를 가르고, 이건 사용자 레벨 hooks.json **내용 하나**를
+        Codex 가 이미 승인했다는 해시다(실측, 이 머신: `hooks.state."<hooks.json
+        절대경로>:session_start:<idx>:<idx>"`). 3.9 엔 tomllib 이 없으므로
+        평문 부분 문자열 검색으로 충분하다 — 해시 의미론(codex 가 훅 내용의
+        무엇을 해시하는지)은 확인된 바 없으므로, 이 신호 하나만으로 실패
+        판정을 내리지 않는다(정적 힌트일 뿐이다).
+
+        인라인(`~/.codex/config.toml` 자신에 적힌 `[[hooks.SessionStart]]`)도
+        같은 `hooks.state."<config.toml 경로>:session_start:..."` 키 형식을
+        쓰는지는 확인된 바 없다 — 호출부(`_hook_health`)가 그 불확실성을
+        detail 에 명시한다."""
+        config_path = self.toml_config_path()
+        needle = 'hooks.state."{}:session_start:'.format(hook_file_path)
         try:
             with open(config_path, encoding="utf-8", errors="replace") as fh:
                 return needle in fh.read()
         except OSError:
             return False
+
+    def _config_trusts_hook(self) -> bool:
+        """하위호환 별칭 — hooks.json 자신의 신뢰 해시만 본다(실측된 경로)."""
+        return self._config_trusts(self.hooks_path())
 
     def _repo_matches(self, repo_root: Optional[str], cwd) -> bool:
         """이 후보(cwd)가 `repo_root` 에 실제로 속하는가.
@@ -1006,6 +1290,32 @@ class CodexCliAdapter:
             return "unparseable", None
         return "ok", tuple(v.replace('\\"', '"') for v in values)
 
+    def _project_doc_max_bytes(self, config_path: str) -> int:
+        """`~/.codex/config.toml` 의 `project_doc_max_bytes` 값, 없거나 못 읽으면
+        임베디드 기본값(#33). `_codex_root_markers` 와 같은 원칙 — 최상위(첫
+        `[section]` 이전) 키만 본다, 절대 던지지 않는다(fail-open).
+
+        `0` 은 그대로 돌려준다(기본값으로 접지 않는다) — codex-rs 의
+        project_doc.rs 실측 근거(리뷰, 바이너리 문자열로는 미확인)로 `0` 은
+        "AGENTS.md 를 아예 안 읽는다"는 뜻이고, 호출자(`_install_agents_md`/
+        `_agents_md_budget_health`)가 그 값 자체로 따로 판정해야 한다. 음수·
+        파싱 불가만 기본값으로 접는다."""
+        try:
+            with open(config_path, encoding="utf-8-sig", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            return DEFAULT_PROJECT_DOC_MAX_BYTES
+        header = _first_table_header(text)
+        top_level = text[:header] if header >= 0 else text
+        m = _PROJECT_DOC_MAX_BYTES_KEY_RE.search(top_level)
+        if not m:
+            return DEFAULT_PROJECT_DOC_MAX_BYTES
+        try:
+            value = int(m.group(1))
+        except ValueError:
+            return DEFAULT_PROJECT_DOC_MAX_BYTES
+        return value if value >= 0 else DEFAULT_PROJECT_DOC_MAX_BYTES
+
     def _ancestor_has_git(self, repo_root: str, git_marker: str) -> bool:
         """리뷰 #4: `repo_root` 위 조상 중 `.git` 을 가진 것이 있으면, Codex
         기본값(`[".git"]`)으로도 그 조상을 루트로 잡아 AGENTS.md 를 cwd 까지
@@ -1046,7 +1356,7 @@ class CodexCliAdapter:
         config_path = os.path.join(self.home, ".codex", "config.toml")
         hint = ('add to {}: project_root_markers = ["{}", "{}"] (keep "{}")'
                 .format(config_path, git_marker, omhc_marker, git_marker))
-        if self.hook_is_installed():
+        if self.hook_is_installed(repo_root):
             channel_note = ("only matters if the omhc Codex hook stops being "
                             "installed/trusted — Path A currently delivers")
         else:
@@ -1077,6 +1387,44 @@ class CodexCliAdapter:
         return ("codex root markers", True,
                 "project_root_markers includes \"{}\"".format(omhc_marker))
 
+    def _agents_md_budget_health(self, repo_root: Optional[str]):
+        """#33: 이미 설치된 구간이 Codex 의 `project_doc_max_bytes` 예산을 넘겨
+        끝나면 Codex 는 그걸 못 읽는다 — `_install_agents_md` 가 쓰는 시점에
+        막지만(다음 splice 부터), 이미 예산을 넘겨 설치된 채로 오래 방치된
+        구간은 status 로도 알려야 한다.
+
+        `codex root markers` 와 같은 두 단계 원칙을 따른다: 이 진단 자체가
+        무의미한 레포(AGENTS.md 가 Claude 와 공유돼 Path B 를 절대 안 쓰는
+        레포 — `agents_md.install`/`_install_agents_md` 와 같은 가드)는 행을
+        아예 내지 않는다(``None``). 진단은 유효한데 아직 판단할 근거가 없으면
+        (설치된 구간이 없다 — 설치 전이거나 collapse 됨) `----` 로 행은 내되
+        게이팅은 하지 않는다 — "every check gets PASS/FAIL/---- (never
+        SKIP)"(README) 는 판정 가능한 진단에 적용되지, 진단 자체가 무의미한
+        레포에는 적용되지 않는다."""
+        if repo_root is None:
+            return None
+        from .. import agents_md, managed_block
+
+        if agents_md.shared_with_claude(repo_root):
+            return None
+
+        path = agents_md.path_for(repo_root)
+        end = managed_block.installed_block_end_bytes(path)
+        if end is None:
+            return ("codex agents.md budget", None, "no omhc block in AGENTS.md")
+        limit = self._project_doc_max_bytes(self.toml_config_path())
+        if limit <= 0:
+            return ("codex agents.md budget", False,
+                     "project_doc_max_bytes={} in {} — Codex does not load AGENTS.md at all"
+                     .format(limit, self.toml_config_path()))
+        if end > limit:
+            return ("codex agents.md budget", False,
+                     "AGENTS.md omhc block ends at byte {} > project_doc_max_bytes={} "
+                     "in {} — Codex would not see it".format(
+                         end, limit, self.toml_config_path()))
+        return ("codex agents.md budget", True,
+                "AGENTS.md omhc block ends at byte {} (limit {})".format(end, limit))
+
     def health(self, repo_root: Optional[str], ledger_rows):
         rows = []
         try:
@@ -1085,6 +1433,12 @@ class CodexCliAdapter:
             marker_row = ("codex root markers", None, "unknown ({})".format(exc))
         if marker_row is not None:
             rows.append(marker_row)
+        try:
+            budget_row = self._agents_md_budget_health(repo_root)
+        except Exception as exc:
+            budget_row = ("codex agents.md budget", None, "unknown ({})".format(exc))
+        if budget_row is not None:
+            rows.append(budget_row)
         rows.extend(self._hook_health(repo_root, ledger_rows))
         return tuple(rows)
 
@@ -1102,16 +1456,18 @@ class CodexCliAdapter:
         헤드리스(`codex exec`)뿐이면 PASS 도 FAIL 도 아니다.
         """
         try:
-            if not self.hook_is_installed():
+            if not self.hook_is_installed(repo_root):
                 # 훅을 설치한 적 없는 사용자에게 매번 행을 보여주는 건 소음이다
                 # — "설치 안 됨" 은 이제 `<adapter-id> hooks` 행(hookconf 기반,
                 # cmd_status)이 이미 말해준다.
                 return ()
-            hooks_path = self.hooks_path()
-            try:
-                install_epoch = os.path.getmtime(hooks_path)
-            except OSError as exc:
-                return (("codex hook", None, "unknown ({})".format(exc)),)
+            source = self._install_source(repo_root)
+            if source is None:
+                # hook_is_installed(repo_root) 는 True 라고 했는데 그 파일(들)을
+                # 다시 stat 하지 못했다 — 방금 지워졌거나 하는 경합. 판정 불가.
+                return (("codex hook", None,
+                         "unknown (installed hook file could not be stat'd)"),)
+            install_epoch, install_path = source
             install_date = time.strftime("%Y-%m-%d %H:%M %z", time.localtime(install_epoch))
 
             # 세션 id 는 전역 유일이다(Codex 가 부여) — 레포 경계로 거르지 않는다.
@@ -1176,11 +1532,11 @@ class CodexCliAdapter:
                 if _post_install(headless_entries):
                     return (("codex hook", None,
                               "not judged — only headless (codex exec) sessions since "
-                              "hooks.json changed ({}); they don't count, open an "
-                              "interactive codex here once".format(install_date)),)
+                              "{} changed ({}); they don't count, open an "
+                              "interactive codex here once".format(install_path, install_date)),)
                 return (("codex hook", None,
                           "not judged yet — no interactive Codex session in this repo "
-                          "since hooks.json changed ({})".format(install_date)),)
+                          "since {} changed ({})".format(install_path, install_date)),)
 
             # 신뢰는 config.toml 을 바꾸지, hooks.json 을 바꾸지 않는다 — 신뢰
             # 이전 세션은 install_epoch 이후라도 영원히 "안 돈 것"으로 남는다.
@@ -1209,8 +1565,25 @@ class CodexCliAdapter:
             detail = ("{} consecutive Codex session(s) since install never ran the "
                        "omhc hook (newest: {}) — trust it in Codex (untrusted hooks "
                        "are skipped silently)".format(missing_streak, originator))
-            if not self._config_trusts_hook():
-                detail += "; no trust entry in ~/.codex/config.toml"
+            user_hooks_json = self.hooks_path()
+            user_toml = self.toml_config_path()
+            if install_path == user_hooks_json:
+                if not self._config_trusts(install_path):
+                    detail += (
+                        "; no hooks.state trust hash for {} in ~/.codex/config.toml "
+                        "(that's the per-hook-content trust Codex records after you "
+                        "approve it; separate from `[projects...] trust_level`, which "
+                        "only gates project-level `.codex/` layers)".format(install_path))
+            elif install_path == user_toml:
+                if not self._config_trusts(install_path):
+                    detail += (
+                        "; also found no hooks.state trust hash for {} — but that "
+                        "check is only verified for hooks.json installs, not inline "
+                        "config.toml ones, so treat this as a hint, not a diagnosis"
+                        .format(install_path))
+            # else: project-level 설치 — 그 신뢰는 `[projects...] trust_level`
+            # 로 이미 확인됐다(여기 오려면 그게 trusted 여야 한다, _hook_layers)
+            # — hooks.state 힌트는 이 층과 무관하니 덧붙이지 않는다.
             # 훅 백필(cmd_mark) 덕에 Codex→Claude 방향은 이 FAIL 과 무관하게
             # 산다 — 끊긴 건 Claude→Codex 뿐이라는 걸 명시한다.
             detail += (" — Claude→Codex is not delivered; Codex→Claude still works "

@@ -99,7 +99,7 @@ PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
 | `PLAN?` | 이전 에이전트의 마지막 발화 | `NEXT`가 비었을 때만 채운다. `?` 한 바이트가 "검증되지 않은 주장" 라벨 |
 | `FAIL` | 기계가 관측한 실패(`ok=False`) | **"해소됨" 판정은 "같은 인자"가 아니라 인자 앞 40자가 같은 이후 성공**이다 — 그러면 보고하지 않는다. 리포트 대상은 최대 2개, 태그 `[E1]` `[E2]`로 `omhc show`와 연결 |
 | `DID` | 기계가 관측한 수정 경로 | 레포 루트 상대경로, 최대 4개 |
-| `NOTE` | `omhc note "<text>"` 호출 — 사람과 양쪽 하네스의 에이전트 모두 명령줄로 부를 수 있고 저자를 구분해 기록하지 않는다 | **검증되지 않은 자유 텍스트.** `~/.omhc/<repo-key>/notes.txt`에서 최근 2개 |
+| `NOTE` | `omhc note "<text>"` 호출 — 사람과 양쪽 하네스의 에이전트 모두 명령줄로 부를 수 있고 저자를 구분해 기록하지 않는다 | **검증되지 않은 자유 텍스트.** `~/.omhc/<repo-key>/notes.txt`에서 최근 2개. 메모마다 쓴 시각을 붙이고 7일(핸드오프 자체의 나이 기한과 같음)이 지난 메모는 빼서, 옛 메모가 끝없이 따라붙지 않는다. 시각이 없는 옛 줄은 그대로 보인다 |
 | `SAID` | `author == human`, 중간 사람 턴 | 최근순이 아니라 긴 문장 우선(최대 3개) — "어디까지 됐어?" 같은 질문보다 요구사항 문장이 쓸모 있다 |
 | `MORE` | 버려진 슬롯·해소된 실패·숨겨진 이벤트의 집계 | **감춘 것을 공개한다.** 버린 슬롯 수는 900바이트 예산 때문이지만, 숨긴 이벤트 수는 예산과 무관하다 — 사람 턴도 아니고 `FAIL`로 리포트되지도 않은 이벤트 수(DID 등으로 요약됐어도 낱개로는 안 보인다)를 그냥 센 것이다 |
 | `PULL` | omhc 생성(항상 포함) | `omhc log --last 30`은 늘 있고, 미해소 실패가 있으면 `omhc show E1`, 수정한 파일 중 가장 짧은 경로가 32자 이하면 `omhc log --file …`이 붙습니다. 절대 버리지 않는 슬롯 |
@@ -168,6 +168,58 @@ git 이 아닌 프로젝트라면 최상위 디렉터리에서 `touch .omhc-root
 > ```
 > `omhc status`의 `codex root markers` 행(아래 참고)이 이걸 대신 확인해
 > 줍니다.
+
+> [!IMPORTANT]
+> 실측(codex-cli 0.156.1): Codex 는 `AGENTS.md` 를 머리부터,
+> `project_doc_max_bytes`(기본 32768, 레포 루트부터 cwd 까지 체인 전체에
+> 대한 총 예산 하나) 만큼만 읽고 그 지점에서 예고 없이 자릅니다. Path B 는
+> 관리 구간을 언제나 `AGENTS.md` **맨 앞**에 쓰므로(예전에 끝에 있던 구간도
+> 다음 쓰기에서 앞으로 옮겨집니다) 파일이 커도 그 잘림을 피합니다. 그래도
+> 구간 자체가 설정된 `project_doc_max_bytes` 를 넘겨 끝난다면, omhc 는 Path
+> B 설치를 성공으로 주장하지 않고 outbox 로 대신 떨어집니다 — Codex 가 못
+> 볼 것을 쓰지 않습니다. `omhc status`의 `codex agents.md budget` 행(아래
+> 참고)이 이걸 알려줍니다.
+
+> [!NOTE]
+> `<repo>/.omhc/outbox/` 의 파일은 오래 두지 않습니다. `omhc mark`(SessionStart
+> 훅이 부름)가 omhc 자신이 쓴 outbox 파일 중 24시간 넘은 것만 지우고, `omhc
+> clear` 는 이 레포의 것을 즉시 전부 지웁니다 — omhc 의 이름 규칙·헤더와 맞지
+> 않는 파일은 절대 건드리지 않습니다. 매 file drop 마다 `.omhc/` 를
+> `.git/info/exclude` 에 등재를 시도합니다(이미 등재됐거나 다른 방식으로
+> 무시 중이면 건너뜁니다) — AGENTS.md 관리 구간이 쓰는 것과 같은, 이 클론에만
+> 해당하는 등재 방식입니다. Codex 자신의 SessionStart 훅이 성공하면(Path A),
+> 그 옆에 남아 있던 AGENTS.md 관리 구간(Path B)도 평소의 24시간을 기다리지
+> 않고 그 자리에서 붕괴시킵니다 — 새 세션이 신선한 훅 핸드오프와 낡은 구간을
+> 동시에 읽지 않게 합니다. 이 정리는 `AGENTS.md` 가 Claude Code 와 공유되는
+> 레포(아래 참고)에서는 하지 않습니다 — omhc 는 공유된 `AGENTS.md` 를 설치할
+> 때든 붕괴시킬 때든 아예 건드리지 않습니다. 모든 핸드오프 산출물(outbox
+> 헤더, AGENTS.md 구간 시작 마커)은
+> 유닉스 epoch 와 사람이 읽는 UTC 시각을 함께 담아, 본문에 적힌("3m ago" 같은,
+> mint 시점에 얼어붙는) 상대 나이가 실제로 얼마나 낡았는지 확인할 수 있습니다.
+
+> [!NOTE]
+> 실측(codex-cli 0.156.1): Codex 는 자기 SessionStart 훅보다 **먼저**
+> `AGENTS.md` 를 읽습니다 — 세션의 첫 턴은 훅이 그 파일을 뭘 하든 세션이
+> 시작할 때 디스크에 있던 그대로를 읽습니다. **같은** 세션의 이후 턴만
+> (resume 으로 확인) `AGENTS.md` 를 다시 확인하고, 바뀐 부분만 알려줍니다.
+> 내용이 바뀌었으면 "These AGENTS.md instructions replace all previously
+> provided AGENTS.md instructions." 와 새 본문을, 블록이 없어졌으면 "The
+> previously provided AGENTS.md instructions no longer apply." 를, 그대로면
+> 아무것도 넣지 않습니다. 즉 어떤 Codex 세션이 시작하기 전부터 있던 구간은
+> 그 세션의 `startup` 턴에만 읽히고(아직 안 지워졌다면 그 세션의 이후 턴에
+> diff 로 다시 보일 수 있습니다) — **다음** Codex 세션이 그 낡은 구간을 또
+> 읽는 일만 막습니다: `omhc mark` 가 그 세션 자신의 `startup`(`resume` 은
+> 제외 — "훅보다 먼저 읽는다"는 순서를 startup 에서만 실측했습니다; 같은
+> 세션이 이어지는 것뿐인 `compact` 도 제외)에서, 이 mark 호출보다 이미 먼저
+> 적힌 구간을 평소의 24시간을 기다리지 않고 그 자리에서 붕괴시킵니다. 이는
+> Path A 의 같은 세션 붕괴, 24시간 노후화 정리와 별개로 더해지는 것입니다.
+> 같은 SessionStart 안에서 다른 훅이 병렬로(Codex 는 SessionStart 훅을
+> 병렬로 돌립니다, 실측) 방금 쓴 구간은 캡처 시각에 작은 margin 을 둬
+> 건드리지 않으며 — 그 margin 이 "낡았다고 판정한 시점"과 "실제로 지우는
+> 시점" 사이의 창을 완전히 닫지는 못하므로, 지우는 동작 자체도 판정에 쓴
+> 캡처 시각이 그대로인 경우에만 실행됩니다 — 그 사이에 새로 쓰인 구간은
+> 잃지 않습니다. `AGENTS.md` 가 Claude Code 와 공유되는 레포에서는 여기서도
+> 아예 손대지 않습니다.
 
 최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
 심링크합니다. pip·pipx 를 쓰지 않습니다(의존성이 0 이라 소스 트리가 곧
@@ -264,6 +316,20 @@ git 체크아웃이라면 레포의 `hooks/` 아래에 있습니다. 조각의 `
 > `additionalContext`)는 codex-cli 0.155.1에서 `hook: SessionStart Failed`로
 > 거부되고 아무것도 주입되지 않습니다.
 
+Codex 는 `config.toml` 의 인라인 `[hooks]` 테이블에서도 훅을 읽습니다(공식
+[config-advanced 문서](https://developers.openai.com/codex/config-advanced#hooks)
+참고 — `hooks.json` 과 같은 `hooks.<Event>[].hooks[].command` 구조를 TOML
+array-of-tables 로 적었을 뿐입니다). `omhc hooks install` 은 여전히
+`hooks.json` 에만 씁니다. 하지만 `omhc status` 의 `codex-cli hooks` 행과 훅
+경로의 `install_handoff` 는 `~/.codex/config.toml` 에 손으로 적은 omhc 설치도
+그대로 인식합니다 — 거기에 이미 적었다면 `hooks.json` 이 없어도 됩니다. 둘 다
+있고 둘 다 omhc `SessionStart` 훅을 정의하면 Codex 는 문서대로 둘 다 읽고
+경고합니다 — `status` 는 이걸 PASS 대신 미판정 `----` 행으로 보여주며 두
+파일 이름을 모두 적습니다. 프로젝트 쪽(`<repo>/.codex/hooks.json` /
+`<repo>/.codex/config.toml`)은 그 레포의 `.codex/` 레이어가 신뢰된 경우에만
+셉니다(`~/.codex/config.toml` 의 `[projects."<path>"] trust_level =
+"trusted"`) — 그렇지 않으면 omhc 는 무시합니다.
+
 `omhc status`의 모든 행은 세 라벨 중 하나입니다: 실제로 판정되어 exit code 를
 게이팅할 수 있는 **PASS**/**FAIL**(adapters, archive, instruction files,
 `ledger rejects`, `codex hook` 같은 어댑터 health 행), 그리고 정보성이거나
@@ -302,6 +368,15 @@ fd 에 대한 단일 write(2) 는 크기와 무관하게 POSIX 상 원자적이�
 키가 `[section]` 안에서만 보일 때(TOML 테이블은 키의 스코프를 바꾼다 —
 최상위에 있어야 합니다)도 모두 `----` 입니다.
 
+omhc 관리 구간이 `AGENTS.md` 에 지금 설치돼 있으면 `codex agents.md budget`
+행이 그 구간이 실제로 끝나는 바이트 오프셋을 `~/.codex/config.toml` 의
+`project_doc_max_bytes`(설정이 없거나 못 읽으면 기본값 32768)와 비교합니다.
+구간이 그 한도를 넘겨 끝나면 FAIL(게이팅)이고 오프셋과 한도를 함께 보여줍니다
+— Codex 가 그 구간을 못 볼 것이기 때문입니다. 설치된 구간이 없으면 `----`
+입니다. Path B 자신도 이 검사를 통과 못 할 걸 미리 아는 구간은 아예 쓰지
+않습니다 — 성공을 주장하지 않고 outbox 로 떨어지며, 그 사유를 `guard.log`
+에 남깁니다.
+
 감지된 하네스마다 `<adapter-id> hooks` 행(예: `claude-code hooks`,
 `codex-cli hooks`)도 붙습니다 — 하네스 디렉터리가 존재한다는 것만이 아니라
 omhc 의 SessionStart 훅이 그 하네스 자신의 설정에 실제로 병합돼 있는지를
@@ -339,12 +414,14 @@ outbox 가 대신 받는 게 아니라 Codex 쪽 `brief` 호출 자체가 없어
 |---|---|
 | `omhc status [--json]` | 유일한 사람용 대시보드. 아카이브 지연(`lag_bytes`, `tail=…B`)과 인출률 포함 |
 | `omhc log [--last N] [--grep P] [--verb V] [--file P]` | 색인된 이벤트를 한 줄씩. 각 줄은 `<session>#N` 참조로 시작하며 그대로 `show`에 넘길 수 있음 |
+| `omhc trace <path> [--all] [--last N] [--json]` | 파일 → 세션 역인덱스(sessionwiki `trace` 선례). `path`를 건드린 색인된 이벤트를 두 하네스 세션을 넘나들며 오래된 순으로(최신이 마지막 줄, `log`와 같은 순서) 나열하고, 각 줄에 하네스와 `show`로 열 수 있는 참조를 붙임. 기본은 `modified`만; `--all`은 `inspected`/`ran` 언급까지 포함. 접미사 매칭이 서로 다른 파일 여럿에 걸쳐 모호하면 짐작하지 않고 후보를 보여줌. 전달됐거나 `watch`가 본 세션만 잡힌다 — 안 잡힌다고 "고친 적 없다"는 뜻은 아니고 "아직 색인 안 됐다"는 뜻; `watch`로만 색인되고 원장에 아직 `start` 행이 없는 세션은 하네스 칸이 `?`로 나옴 |
 | `omhc show <E1\|#137\|abcdef01#137> [--full]` | **원본 바이트를 오프셋으로 조회** (tier (b) 진입점). 맨 `#N`은 가장 최근 전달된 세션 기준(`log`의 인출률 회계와 같은 규칙)이고, `<prefix>#N`은 세션을 직접 지정함 — 접두사가 모호하면 후보를 나열함 |
 | `omhc note "<text>"` | 메모. 두 하네스의 에이전트가 맨 명령줄로 호출 가능 |
 
 **인출률**("pulled X of N recent injections")은 omhc 의 부담이 값을 하는지
 판단할 유일한 숫자입니다. N 은 이 레포에 전달된 가장 최근 `PULL_RATE_WINDOW`
-(20)개 세션, X 는 그중 `omhc show`나 `omhc log`로 실제로 파본 세션 수입니다
+(20)개 세션, X 는 그중 `omhc show`, `omhc log`, `omhc trace`로 실제로 파본 세션
+수입니다
 (같은 세션을 여러 번 파봐도 한 번만 셉니다) — 사람이 손으로 `omhc log`를
 돌려도 셈에 들어갑니다, 에이전트뿐 아니라. 창은 전달된 전체 역사가 아니라
 가장 최근 전달들(append 순서, 세션 id 로 매칭)만 봅니다 — 안 그러면 오래 쓴
@@ -541,6 +618,53 @@ bash tests/smoke.sh                             # 적대적 입력 8종
   `--dry-run` 도 같은 검사를 거칩니다. `mark` 의 `reopen` 기록은 그대로입니다
   — `due()` 가 전달된 세션을 다시 후보로 보게 하는 유일한 신호는 여전히
   그것이고, 실제로 새로 보낼 게 있는지는 `brief` 가 정합니다.
+
+  </details>
+
+- **Claude Code 포크(`/branch`, `--fork-session`, 백그라운드 `/fork`)는 자기
+  턴이 생기기 전까지는 적격이 아닙니다(#34).**
+  <details>
+  <summary>자세히</summary>
+
+  포크는 SessionStart 를 `source:"fork"` 로 시작하고(2.1.214 이전은
+  `"resume"`), 새 session_id 를 받으며, 트랜스크립트는 부모의 현재 메시지
+  사슬을 복사한 채로 열립니다(복사된 레코드는 원본의 `uuid`/`timestamp`/
+  `type`/`message` 는 그대로 두고 `sessionId`, `parentUuid`,
+  `isSidechain:false`, `sessionKind:undefined` 를 덮어쓰고 새
+  `forkedFrom:{sessionId, messageUuid}` 를 얹습니다. `{"type":
+  "history-suppression","cause":"fork_inherit"}` 레코드가 맨 앞에 붙을 수도
+  있습니다). 이걸 평범한 새 세션으로 취급하면, 부모가 이미 상대 하네스로
+  전달됐고 포크에 자기 턴이 하나도 없을 때 다음 핸드오프가 부모의 GOAL/NEXT
+  를 포크의 새 id 아래 또 한 번 내보냅니다 — `mark` 의 세션별 reopen/offset
+  가드(#27)는 그 id 에 애초에 `delivered.tsv` 행이 없어서 적용되지 않습니다.
+
+  Claude 어댑터의 `classify()`(`list_sessions`, `ref_for_path`, `brief` 의
+  적격성 판정이 함께 쓰는 지점)에서 고쳤습니다 — 포크된 트랜스크립트는
+  `forkedFrom` 이 없는 `author=="human"` 턴, 즉 포크 자신이 새로 타이핑한
+  턴이 하나라도 있어야 적격입니다. 흔한 경우는 값싸게 처리합니다 — 앞 몇
+  줄에 `forkedFrom`/`fork_inherit` 이 보여야만 포크로 취급하고, "포크 자신의
+  턴이 있는가" 스캔은 복사 구간이 끝나는 첫 레코드에서 멈춥니다. 50ms 시간
+  상한은 전체 스캔(복사 구간 포함 — 줄당 값싼 substring 검사일 뿐이라
+  가볍습니다)에 걸리고, 8MB 바이트 상한은 복사 구간을 **벗어난 뒤**(own
+  tail) 바이트만 셉니다 — 복사 구간 바이트까지 상한에 넣는 것은 리뷰에서
+  잡힌 결함이었습니다: 부모가 8MB 만 넘어도 own tail 을 보기도 전에 항상
+  fail-open 돼서(이 레포의 실제 6.9MB 세션을 포크로 다시 써 12.6MB 로
+  복제한 픽스처로 재현: 428바이트 핸드오프가 또 나갔습니다) 정작 고치려던
+  버그가 안 고쳐졌습니다. 어느 상한이든 걸리면 예전 동작(적격)으로 엽니다.
+  실측(synthetic, 새 턴을 못 찾는 복사-전용 케이스): 6.3MB ~7ms, 12.6MB
+  ~13ms, 25.1MB ~26ms, 30MB(끝까지 못 찾음) ~32ms, 새 턴이 있는 현실적인
+  2MB 복사 구간은 ~2ms 에 끝납니다. own tail 의 예상 밖 레코드 모양
+  (`message` 가 dict 가 아니거나 `text` 블록의 `text` 가 문자열이 아닌 등)은
+  한 줄 단위로 잡아 마찬가지로 fail-open 합니다 — `classify()`/
+  `list_sessions()` 밖으로 예외가 새서 그 레포의 Claude ref 를 전부 잃는
+  것(watch 가 그렇게 됩니다)보다 판정 하나를 포기하는 쪽이 쌉니다.
+  `ref_for_path`(브리핑이 부름)와 `brief.eligible` 자신의 `classify()` 호출이
+  같은 파일을 브리핑 한 번에 두 번 스캔하던 것은, classify 결과를
+  `(path, size, mtime_ns)` 로 키를 잡는 프로세스당 작은 캐시로 피합니다 —
+  파일이 자라(새 턴이 생기면) 키가 바뀌므로 캐시가 스스로 무효화됩니다.
+  `mark` 는 `source:"fork"` 를 따로 다루지 않습니다 — 새 session_id 이므로
+  평범한 start 행이 맞고, 전달된 세션을 다시 여는 것은 여전히 `resume`
+  뿐입니다.
 
   </details>
 

@@ -12,6 +12,8 @@ FILE_NAME = "AGENTS.md"
 CLAUDE_FILE_NAME = "CLAUDE.md"
 EXCLUDE_REL = os.path.join(".git", "info", "exclude")
 EXCLUDE_MARK = "# omhc: Codex 핸드오프 관리 구간이 들어가는 파일"
+OUTBOX_EXCLUDE_MARK = "# omhc: 상태/outbox 디렉터리(커밋 대상 아님)"
+OUTBOX_DIR_LINE = ".omhc/"
 
 # Claude Code 가 읽는 지침 파일 후보. 전부 repo_root 상대경로.
 _CLAUDE_CANDIDATES = (
@@ -96,8 +98,8 @@ def _is_tracked(repo_root: str) -> bool:
     return out.returncode == 0
 
 
-def _register_exclude(repo_root: str) -> bool:
-    """.git/info/exclude 에 등재한다.
+def _register_exclude_line(repo_root: str, mark: str, line: str) -> bool:
+    """`.git/info/exclude` 에 `line` 한 줄을 등재한다(멱등).
 
     .gitignore 가 아니라 info/exclude 를 쓰는 이유: 이 제외는 이 클론에만
     해당하는 사용자 결정이고, 커밋되어 다른 사람에게 강요될 것이 아니다.
@@ -109,14 +111,66 @@ def _register_exclude(repo_root: str) -> bool:
     if os.path.exists(path):
         with open(path, encoding="utf-8", errors="replace") as fh:
             existing = fh.read()
-    for line in existing.splitlines():
-        if line.strip() == FILE_NAME:
+    for existing_line in existing.splitlines():
+        if existing_line.strip() == line:
             return True
     if existing and not existing.endswith("\n"):
         existing += "\n"
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write("{}{}\n{}\n".format(existing, EXCLUDE_MARK, FILE_NAME))
+        fh.write("{}{}\n{}\n".format(existing, mark, line))
     return True
+
+
+def _register_exclude(repo_root: str) -> bool:
+    return _register_exclude_line(repo_root, EXCLUDE_MARK, FILE_NAME)
+
+
+def _exclude_has_line(repo_root: str, line: str) -> bool:
+    """`.git/info/exclude` 를 파일 하나 읽어서만 본다(subprocess 없음) —
+    `register_outbox_exclude` 가 매 file drop 마다 불리므로(#36 리뷰 #1),
+    이미 등재된 흔한 경우는 이 값싼 검사로 끝내고 `_is_ignored` 의 git
+    subprocess(실측 15–37ms)까지 가지 않는다."""
+    path = os.path.join(repo_root, EXCLUDE_REL)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            existing = fh.read()
+    except OSError:
+        return False
+    return any(existing_line.strip() == line for existing_line in existing.splitlines())
+
+
+def _is_ignored(repo_root: str, rel: str) -> bool:
+    """`rel` 이 이미(.gitignore 등으로) 무시 중인가 — git subprocess 라
+    `register_outbox_exclude` 가 `.git/info/exclude` 에 그 줄이 아직 없을
+    때만 부른다(훅 경로에서도 그 한 번은 지불한다, 흔치 않은 첫 file drop
+    경로다)."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo_root, "check-ignore", "-q", rel],
+            capture_output=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0
+
+
+def register_outbox_exclude(repo_root: str) -> bool:
+    """`.omhc/`(outbox 포함) 를 `.git/info/exclude` 에 등재한다(#36) — 이미
+    등재돼 있거나(파일 읽기만으로 판정) 다른 방식(.gitignore 등)으로 이미
+    무시 중이면(git subprocess 로 판정) 손대지 않는다. **매 file drop 마다
+    불린다** — `.omhc/` 를 방금 만들 때만 시도하면, 이미 outbox 가 있던
+    기존 사용자는 영영 등재되지 않는다(리뷰 #1)."""
+    if _exclude_has_line(repo_root, OUTBOX_DIR_LINE):
+        return True
+    if not os.path.isdir(os.path.join(repo_root, ".git", "info")):
+        # git 이 아닌(.omhc-root) 루트나 .git 이 파일인 worktree 에선 등재할 곳이
+        # 없다 — 매 drop 마다 git check-ignore 를 헛돌리지 않는다(리뷰).
+        return False
+    if _is_ignored(repo_root, OUTBOX_DIR_LINE):
+        return False
+    return _register_exclude_line(repo_root, OUTBOX_EXCLUDE_MARK, OUTBOX_DIR_LINE)
 
 
 def install(bundle, *, now: Optional[float] = None) -> InstallReceipt:
@@ -170,3 +224,12 @@ def collapse(repo_root: str, *, now: Optional[float] = None, force: bool = False
     if not force and not managed_block.is_stale(path, now=stamp):
         return False
     return managed_block.strip(path)
+
+
+def collapse_if_captured(repo_root: str, expected_captured: float) -> bool:
+    """`collapse(force=True)` 의 조건부 버전 — 지금 설치된 구간의 `captured`
+    가 호출자가 이미 판정에 쓴 `expected_captured` 와 여전히 같을 때만
+    지운다(managed_block.strip_if_captured 참고, #36 리뷰: check-then-act
+    경합을 좁힌다). Codex 의 `on_session_start_mark` 처럼, 판정과 실제
+    삭제 사이에 다른 프로세스가 새 구간을 써 놓았을 수 있는 자리에서 쓴다."""
+    return managed_block.strip_if_captured(path_for(repo_root), expected_captured)

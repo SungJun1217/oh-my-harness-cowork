@@ -684,6 +684,438 @@ class TestWriteSide(unittest.TestCase):
             self.assertEqual(len(channels), 1)
             self.assertTrue(callable(channels[0]))
 
+    def test_install_handoff_collapses_a_stale_agents_md_block(self):
+        """#36: Path A(훅) 가 성공하면 그 옆의 낡은 Path B 구간을 즉시
+        붕괴시킨다 — 안 그러면 다음 Codex 세션이 신선한 훅 핸드오프와 낡은
+        AGENTS.md 지시를 동시에 읽는다."""
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = os.path.join(base, "proj")
+            os.makedirs(root)
+            _repo.git(root, "init", "-q")
+            self._install_hook(home)
+            managed_block.splice(agents_md.path_for(root), "[omhc] stale handoff\n",
+                                 captured_at=1000.0)
+
+            bundle = A.HandoffBundle(body_md="[omhc] fresh\n", repo_root=root,
+                                     to_adapter_id="codex-cli")
+            CX.CodexCliAdapter(home=home).install_handoff(bundle)
+
+            self.assertIsNone(managed_block.installed_captured_at(agents_md.path_for(root)))
+
+    def test_install_handoff_never_touches_agents_md_shared_with_claude(self):
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = os.path.join(base, "proj")
+            os.makedirs(root)
+            _repo.git(root, "init", "-q")
+            self._install_hook(home)
+            agents_path = agents_md.path_for(root)
+            claude_path = os.path.join(root, "CLAUDE.md")
+            managed_block.splice(agents_path, "[omhc] stale handoff\n", captured_at=1000.0)
+            os.symlink(agents_path, claude_path)
+
+            bundle = A.HandoffBundle(body_md="[omhc] fresh\n", repo_root=root,
+                                     to_adapter_id="codex-cli")
+            CX.CodexCliAdapter(home=home).install_handoff(bundle)
+
+            self.assertIsNotNone(managed_block.installed_captured_at(agents_path))
+
+
+class TestOnSessionStartMark(unittest.TestCase):
+    """#36: 이 세션의 mark(startup) 가 "이미 읽힌" AGENTS.md 블록을 붕괴시켜
+    다음 Codex 세션이 못 읽게 한다. resume 은 리뷰 #2 에 따라 건드리지
+    않는다 — "훅보다 먼저 읽는다"는 순서를 startup 에서만 실측했다."""
+
+    def _bare_repo(self, base: str) -> str:
+        root = os.path.join(base, "proj")
+        os.makedirs(root)
+        _repo.git(root, "init", "-q")
+        return root
+
+    def test_block_captured_before_this_startup_mark_is_collapsed(self):
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            managed_block.splice(agents_md.path_for(root), "[omhc] old\n",
+                                 captured_at=1000.0)
+
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="startup", epoch=1000.0 + 3600)
+
+            self.assertIsNone(managed_block.installed_captured_at(agents_md.path_for(root)))
+
+    def test_block_captured_after_this_mark_epoch_is_kept(self):
+        """같은 SessionStart 안에서 brief(Path B) 가 병렬로 이 세션 몫의
+        블록을 이미 써 놓은 경우(경합) — mark 가 그걸 지우면 이 세션조차
+        핸드오프를 못 읽는다."""
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            managed_block.splice(agents_md.path_for(root), "[omhc] just written\n",
+                                 captured_at=2000.0)
+
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="startup", epoch=2000.0)
+
+            self.assertIsNotNone(managed_block.installed_captured_at(agents_md.path_for(root)))
+
+    def test_shared_with_claude_is_never_collapsed(self):
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            agents_path = agents_md.path_for(root)
+            claude_path = os.path.join(root, "CLAUDE.md")
+            managed_block.splice(agents_path, "[omhc] old\n", captured_at=1000.0)
+            os.symlink(agents_path, claude_path)
+
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="startup", epoch=1000.0 + 3600)
+
+            self.assertIsNotNone(managed_block.installed_captured_at(agents_path))
+
+    def test_compact_source_never_collapses(self):
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            managed_block.splice(agents_md.path_for(root), "[omhc] old\n",
+                                 captured_at=1000.0)
+
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="compact", epoch=1000.0 + 3600)
+
+            self.assertIsNotNone(managed_block.installed_captured_at(agents_md.path_for(root)))
+
+    def test_resume_source_never_collapses(self):
+        """리뷰 #2: resume 에서 Codex 가 AGENTS.md diff 를 언제 계산하는지는
+        아직 실측하지 못했다 — startup 만 붕괴시킨다."""
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            managed_block.splice(agents_md.path_for(root), "[omhc] old\n",
+                                 captured_at=1000.0)
+
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="resume", epoch=1000.0 + 3600)
+
+            self.assertIsNotNone(managed_block.installed_captured_at(agents_md.path_for(root)))
+
+    def test_a_splice_between_marks_judgment_and_the_strip_call_is_not_lost(self):
+        """리뷰 #1 재현: mark 가 "낡았다"고 판정한 직후, 다른 프로세스(같은
+        SessionStart 안에서 병렬로 도는 brief 등)가 새 핸드오프 Y 를 그
+        자리에 써 놓는다 — Y 는 살아남아야 한다."""
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            path = agents_md.path_for(root)
+            managed_block.splice(path, "[omhc] old\n", captured_at=1000.0)
+
+            real = managed_block.installed_captured_at
+            calls = {"n": 0}
+
+            def fake(p):
+                calls["n"] += 1
+                value = real(p)
+                if calls["n"] == 1:
+                    # mark 의 판정(첫 호출)이 끝나자마자, 다른 프로세스가
+                    # 이 세션 몫의 새 블록을 이미 써 놓았다고 흉내낸다.
+                    managed_block.splice(p, "[omhc] concurrent Y\n", captured_at=9999.0)
+                return value
+
+            with mock.patch.object(managed_block, "installed_captured_at", side_effect=fake):
+                CX.CodexCliAdapter(home=home).on_session_start_mark(
+                    root, source="startup", epoch=1000.0 + 3600)
+
+            self.assertEqual(managed_block.installed_captured_at(path), 9999.0)
+
+    def test_a_splice_between_strips_read_and_write_is_not_lost(self):
+        """리뷰 #1 재현: strip_if_captured 자신의 첫 읽기와 실제로 지우는
+        쓰기 사이(재확인 지점)에 새 핸드오프 Y 가 끼어들어도 살아남는다."""
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            path = agents_md.path_for(root)
+            managed_block.splice(path, "[omhc] old\n", captured_at=1000.0)
+
+            real = managed_block.installed_captured_at
+            calls = {"n": 0}
+
+            def fake(p):
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    # strip_if_captured 의 쓰기 직전 재확인(두 번째 호출) —
+                    # 그 값을 읽기 전에 다른 프로세스가 이미 새로 썼다고
+                    # 흉내낸다.
+                    managed_block.splice(p, "[omhc] concurrent Y\n", captured_at=9999.0)
+                return real(p)
+
+            with mock.patch.object(managed_block, "installed_captured_at", side_effect=fake):
+                CX.CodexCliAdapter(home=home).on_session_start_mark(
+                    root, source="startup", epoch=1000.0 + 3600)
+
+            self.assertEqual(managed_block.installed_captured_at(path), 9999.0)
+            self.assertEqual(calls["n"], 2)
+
+    def test_no_block_is_a_noop_and_never_raises(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="startup", epoch=1000.0)
+
+    def test_an_internal_failure_is_swallowed(self):
+        """훅 경로에서 불리므로(invariant 2) 무엇이 터져도 던지지 않는다."""
+        from omhc import managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home, \
+             mock.patch.object(managed_block, "installed_captured_at",
+                               side_effect=RuntimeError("boom")):
+            root = self._bare_repo(base)
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="startup", epoch=1000.0)
+
+
+class TestInlineTomlHooks(unittest.TestCase):
+    """#32: config.toml 의 인라인 `[[hooks.SessionStart]]` 도 hooks.json 과
+    같은 자격으로 훅 설치로 친다."""
+
+    def _install_toml(self, home: str) -> None:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "config.toml"), "w", encoding="utf-8") as fh:
+            fh.write(
+                '[[hooks.SessionStart]]\n'
+                '\n'
+                '[[hooks.SessionStart.hooks]]\n'
+                'type = "command"\n'
+                'command = "omhc brief --harness codex-cli"\n'
+            )
+
+    def _install_json(self, home: str) -> None:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "hooks.json"), "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command",
+                            "command": "omhc brief --harness codex-cli"}]}]}}, fh)
+
+    def test_inline_only_is_installed(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_toml(home)
+            self.assertTrue(CX.CodexCliAdapter(home=home).hook_is_installed())
+
+    def test_inline_only_install_handoff_succeeds(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_toml(home)
+            receipt = CX.CodexCliAdapter(home=home).install_handoff(
+                A.HandoffBundle(body_md="[omhc] hi\n", repo_root=REPO,
+                               to_adapter_id="codex-cli"))
+            self.assertTrue(receipt.paths_written)
+
+    def test_neither_is_not_installed(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.assertFalse(CX.CodexCliAdapter(home=home).hook_is_installed())
+
+    def _make_bin(self, home: str) -> None:
+        bin_path = os.path.join(home, ".local", "bin", "omhc")
+        os.makedirs(os.path.dirname(bin_path), exist_ok=True)
+        with open(bin_path, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(bin_path, 0o755)
+
+    def _shipped_hooks(self, home: str):
+        # hooks/codex-hooks.json 이 배포하는 정확한 모양(mark + brief --wire
+        # claude) — hooks_status()/inspect 는 이 전체와 비교하지, has_runnable_call
+        # 처럼 brief 하나만 보지 않는다.
+        bin_path = os.path.join(home, ".local", "bin", "omhc")
+        return [
+            {"type": "command", "command": "{} mark --harness codex-cli".format(bin_path)},
+            {"type": "command",
+             "command": "{} brief --harness codex-cli --wire claude".format(bin_path)},
+        ]
+
+    def _install_full_json(self, home: str) -> None:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "hooks.json"), "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": [
+                {"hooks": self._shipped_hooks(home)}]}}, fh)
+
+    def _install_full_toml(self, home: str) -> None:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        bin_path = os.path.join(home, ".local", "bin", "omhc")
+        with open(os.path.join(directory, "config.toml"), "a", encoding="utf-8") as fh:
+            fh.write(
+                '[[hooks.SessionStart]]\n'
+                '\n'
+                '[[hooks.SessionStart.hooks]]\n'
+                'type = "command"\n'
+                'command = "{bin} mark --harness codex-cli"\n'
+                '\n'
+                '[[hooks.SessionStart.hooks]]\n'
+                'type = "command"\n'
+                'command = "{bin} brief --harness codex-cli --wire claude"\n'
+                .format(bin=bin_path))
+
+    def test_hooks_status_pass_via_hooks_json_only(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._make_bin(home)
+            self._install_full_json(home)
+            ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
+            self.assertTrue(ok, detail)
+            self.assertIn("hooks.json", detail)
+
+    def test_hooks_status_pass_via_inline_only(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._make_bin(home)
+            self._install_full_toml(home)
+            ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
+            self.assertTrue(ok, detail)
+            self.assertIn("config.toml", detail)
+
+    def test_hooks_status_warns_when_both_present(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._make_bin(home)
+            self._install_full_json(home)
+            self._install_full_toml(home)
+            ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
+            self.assertIsNone(ok)
+            self.assertIn("both", detail)
+
+    def test_hooks_status_fail_when_neither_present(self):
+        with tempfile.TemporaryDirectory() as home:
+            ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
+            self.assertFalse(ok)
+
+    def test_garbage_config_toml_fails_open(self):
+        with tempfile.TemporaryDirectory() as home:
+            directory = os.path.join(home, ".codex")
+            os.makedirs(directory, exist_ok=True)
+            with open(os.path.join(directory, "config.toml"), "w", encoding="utf-8") as fh:
+                fh.write("not { valid toml at all !!!\n[[[broken\n")
+            self.assertFalse(CX.CodexCliAdapter(home=home).hook_is_installed())
+
+    def _write_projects_trust(self, home: str, repo: str, trust_level: str) -> None:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "config.toml"), "a", encoding="utf-8") as fh:
+            fh.write('\n[projects."{}"]\ntrust_level = "{}"\n'.format(
+                os.path.realpath(repo), trust_level))
+
+    def test_project_trust_body_end_is_not_fooled_by_a_multiline_array_bracket(self):
+        # 리뷰 #3 재현: 예전엔 project 본문의 끝을 `^[ \t]*\[` 로 다시 찾았는데,
+        # 이건 #31 이 이미 걸러낸 "여러 줄 배열 값의 원소도 줄 맨 앞에 `[`
+        # 로 올 수 있다" 문제를 그대로 반복한다 — 공유 스캐너를 쓰면
+        # trust_level 이 (가짜 헤더로 오인된 배열 원소 앞이 아니라) 진짜
+        # 다음 헤더 전까지 온전히 본문으로 잡혀야 한다.
+        with tempfile.TemporaryDirectory() as home, \
+                tempfile.TemporaryDirectory() as repo:
+            directory = os.path.join(home, ".codex")
+            os.makedirs(directory, exist_ok=True)
+            with open(os.path.join(directory, "config.toml"), "w", encoding="utf-8") as fh:
+                fh.write(
+                    '[projects."{}"]\n'
+                    'ignored = [\n'
+                    '  "a",\n'
+                    ']\n'
+                    'trust_level = "trusted"\n'.format(os.path.realpath(repo)))
+            self.assertEqual(
+                CX.CodexCliAdapter(home=home)._project_trust_level(repo), "trusted")
+
+    def test_project_level_hooks_json_counts_when_trusted(self):
+        with tempfile.TemporaryDirectory() as home, \
+                tempfile.TemporaryDirectory() as repo:
+            self._write_projects_trust(home, repo, "trusted")
+            project_dir = os.path.join(repo, ".codex")
+            os.makedirs(project_dir, exist_ok=True)
+            with open(os.path.join(project_dir, "hooks.json"), "w", encoding="utf-8") as fh:
+                json.dump({"hooks": {"SessionStart": [
+                    {"hooks": [{"type": "command",
+                                "command": "omhc brief --harness codex-cli"}]}]}}, fh)
+            self.assertTrue(CX.CodexCliAdapter(home=home).hook_is_installed(repo))
+
+    def test_project_level_hooks_json_ignored_when_untrusted(self):
+        with tempfile.TemporaryDirectory() as home, \
+                tempfile.TemporaryDirectory() as repo:
+            self._write_projects_trust(home, repo, "untrusted")
+            project_dir = os.path.join(repo, ".codex")
+            os.makedirs(project_dir, exist_ok=True)
+            with open(os.path.join(project_dir, "hooks.json"), "w", encoding="utf-8") as fh:
+                json.dump({"hooks": {"SessionStart": [
+                    {"hooks": [{"type": "command",
+                                "command": "omhc brief --harness codex-cli"}]}]}}, fh)
+            self.assertFalse(CX.CodexCliAdapter(home=home).hook_is_installed(repo))
+
+    def test_project_level_ignored_when_trust_unknown(self):
+        with tempfile.TemporaryDirectory() as home, \
+                tempfile.TemporaryDirectory() as repo:
+            # ~/.codex/config.toml 에 이 레포에 대한 [projects."..."] 항목이 아예 없다
+            project_dir = os.path.join(repo, ".codex")
+            os.makedirs(project_dir, exist_ok=True)
+            with open(os.path.join(project_dir, "hooks.json"), "w", encoding="utf-8") as fh:
+                json.dump({"hooks": {"SessionStart": [
+                    {"hooks": [{"type": "command",
+                                "command": "omhc brief --harness codex-cli"}]}]}}, fh)
+            self.assertFalse(CX.CodexCliAdapter(home=home).hook_is_installed(repo))
+
+    def test_hooks_install_skips_duplicate_when_inline_already_installed(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._make_bin(home)
+            self._install_full_toml(home)
+            out = io.StringIO()
+            code = cli.main(["hooks", "install", "--harness", "codex-cli"], home=home, out=out)
+            self.assertEqual(code, 0)
+            self.assertIn("already up to date", out.getvalue())
+            self.assertFalse(os.path.exists(os.path.join(home, ".codex", "hooks.json")))
+
+    def test_hooks_status_reports_differs_not_not_found_for_a_partial_inline_install(self):
+        # 리뷰 #1 재현: brief 는 있지만 mark 도 --wire claude 도 없는 인라인
+        # 설치 — "존재하지만 배포 조각과 다르다" 이지 "없다" 가 아니다.
+        with tempfile.TemporaryDirectory() as home:
+            self._install_toml(home)  # brief 만, mark 없음, --wire claude 없음
+            ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
+            self.assertFalse(ok)
+            self.assertNotIn("not found", detail)
+            self.assertIn("differs from shipped fragment", detail)
+
+    def test_hooks_install_does_not_duplicate_a_partial_inline_install(self):
+        # 리뷰 #1 재현: 부분 인라인 설치 위에 `omhc hooks install` 이 hooks.json
+        # 을 겹쳐 쓰면 Codex 가 두 층을 다 읽고 경고하며, 인라인 쪽은 여전히
+        # 매 세션 실패한다 — 대신 hooks.json 을 쓰지 않고 실패로 보고해야
+        # 한다.
+        with tempfile.TemporaryDirectory() as home:
+            self._make_bin(home)
+            self._install_toml(home)  # brief 만 있는 부분 인라인 설치
+            out = io.StringIO()
+            code = cli.main(["hooks", "install", "--harness", "codex-cli"], home=home, out=out)
+            self.assertNotEqual(code, 0)
+            self.assertIn("differs", out.getvalue())
+            self.assertFalse(os.path.exists(os.path.join(home, ".codex", "hooks.json")))
+            # 재확인해도 여전히 "설치 안 됨" 이 아니라 "다르다" 로 보고돼야 한다.
+            ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
+            self.assertFalse(ok)
+            self.assertNotIn("not found", detail)
+
 
 class TestRegistryV1(unittest.TestCase):
     def test_both_v1_adapters_are_registered(self):
@@ -788,6 +1220,21 @@ class TestHealth(unittest.TestCase):
         os.utime(path, (self.INSTALL_EPOCH, self.INSTALL_EPOCH))
         return path
 
+    def _install_toml_hook(self, home: str) -> str:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "config.toml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(
+                '[[hooks.SessionStart]]\n'
+                '\n'
+                '[[hooks.SessionStart.hooks]]\n'
+                'type = "command"\n'
+                'command = "omhc brief --harness codex-cli"\n'
+            )
+        os.utime(path, (self.INSTALL_EPOCH, self.INSTALL_EPOCH))
+        return path
+
     def _rollout(self, home: str, session_id: str, iso_ts: str, *,
                  extra_meta=None, raw: bytes = None) -> str:
         stamp = time.gmtime()
@@ -830,7 +1277,7 @@ class TestHealth(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("1 consecutive Codex session", detail)
             self.assertIn("newest: codex_cli_rs", detail)
-            self.assertIn("no trust entry", detail)
+            self.assertIn("no hooks.state trust hash", detail)
 
     def test_pass_when_the_ledger_has_a_matching_codex_row(self):
         with tempfile.TemporaryDirectory() as home:
@@ -840,6 +1287,36 @@ class TestHealth(unittest.TestCase):
                 REPO, [{"harness": "codex-cli", "session": "s1", "event": "start"}])
             self.assertTrue(rows[0][1])
             self.assertIn("ran for the latest session", rows[0][2])
+
+    def test_inline_only_install_is_judged_from_config_toml_mtime(self):
+        # #32 리뷰 1 재현: 예전엔 install_epoch 을 언제나 hooks.json 의 mtime
+        # 으로 삼아서, 인라인 전용 설치(hooks.json 자체가 없다)에서 이 stat
+        # 이 ENOENT 로 죽어 이 행이 매번 `----(unknown)` 으로만 남았다 —
+        # 신뢰 안 된 인라인 훅이 조용히 스킵되는 걸 잡아야 할 행이 제 역할을
+        # 못 했다. 이제 실제로 설치된 파일(config.toml)의 mtime 을 쓴다.
+        with tempfile.TemporaryDirectory() as home:
+            self._install_toml_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z")
+            rows = CX.CodexCliAdapter(home=home).health(
+                REPO, [{"harness": "codex-cli", "session": "s1", "event": "start"}])
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(rows[0][1], rows[0][2])
+            self.assertIn("ran for the latest session", rows[0][2])
+
+    def test_inline_only_install_fails_when_a_later_session_has_no_hook_row(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_toml_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z",
+                          extra_meta={"originator": "codex_cli_rs"})
+            rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertEqual(len(rows), 1)
+            label, ok, detail = rows[0]
+            self.assertEqual(label, "codex hook")
+            self.assertFalse(ok)
+            self.assertIn("1 consecutive Codex session", detail)
+            # 인라인 설치는 hooks.json 의 hooks.state 신뢰 해시와 다른 메커니즘
+            # 이다 — 그 사실이 힌트로만 남아야지 확정 진단으로 말하면 안 된다.
+            self.assertIn("hint, not a diagnosis", detail)
 
     def test_pass_when_only_an_older_pre_trust_session_is_missing(self):
         """리뷰 결함: 신뢰는 config.toml 을 바꾸지 hooks.json 을 바꾸지 않는다 —
@@ -947,8 +1424,9 @@ class TestHealth(unittest.TestCase):
             self._rollout(home, "s1", "2023-11-15T00:00:00.000Z",
                           extra_meta={"cwd": child})
             rows = CX.CodexCliAdapter(home=home).health(parent, [])
-            self.assertIsNone(rows[0][1])
-            self.assertIn("not judged yet", rows[0][2])
+            label, ok, detail = next(r for r in rows if r[0] == "codex hook")
+            self.assertIsNone(ok)
+            self.assertIn("not judged yet", detail)
 
     def test_garbage_rollout_and_config_do_not_raise(self):
         with tempfile.TemporaryDirectory() as home:
@@ -987,7 +1465,7 @@ class TestHealth(unittest.TestCase):
                          .format(hooks_path))
             rows = CX.CodexCliAdapter(home=home).health(REPO, [])
             self.assertFalse(rows[0][1])
-            self.assertNotIn("no trust entry", rows[0][2])
+            self.assertNotIn("no hooks.state trust hash", rows[0][2])
 
 
 class TestStatusIntegration(unittest.TestCase):
@@ -1048,8 +1526,8 @@ class TestStatusIntegration(unittest.TestCase):
         code, text = self.run_status(["--json"])
         payload = json.loads(text)
         self.assertIn("health", payload)
-        self.assertEqual(payload["health"][0]["label"], "codex hook")
-        self.assertFalse(payload["health"][0]["ok"])
+        row = next(h for h in payload["health"] if h["label"] == "codex hook")
+        self.assertFalse(row["ok"])
 
 
 class TestHealthMatchesAcrossNestedGitRoots(unittest.TestCase):
@@ -1409,6 +1887,230 @@ class TestRootMarkerHealth(unittest.TestCase):
             self.assertEqual(set(payload), set(cli._status_json_empty()))
             self.assertTrue(any(h["label"] == "codex root markers"
                                 for h in payload["health"]))
+
+
+class TestAgentsMdBudget(unittest.TestCase):
+    """#33: Codex 는 AGENTS.md 를 `project_doc_max_bytes` 만큼만 머리부터
+    읽는다 — 예산을 넘겨 설치하려는 Path B 는 claim 하지 말고 outbox 로
+    떨어뜨려야 하고, status 는 이미 넘겨 설치된 구간을 알려야 한다."""
+
+    def _write_config(self, home: str, text: str) -> None:
+        os.makedirs(os.path.join(home, ".codex"), exist_ok=True)
+        with open(os.path.join(home, ".codex", "config.toml"), "w",
+                 encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _repo(self, base: str) -> str:
+        root = os.path.join(base, "proj")
+        os.makedirs(root)
+        _repo.git(root, "init", "-q")
+        return root
+
+    def test_default_limit_when_config_is_missing(self):
+        with tempfile.TemporaryDirectory() as home:
+            adapter = CX.CodexCliAdapter(home=home)
+            self.assertEqual(adapter._project_doc_max_bytes(adapter.toml_config_path()),
+                             CX.DEFAULT_PROJECT_DOC_MAX_BYTES)
+
+    def test_reads_the_configured_limit(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._write_config(home, "project_doc_max_bytes = 4096\n")
+            adapter = CX.CodexCliAdapter(home=home)
+            self.assertEqual(adapter._project_doc_max_bytes(adapter.toml_config_path()), 4096)
+
+    def test_key_inside_a_table_is_not_top_level(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._write_config(
+                home, '[projects."/x"]\nproject_doc_max_bytes = 4096\n')
+            adapter = CX.CodexCliAdapter(home=home)
+            self.assertEqual(adapter._project_doc_max_bytes(adapter.toml_config_path()),
+                             CX.DEFAULT_PROJECT_DOC_MAX_BYTES)
+
+    def test_install_declines_and_falls_to_outbox_when_over_budget(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            self._write_config(home, "project_doc_max_bytes = 10\n")
+            bundle = A.HandoffBundle(body_md="[omhc] handoff\nGOAL  x\n",
+                                     repo_root=root, to_adapter_id="codex-cli")
+            adapter = CX.CodexCliAdapter(home=home)
+            with self.assertRaises(A.NoInjectionChannel):
+                adapter._install_agents_md(bundle)
+            self.assertFalse(os.path.exists(os.path.join(root, "AGENTS.md")))
+            log_path = os.path.join(home, ".omhc", "guard.log")
+            with open(log_path, encoding="utf-8") as fh:
+                self.assertIn("project_doc_max_bytes", fh.read())
+
+    def test_deliver_falls_all_the_way_to_the_outbox_when_over_budget(self):
+        """라우터(deliver)까지 통째로 — install_handoff 도 없고(훅 미설치) Path
+        B 도 예산 초과로 거절되면 보편 바닥(outbox)에 떨어져야 한다."""
+        from omhc import deliver
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            self._write_config(home, "project_doc_max_bytes = 10\n")
+            bundle = A.HandoffBundle(body_md="[omhc] handoff\nGOAL  x\n",
+                                     repo_root=root, to_adapter_id="codex-cli")
+            receipt = deliver.deliver(bundle, home=home, now=1000.0)
+            self.assertEqual(receipt.channel, "file-drop")
+            self.assertFalse(os.path.exists(os.path.join(root, "AGENTS.md")))
+
+    def test_install_succeeds_under_budget(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            bundle = A.HandoffBundle(body_md="[omhc] handoff\nGOAL  x\n",
+                                     repo_root=root, to_adapter_id="codex-cli")
+            adapter = CX.CodexCliAdapter(home=home)
+            receipt = adapter._install_agents_md(bundle)
+            self.assertEqual(receipt.channel, "agents-md")
+            self.assertTrue(os.path.exists(os.path.join(root, "AGENTS.md")))
+
+    def _row(self, rows):
+        return next((r for r in rows if r[0] == "codex agents.md budget"), None)
+
+    def test_status_row_is_uninformative_without_an_installed_block(self):
+        """AGENTS.md 의 status 관례: 판정 가능한 진단은 판정할 것이 없어도
+        `----` 로 행을 낸다(SKIP 이 아니다) — 아예 무의미한 레포(공유됨)만
+        행을 생략한다(아래 test_status_row_is_absent_when_shared_with_claude)."""
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertIsNone(ok)
+            self.assertIn("no omhc block", detail)
+
+    def test_status_row_is_absent_when_shared_with_claude(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            agents = os.path.join(root, "AGENTS.md")
+            claude = os.path.join(root, "CLAUDE.md")
+            with open(agents, "w", encoding="utf-8") as fh:
+                fh.write("neutral instructions")
+            os.symlink(agents, claude)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            self.assertIsNone(self._row(rows))
+
+    def test_status_row_fails_when_the_installed_block_is_over_budget(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            self._write_config(home, "project_doc_max_bytes = 10\n")
+            from omhc import agents_md
+
+            managed_block_path = agents_md.path_for(root)
+            from omhc import managed_block
+
+            managed_block.splice(managed_block_path, "[omhc] handoff\n",
+                                 captured_at=1000.0)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertFalse(ok)
+            self.assertIn("byte", detail)
+            self.assertIn("10", detail)
+
+    def test_status_row_passes_when_the_installed_block_is_under_budget(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            from omhc import agents_md, managed_block
+
+            managed_block.splice(agents_md.path_for(root), "[omhc] handoff\n",
+                                 captured_at=1000.0)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertTrue(ok)
+
+    def test_declining_over_budget_also_clears_a_stale_installed_block(self):
+        """리뷰 결함: 예산 초과로 거절만 하고 낡은 구간을 그대로 두면, Codex 는
+        outbox 로 떨어진 새 핸드오프 대신 그 낡은 구간을 계속 읽는다."""
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            agents = agents_md.path_for(root)
+            with open(agents, "w", encoding="utf-8") as fh:
+                fh.write("# user content\n")
+            managed_block.splice(agents, "[omhc] stale handoff\n", captured_at=1000.0)
+            self._write_config(home, "project_doc_max_bytes = 10\n")
+
+            bundle = A.HandoffBundle(body_md="[omhc] fresh handoff\nGOAL  x\n",
+                                     repo_root=root, to_adapter_id="codex-cli")
+            adapter = CX.CodexCliAdapter(home=home)
+            with self.assertRaises(A.NoInjectionChannel):
+                adapter._install_agents_md(bundle)
+
+            self.assertIsNone(managed_block.installed_captured_at(agents))
+            with open(agents, encoding="utf-8") as fh:
+                text = fh.read()
+            self.assertIn("# user content", text)
+            self.assertNotIn("stale handoff", text)
+
+    def test_declining_over_budget_never_touches_agents_md_shared_with_claude(self):
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            agents = agents_md.path_for(root)
+            claude = os.path.join(root, "CLAUDE.md")
+            managed_block.splice(agents, "[omhc] stale handoff\n", captured_at=1000.0)
+            os.symlink(agents, claude)
+            self._write_config(home, "project_doc_max_bytes = 10\n")
+
+            bundle = A.HandoffBundle(body_md="[omhc] fresh handoff\nGOAL  x\n",
+                                     repo_root=root, to_adapter_id="codex-cli")
+            adapter = CX.CodexCliAdapter(home=home)
+            with self.assertRaises(A.NoInjectionChannel):
+                adapter._install_agents_md(bundle)
+
+            # 예산 초과 거절이 shared_with_claude 가드를 우회해 공유 파일을
+            # 건드리면 안 된다 — 낡은 구간이 그대로 남아 있어야 한다.
+            self.assertIsNotNone(managed_block.installed_captured_at(agents))
+
+    def test_zero_limit_is_read_as_is_not_folded_to_default(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._write_config(home, "project_doc_max_bytes = 0\n")
+            adapter = CX.CodexCliAdapter(home=home)
+            self.assertEqual(adapter._project_doc_max_bytes(adapter.toml_config_path()), 0)
+
+    def test_negative_limit_falls_back_to_the_default(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._write_config(home, "project_doc_max_bytes = -1\n")
+            adapter = CX.CodexCliAdapter(home=home)
+            self.assertEqual(adapter._project_doc_max_bytes(adapter.toml_config_path()),
+                             CX.DEFAULT_PROJECT_DOC_MAX_BYTES)
+
+    def test_install_declines_when_the_limit_is_zero(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            self._write_config(home, "project_doc_max_bytes = 0\n")
+            bundle = A.HandoffBundle(body_md="[omhc] handoff\nGOAL  x\n",
+                                     repo_root=root, to_adapter_id="codex-cli")
+            adapter = CX.CodexCliAdapter(home=home)
+            with self.assertRaises(A.NoInjectionChannel) as ctx:
+                adapter._install_agents_md(bundle)
+            self.assertIn("project_doc_max_bytes=0", str(ctx.exception))
+            self.assertFalse(os.path.exists(os.path.join(root, "AGENTS.md")))
+
+    def test_status_row_fails_when_the_limit_is_zero(self):
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            self._write_config(home, "project_doc_max_bytes = 0\n")
+            managed_block.splice(agents_md.path_for(root), "[omhc] handoff\n",
+                                 captured_at=1000.0)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertFalse(ok)
+            self.assertIn("project_doc_max_bytes=0", detail)
 
 
 class TestHealthLedgerWindow(unittest.TestCase):
