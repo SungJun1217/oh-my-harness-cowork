@@ -157,6 +157,18 @@ git 이 아닌 프로젝트라면 최상위 디렉터리에서 `touch .omhc-root
 해두세요 — `.git` 도 `.omhc-root` 도 없으면 omhc 를 돌린 모든 서브디렉터리가
 각각 별개 프로젝트가 됩니다.
 
+> [!IMPORTANT]
+> 실측(codex-cli 0.155.1): `.omhc-root` 프로젝트에서 서브폴더에 들어가 시작한
+> Codex 는 기본 `project_root_markers = [".git"]` 로는 조상 `AGENTS.md` 를
+> 읽지 **않습니다** — Path B(AGENTS.md managed block)가 조용히 무력해집니다.
+> `~/.codex/config.toml` 의 이 설정에 `.omhc-root` 를 더하세요(`.git` 은
+> 그대로 두고):
+> ```toml
+> project_root_markers = [".git", ".omhc-root"]
+> ```
+> `omhc status`의 `codex root markers` 행(아래 참고)이 이걸 대신 확인해
+> 줍니다.
+
 최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
 심링크합니다. pip·pipx 를 쓰지 않습니다(의존성이 0 이라 소스 트리가 곧
 설치물입니다). 다시 실행하면 업데이트(`~/.local/share/omhc` 아래 구버전은
@@ -277,6 +289,18 @@ fd 에 대한 단일 write(2) 는 크기와 무관하게 POSIX 상 원자적이�
 `hooks.json`이 바뀐 뒤 이 레포에 대화형 Codex 세션이 없을 때(날짜 표시), 헤드리스
 `codex exec` 세션만 있을 때(판정에 세지 않습니다 — 여기서 대화형 `codex` 를 한 번
 여십시오), 알 수 없는 오류일 때.
+
+레포 루트가 `.omhc-root` 로 정해진 경우(`.git` 이 아니고, 조상 디렉터리에도
+`.git` 이 전혀 없는 경우 — 있다면 Codex 기본값이 거기서부터 이미 내려오며
+읽습니다), `codex root markers` 행이 `~/.codex/config.toml`의
+`project_root_markers` 에 `.omhc-root` 가 있는지 봅니다(위 박스 참고). 이
+행은 절대 게이팅하지 않습니다 — 이 설정은 Path B(AGENTS.md 폴백)에만
+영향을 주므로, 마커가 있으면 PASS, 없으면 넣을 정확한 줄과 함께 `----`
+입니다 — 그리고 omhc Codex 훅이 설치돼 있지 않으면 "지금 Path B 가 Codex 로
+가는 유일한 채널"이라는 사실을 명시적으로 덧붙입니다. 설정 파일이 없거나,
+못 읽거나, 파싱할 수 없을 때(omhc 가 직접 고치는 일은 없습니다), 그리고
+키가 `[section]` 안에서만 보일 때(TOML 테이블은 키의 스코프를 바꾼다 —
+최상위에 있어야 합니다)도 모두 `----` 입니다.
 
 감지된 하네스마다 `<adapter-id> hooks` 행(예: `claude-code hooks`,
 `codex-cli hooks`)도 붙습니다 — 하네스 디렉터리가 존재한다는 것만이 아니라

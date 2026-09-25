@@ -88,6 +88,71 @@ _BOOKKEEPING_TOOLS = frozenset({
 _PATCH_PATH_RE = re.compile(
     r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", re.MULTILINE)
 
+# `~/.codex/config.toml` 의 `project_root_markers = [...]` 를 뽑는다(#31). 키
+# 이름은 따옴표로 감싸일 수도 있다(TOML bare/quoted key 둘 다 유효). 여러 줄
+# 배열까지 잡도록 비탐욕 DOTALL 로 첫 `]` 까지 본다.
+_ROOT_MARKERS_KEY_RE = re.compile(
+    r'(?m)^[ \t]*[\'"]?project_root_markers[\'"]?[ \t]*=[ \t]*(\[.*?\])', re.DOTALL)
+# 리뷰 #2: `[projects."..."]` 같은 테이블 헤더는 그 아래 키의 스코프를 바꾼다
+# (`[table]\nproject_root_markers = …` 는 최상위 키가 아니다) — 첫 헤더 앞까지만
+# 최상위로 본다.
+_STRING_OR_BRACKET_RE = re.compile(
+    r'"""|\'\'\'|"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\'|#[^\n]*|[\[\]]')
+
+
+def _first_table_header(text: str) -> int:
+    """첫 `[section]`/`[[section]]` 머리가 시작하는 위치, 없으면 -1.
+
+    줄 맨 앞의 `[` 만으로는 안 된다(리뷰): 여러 줄 배열 값 안의 `["a", "b"],`
+    원소나 여러 줄 문자열 안의 `[x]` 도 줄 맨 앞에 온다. `["x"]` 는 TOML 에서
+    인용 키 머리일 수도 배열 원소일 수도 있어 정규식 하나로 못 가른다. 그래서
+    문자열·주석을 건너뛰며 값 배열의 괄호 깊이를 추적하고, 깊이 0 인 줄의 첫
+    `[` 만 머리로 본다."""
+    depth = 0
+    in_multi = None
+    line_start = True
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_multi:
+            if in_multi == '"""' and ch == "\\":
+                i += 2  # basic 문자열의 이스케이프(\""" 포함)는 끝이 아니다
+                continue
+            if text.startswith(in_multi, i):
+                i += 3
+                in_multi = None
+            else:
+                i += 1
+            continue
+        if ch == "\n":
+            line_start = True
+            i += 1
+            continue
+        if ch in " \t\r":
+            i += 1
+            continue
+        if line_start and depth == 0 and ch == "[":
+            return i
+        line_start = False
+        m = _STRING_OR_BRACKET_RE.match(text, i)
+        if not m:
+            i += 1
+            continue
+        tok = m.group(0)
+        if tok in ('"""', "\'\'\'"):
+            in_multi = tok
+        elif tok == "[":
+            depth += 1
+        elif tok == "]":
+            depth = max(0, depth - 1)
+        i = m.end()
+    return -1
+
+
+# TOML basic("...", 이스케이프 있음)과 literal('...', 이스케이프 없음) 문자열
+# 리터럴을 모두 인식한다.
+_TOML_STRING_RE = re.compile(r'"(?P<d>(?:[^"\\]|\\.)*)"|\'(?P<s>[^\']*)\'')
+
 # exec_command/write_stdin 출력의 고정 헤더 줄. JSON 이 아니라 평문이다.
 _EXIT_CODE_RE = re.compile(
     r"^(?:Process exited with code|Exit code:) (\d+)$", re.MULTILINE)
@@ -894,7 +959,136 @@ class CodexCliAdapter:
             return True
         return locate.owning_repo_key(cwd) == locate.owning_repo_key(repo_root)
 
+    def _codex_root_markers(self, config_path: str):
+        """`~/.codex/config.toml` 의 `project_root_markers` 값을 읽는다.
+
+        3.9 엔 tomllib 이 없다 — TOML 전체를 파싱하는 대신 이 키 하나만 정규식으로
+        뽑는다(한 줄/여러 줄 배열, bare/quoted 키, basic/literal 문자열 모두). 반환은
+        (state, markers-또는-에러문자열):
+          "missing"  — 파일이 아예 없다(기본값 [".git"] 이 적용된다)
+          "unreadable" — 있는데 못 읽는다(권한, 디렉터리 등) — 두 번째 자리에 사유
+          "absent"   — 최상위(첫 `[section]` 이전)에 이 키가 없다(마찬가지로 기본값)
+          "table"    — 이 키가 `[section]` 아래에서만 보인다(TOML 은 테이블이
+                       스코프를 바꾼다 — 최상위 키가 아니다)
+          "unparseable" — 배열 안에 문자열이 아닌 것(정수, 중첩 표현 …)이 있다
+          "ok"       — 두 번째 자리에 값 tuple
+        `utf-8-sig` 로 여는 것은 BOM 이 있는 파일에서 정규식이 줄 시작(`^`)을 못
+        맞춰 키가 없는 것처럼 보이는 걸 막는다.
+        """
+        try:
+            with open(config_path, encoding="utf-8-sig", errors="replace") as fh:
+                text = fh.read()
+        except FileNotFoundError:
+            return "missing", None
+        except OSError as exc:
+            return "unreadable", str(exc)
+        header = _first_table_header(text)
+        top_level = text[:header] if header >= 0 else text
+        m = _ROOT_MARKERS_KEY_RE.search(top_level)
+        if not m:
+            if header >= 0 and _ROOT_MARKERS_KEY_RE.search(text[header:]):
+                return "table", None
+            return "absent", None
+        array_text = m.group(1)
+        # 값 안에 두 번째 `[` 가 있으면 중첩 배열이다 — Codex 가 기대하는 문자열
+        # 배열이 아니므로 확신 있게 못 읽은 것으로 본다(리뷰).
+        if _TOML_STRING_RE.sub("", array_text).count("[") > 1:
+            return "unparseable", None
+        # findall 은 매칭 안 된 그룹을 빈 문자열로 채운다(None 아님) — 두 문자열
+        # 종류를 구분하려면 finditer 로 그룹 참여 여부(None)를 직접 봐야 한다.
+        values = [sm.group("d") if sm.group("d") is not None else sm.group("s")
+                  for sm in _TOML_STRING_RE.finditer(array_text)]
+        # 문자열 리터럴을 전부 지우고 남는 게 있으면(정수, 중첩 배열, 주석 …)
+        # 이 배열을 확신 있게 못 읽은 것이다.
+        leftover = _TOML_STRING_RE.sub("", array_text)
+        leftover = re.sub(r"[\[\],\s]", "", leftover)
+        if leftover:
+            return "unparseable", None
+        return "ok", tuple(v.replace('\\"', '"') for v in values)
+
+    def _ancestor_has_git(self, repo_root: str, git_marker: str) -> bool:
+        """리뷰 #4: `repo_root` 위 조상 중 `.git` 을 가진 것이 있으면, Codex
+        기본값(`[".git"]`)으로도 그 조상을 루트로 잡아 AGENTS.md 를 cwd 까지
+        내려오며 읽는다(레포 자신의 AGENTS.md 도 그 경로 위에 있다) — 이땐
+        `.omhc-root` 를 더할 필요가 없다."""
+        real = os.path.realpath(repo_root).rstrip("/") or "/"
+        current = os.path.dirname(real)
+        while True:
+            if os.path.exists(os.path.join(current, git_marker)):
+                return True
+            parent = os.path.dirname(current)
+            if parent == current:
+                return False
+            current = parent
+
+    def _root_marker_health(self, repo_root: Optional[str]):
+        """#31: `.omhc-root` 로만 정해진(= `.git` 없는, 위에도 `.git` 조상이 없는)
+        프로젝트에서, 서브폴더에서 시작한 Codex 가 기본
+        `project_root_markers = [".git"]` 로는 조상 AGENTS.md 를 읽지 않는다
+        (실측, codex-cli 0.155.1) — Path B(AGENTS.md managed block)가 조용히
+        무력해진다. `~/.codex/config.toml` 에 `.omhc-root` 를 더해야 통한다.
+
+        게이팅하지 않는다(리뷰 결함): Path B 는 `install_handoff` 가 실패할
+        때만 열리는 폴백이라, omhc 훅이 설치·신뢰돼 있으면(보통의 경우) 이
+        설정은 아무 효과가 없는데도 FAIL 로 게이팅하면 정상 설치를 매번
+        FAIL 로 만든다. 대신 PASS 아니면 언제나 `----`(ok=None)이고, 훅이
+        설치돼 있지 않을 때만 "지금 유일한 채널"이라고 명시한다.
+        """
+        if repo_root is None:
+            return None
+        git_marker, omhc_marker = locate.ROOT_MARKERS
+        if os.path.exists(os.path.join(repo_root, git_marker)):
+            return None
+        if not os.path.exists(os.path.join(repo_root, omhc_marker)):
+            return None
+        if self._ancestor_has_git(repo_root, git_marker):
+            return None
+        config_path = os.path.join(self.home, ".codex", "config.toml")
+        hint = ('add to {}: project_root_markers = ["{}", "{}"] (keep "{}")'
+                .format(config_path, git_marker, omhc_marker, git_marker))
+        if self.hook_is_installed():
+            channel_note = ("only matters if the omhc Codex hook stops being "
+                            "installed/trusted — Path A currently delivers")
+        else:
+            channel_note = ("the omhc Codex hook isn't installed, so this AGENTS.md "
+                            "fallback (Path B) is currently the only channel to Codex")
+        state, extra = self._codex_root_markers(config_path)
+        if state == "unreadable":
+            return ("codex root markers", None,
+                    "cannot read {} ({}) — {}".format(config_path, extra, channel_note))
+        if state == "unparseable":
+            return ("codex root markers", None,
+                    "cannot judge project_root_markers in {} (unrecognized format) — {}"
+                    .format(config_path, channel_note))
+        if state == "table":
+            return ("codex root markers", None,
+                    "project_root_markers in {} is inside a [section] (TOML tables "
+                    "scope keys) — move it to the top level, above the first "
+                    "[section] — {} — {}"
+                    .format(config_path, hint, channel_note))
+        if state == "missing":
+            return ("codex root markers", None,
+                    "{} not found (default project_root_markers = [\"{}\"]) — {} — {}"
+                    .format(config_path, git_marker, hint, channel_note))
+        if state == "absent" or omhc_marker not in extra:
+            return ("codex root markers", None,
+                    "project_root_markers in {} lacks \"{}\" — {} — {}"
+                    .format(config_path, omhc_marker, hint, channel_note))
+        return ("codex root markers", True,
+                "project_root_markers includes \"{}\"".format(omhc_marker))
+
     def health(self, repo_root: Optional[str], ledger_rows):
+        rows = []
+        try:
+            marker_row = self._root_marker_health(repo_root)
+        except Exception as exc:  # 이 진단도 status 자체를 죽이면 안 된다
+            marker_row = ("codex root markers", None, "unknown ({})".format(exc))
+        if marker_row is not None:
+            rows.append(marker_row)
+        rows.extend(self._hook_health(repo_root, ledger_rows))
+        return tuple(rows)
+
+    def _hook_health(self, repo_root: Optional[str], ledger_rows):
         """훅이 설치돼 있는데 실제로 돈 적이 없는지 행태로 진단한다.
 
         정적 신호(hooks.json 존재)만으로는 신뢰 여부를 알 수 없다 — codex-cli
