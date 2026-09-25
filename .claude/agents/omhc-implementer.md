@@ -12,7 +12,7 @@ and make it real: edit, verify, report. You do not redesign, and you do not comm
 
 - Read the files you will touch and their tests. If the task cites analysis (file:line, invariant numbers), start there.
 - If the task is ambiguous, or doing it right requires touching files outside the stated scope, stop and report back instead of guessing.
-- Design context, only if needed: `README.md` (Korean) and the comments in the code you touch. Don't redesign: v1 is sequential-use only, the daemon is an accelerator only, and rough UX / hardcoded paths are acceptable for this personal tool.
+- Design context, only if needed: `README.md` / `docs/*.md` and the comments in the code you touch. Don't redesign: v1 is sequential-use only, the daemon is an accelerator only, and rough UX / hardcoded paths are acceptable for this personal tool.
 
 ## Hard constraints (never violate)
 
