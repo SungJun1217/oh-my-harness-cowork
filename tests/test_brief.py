@@ -714,7 +714,7 @@ class TestWireFormat(unittest.TestCase):
 class TestLogFailureNeverRaises(unittest.TestCase):
     def test_a_non_utf8_filename_in_the_detail_is_logged_not_raised(self):
         with tempfile.TemporaryDirectory() as home:
-            brief._log_failure(home, "pin failed: source missing: /x/\udcff.jsonl")
+            brief.log_failure(home, "pin failed: source missing: /x/\udcff.jsonl")
             with open(os.path.join(locate.omhc_root(home), brief.GUARD_LOG),
                       encoding="utf-8") as fh:
                 self.assertIn("\\udcff", fh.read())

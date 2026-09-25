@@ -172,6 +172,18 @@ its own project.
 > ```
 > `omhc status`'s `codex root markers` row (see below) checks this for you.
 
+> [!IMPORTANT]
+> Measured (codex-cli 0.156.1): Codex loads `AGENTS.md` head-first, up to
+> `project_doc_max_bytes` (default 32768, one total budget across the whole
+> chain from the repo root down to cwd), cutting mid-line with no notice.
+> Path B always writes its managed block at the **top** of `AGENTS.md` (an
+> existing block found lower down is moved to the top on the next write) so
+> it survives that cutoff even in a large file. If the block itself would
+> still end past the configured `project_doc_max_bytes`, omhc declines to
+> claim Path B and falls through to the outbox instead of writing something
+> Codex can't see — `omhc status`'s `codex agents.md budget` row (see below)
+> reports it.
+
 This unpacks the latest release into `~/.local/share/omhc/<version>` and
 symlinks `~/.local/bin/omhc` — no pip, no pipx (zero dependencies, so the
 source tree *is* the install). Re-run to update (old versions under
@@ -324,6 +336,15 @@ installed, an explicit note that Path B is currently your only channel to
 Codex. `----` also covers a config file that's missing, unreadable, or that
 can't be parsed (never written by omhc), and a key found only inside a
 `[section]` (TOML tables scope keys — it must be at the top level).
+
+Whenever an omhc-managed block is currently installed in `AGENTS.md`, a
+`codex agents.md budget` row checks its actual end offset (bytes) against
+`~/.codex/config.toml`'s `project_doc_max_bytes` (default 32768 if unset or
+unreadable). It FAILs (and gates) when the block ends past that limit — Codex
+would never see it — naming the offset and the limit; `----` when no block
+is installed. Path B itself never writes a block it already knows would fail
+this check: it declines (falling through to the outbox) instead, and logs
+the reason to `guard.log`.
 
 For every detected harness, status also adds a `<adapter-id> hooks` row
 (e.g. `claude-code hooks`, `codex-cli hooks`) that checks whether omhc's

@@ -24,6 +24,10 @@ def _begin(captured_at: float) -> str:
     return '{} captured="{:.0f}" -->'.format(BEGIN_PREFIX, captured_at)
 
 
+def _block_text(body: str, captured_at: float) -> str:
+    return "{}\n{}\n{}\n".format(_begin(captured_at), _neutralize(body).rstrip("\n"), END)
+
+
 def _neutralize(body: str) -> str:
     """본문이 마커를 담으면 구조가 깨진다. 무해하게 바꿔 둔다."""
     return body.replace(END, END.replace("<!--", "<!_-")).replace(
@@ -63,7 +67,7 @@ def _write_shared(target: str, content: str) -> None:
     남은 원본)를 계속 본다. r+ 로 열어 같은 inode 에 직접 써야 두 이름이
     갈라지지 않는다.
     """
-    with open(target, "r+", encoding="utf-8") as fh:
+    with open(target, "r+", encoding="utf-8", newline="") as fh:
         fh.write(content)
         fh.truncate()
         fh.flush()
@@ -77,35 +81,66 @@ def _write(target: str, content: str) -> None:
         fsio.write_atomic(target, content)
 
 
-def splice(path: str, body: str, *, captured_at: float, file_header: str = "") -> None:
-    """마커 구간을 멱등하게 교체한다. 원자적으로 쓴다.
+def _without_block(existing: str) -> str:
+    """`existing` 에서 omhc 구간만 제거한 "순수 사용자 콘텐츠"를 돌려준다.
+    블록이 없으면 그대로.
 
-    tmp + fsync + os.replace 를 쓴다 — 사람이 편집 중인 파일을 반쯤 쓴 상태로
-    남기면 안 된다. 다만 대상이 하드링크로 공유된 파일이면 `_write` 가 그 자리
-    수정으로 대신한다 (`_write_shared` 참고).
+    구간 앞뒤에 구분용 빈 줄을 끼워 넣지 않는다(아래 splice) — 리뷰 결함:
+    이전 버전은 그 빈 줄을 되돌리려고 위치(맨 앞/맨 끝)로 앞/뒤 중 어느
+    쪽이 "진짜 사용자 콘텐츠"인지 추측했는데, 사용자가 구간 위에 줄을
+    더하거나(맨 앞 배치에서 `before` 가 비지 않게 됨) 예전 배치의 구간
+    뒤에 콘텐츠가 더 있으면 그 추측이 틀려 한쪽을 통째로 버렸다(#33 리뷰).
+    구분용 빈 줄이 애초에 없으면 이 모호함 자체가 없다 — 앞뒤를 있는
+    그대로 이어붙이기만 하면 사용자 바이트를 한 번도 잃지 않는다."""
+    return _BLOCK.sub("", existing, count=1)
+
+
+def splice(path: str, body: str, *, captured_at: float, file_header: str = "") -> None:
+    """마커 구간을 멱등하게 교체하고, 파일 맨 앞으로 옮긴다. 원자적으로 쓴다.
+
+    Codex 는 AGENTS.md 를 `project_doc_max_bytes`(기본 32768바이트) 만큼만
+    머리부터 읽는다(#33 실측) — 구간을 파일 끝에 붙이면 큰 AGENTS.md 에서
+    통째로 잘려 보이지 않는다. 그래서 구간을 맨 앞에 두고, 예전에 끝에
+    심어졌던 구간도 다음 splice 에서 앞으로 옮긴다. 구간과 나머지 콘텐츠
+    사이에 구분용 빈 줄을 넣지 않는다 — 블록 문자열 자체가 이미 개행으로
+    끝나 형태는 안 깨지고, `_without_block` 이 그 빈 줄을 되돌릴 필요가
+    아예 없어진다(리뷰 결함 회피, 위 `_without_block` 참고). tmp + fsync +
+    os.replace 를 쓴다 — 사람이 편집 중인 파일을 반쯤 쓴 상태로 남기면 안
+    된다. 다만 대상이 하드링크로 공유된 파일이면 `_write` 가 그 자리 수정으로
+    대신한다(`_write_shared` 참고).
     """
-    block = "{}\n{}\n{}\n".format(_begin(captured_at), _neutralize(body).rstrip("\n"), END)
+    block = _block_text(body, captured_at)
 
     existing = ""
     created = True
     try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
+        # newline="" — 사람이 CRLF 로 쓴 AGENTS.md 를 텍스트 모드 기본값(보편
+        # 개행 번역)으로 읽으면 \r 이 사라져 strip() 이 원본과 다른 바이트를
+        # 돌려준다. 여기서 안 건드리고 그대로 들고 있다가 그대로 되돌려 쓴다.
+        with open(path, encoding="utf-8", errors="replace", newline="") as fh:
             existing = fh.read()
         created = False
     except OSError:
         existing = ""
 
-    if _BLOCK.search(existing):
-        updated = _BLOCK.sub(block, existing, count=1)
-    else:
-        prefix = file_header if created and file_header else ""
-        if existing and not existing.endswith("\n"):
-            existing += "\n"
-        updated = "{}{}{}{}".format(
-            prefix, existing, "\n" if existing else "", block
-        )
+    rest = _without_block(existing)
+    prefix = file_header if created and file_header else ""
+    updated = "{}{}{}".format(prefix, block, rest)
 
     _write(_write_target(path), updated)
+
+
+def prospective_block_end_bytes(path: str, body: str, *, captured_at: float,
+                                 file_header: str = "") -> int:
+    """`splice(path, body, ...)` 를 실제로 실행하면 구간이 끝나는 지점의
+    UTF-8 바이트 오프셋. 구간이 항상 파일 맨 앞이므로(위 splice) 이는 곧
+    `len((prefix + block).encode("utf-8"))` — 기존 파일 내용(`rest`) 크기와
+    무관하다. 쓰기 전에 예산(Codex 의 `project_doc_max_bytes`)을 넘는지 미리
+    가늠하는 용도라 실제로 쓰지 않는다."""
+    block = _block_text(body, captured_at)
+    created = not os.path.exists(path)
+    prefix = file_header if created and file_header else ""
+    return len((prefix + block).encode("utf-8"))
 
 
 def strip(path: str) -> bool:
@@ -121,16 +156,16 @@ def strip(path: str) -> bool:
     except OSError:
         is_link = False
     try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8", errors="replace", newline="") as fh:
             existing = fh.read()
     except OSError:
         return False
     if not _BLOCK.search(existing):
         return False
-    remainder = _BLOCK.sub("", existing, count=1)
+    rest = _without_block(existing)
     target = _write_target(path)
     shared = is_link or _has_multiple_links(target)
-    if not remainder.strip():
+    if not rest.strip():
         if shared:
             try:
                 _write(target, "")
@@ -142,16 +177,30 @@ def strip(path: str) -> bool:
         except OSError:
             return False
         return True
-    # splice 가 끼워 넣은 빈 줄 하나를 되돌린다.
-    if remainder.endswith("\n\n"):
-        remainder = remainder[:-1]
-    _write(target, remainder)
+    _write(target, rest)
     return True
+
+
+def installed_block_end_bytes(path: str) -> Optional[int]:
+    """설치된 구간이 끝나는 지점의 UTF-8 바이트 오프셋. 구간이 없으면 None.
+
+    Codex 의 `project_doc_max_bytes` 예산(#33)과 비교하는 용도 — 지금 구간이
+    어디 있든(정상은 맨 앞, 다음 splice 전까지는 예전 배치도 남아 있을 수
+    있다) 실측 오프셋을 그대로 낸다."""
+    try:
+        with open(path, encoding="utf-8", errors="replace", newline="") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    m = _BLOCK.search(text)
+    if not m:
+        return None
+    return len(text[: m.end()].encode("utf-8"))
 
 
 def installed_captured_at(path: str) -> Optional[float]:
     try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8", errors="replace", newline="") as fh:
             existing = fh.read()
     except OSError:
         return None

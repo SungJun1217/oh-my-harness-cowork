@@ -97,6 +97,14 @@ _ROOT_MARKERS_KEY_RE = re.compile(
 # (`[table]\nproject_root_markers = …` 는 최상위 키가 아니다) — 첫 헤더 앞까지만
 # 최상위로 본다.
 
+# `~/.codex/config.toml` 의 `project_doc_max_bytes = N`(#33). Codex 가 AGENTS.md
+# 체인 전체(레포 루트부터 cwd 까지)를 머리부터 읽는 총 예산이다(deep-research,
+# 2026-09-25 — 문서에 값이 없어 임베디드 기본값 32768 을 실측 근사로 쓴다).
+# 정수 값만 인식한다 — 실측/문서 모두 정수 외의 꼴을 보인 적이 없다.
+DEFAULT_PROJECT_DOC_MAX_BYTES = 32768
+_PROJECT_DOC_MAX_BYTES_KEY_RE = re.compile(
+    r'(?m)^[ \t]*[\'"]?project_doc_max_bytes[\'"]?[ \t]*=[ \t]*(-?\d+)')
+
 
 def _first_table_header(text: str) -> int:
     """첫 `[section]`/`[[section]]` 머리(`[` 자체)가 시작하는 위치, 없으면 -1.
@@ -1062,9 +1070,56 @@ class CodexCliAdapter:
         훅 자체가 신뢰되지 않아 brief 가 한 번도 안 돌면 deliver() 호출 자체가
         없으므로 Path B 도 열리지 않는다 — 그 경우 Codex 로 들어가는 방향은
         아무것도 받지 못한다."""
-        from .. import agents_md
+        return (self._install_agents_md,)
 
-        return (agents_md.install,)
+    def _install_agents_md(self, bundle: HandoffBundle) -> InstallReceipt:
+        """`agents_md.install` 을 부르기 전에 #33 예산을 미리 잰다.
+
+        구간은 이제 항상 파일 맨 앞이라(managed_block.splice) 끝나는 지점은
+        기존 AGENTS.md 크기와 무관하게 `len(prefix+block)` 하나로 정해진다.
+        조상 디렉터리의 AGENTS.md 바이트까지 더하는 건 하지 않는다 — Codex
+        프로젝트 루트는 이 레포의 `repo_root` 로 근사하고(개인용 도구, 서브
+        디렉터리에서 시작하는 사용이 드물다), 조상에 큰 AGENTS.md 가 있는
+        경우까지 재는 건 이 파일 하나만 보는 것보다 훨씬 비싸다(각 조상마다
+        파일을 열어야 한다) — 넘으면 install 을 아예 claim 하지 않고
+        deliver() 가 보편 바닥(outbox)으로 떨어지게 한다(invariant 2: 여기서
+        죽지 않는다, deliver() 의 예외 캐치가 이미 있지만 사유를 guard.log 에도
+        남긴다).
+
+        `project_doc_max_bytes = 0` 은 (codex-rs project_doc.rs 실측 근거로,
+        미확인) Codex 가 AGENTS.md 자체를 아예 안 읽는다는 뜻이라 항상 거절한다
+        — 그 외 0 미만/파싱 불가는 `_project_doc_max_bytes` 가 이미 기본값으로
+        접는다.
+
+        리뷰 결함: 예산 초과로 거절만 하고 이미 설치된(더 작았던 시절의) 낡은
+        구간을 그대로 두면, Codex 는 outbox 로 떨어진 새 핸드오프 대신 그
+        낡은 구간을 계속 읽는다 — 거절할 때 낡은 구간도 지운다. AGENTS.md 가
+        Claude 와 공유되면(agents_md.install 과 같은 가드) 건드리지 않는다."""
+        from .. import agents_md, brief, managed_block
+
+        limit = self._project_doc_max_bytes(self.toml_config_path())
+        if limit <= 0:
+            reason = (
+                "project_doc_max_bytes={} in {} — Codex does not load AGENTS.md at all"
+            ).format(limit, self.toml_config_path())
+        else:
+            path = agents_md.path_for(bundle.repo_root)
+            end = managed_block.prospective_block_end_bytes(
+                path, bundle.body_md, captured_at=time.time())
+            reason = None
+            if end > limit:
+                reason = (
+                    "AGENTS.md omhc block would end at byte {} in {}, past Codex's "
+                    "project_doc_max_bytes={} ({}) — Codex would not see it"
+                ).format(end, path, limit, self.toml_config_path())
+
+        if reason is None:
+            return agents_md.install(bundle)
+
+        brief.log_failure(self.home, reason)
+        if not agents_md.shared_with_claude(bundle.repo_root):
+            agents_md.collapse(bundle.repo_root, force=True)
+        raise NoInjectionChannel(reason)
 
     def _config_trusts(self, hook_file_path: str) -> bool:
         """`~/.codex/config.toml` 에 `hook_file_path`(보통 hooks.json — 실측상
@@ -1159,6 +1214,32 @@ class CodexCliAdapter:
             return "unparseable", None
         return "ok", tuple(v.replace('\\"', '"') for v in values)
 
+    def _project_doc_max_bytes(self, config_path: str) -> int:
+        """`~/.codex/config.toml` 의 `project_doc_max_bytes` 값, 없거나 못 읽으면
+        임베디드 기본값(#33). `_codex_root_markers` 와 같은 원칙 — 최상위(첫
+        `[section]` 이전) 키만 본다, 절대 던지지 않는다(fail-open).
+
+        `0` 은 그대로 돌려준다(기본값으로 접지 않는다) — codex-rs 의
+        project_doc.rs 실측 근거(리뷰, 바이너리 문자열로는 미확인)로 `0` 은
+        "AGENTS.md 를 아예 안 읽는다"는 뜻이고, 호출자(`_install_agents_md`/
+        `_agents_md_budget_health`)가 그 값 자체로 따로 판정해야 한다. 음수·
+        파싱 불가만 기본값으로 접는다."""
+        try:
+            with open(config_path, encoding="utf-8-sig", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            return DEFAULT_PROJECT_DOC_MAX_BYTES
+        header = _first_table_header(text)
+        top_level = text[:header] if header >= 0 else text
+        m = _PROJECT_DOC_MAX_BYTES_KEY_RE.search(top_level)
+        if not m:
+            return DEFAULT_PROJECT_DOC_MAX_BYTES
+        try:
+            value = int(m.group(1))
+        except ValueError:
+            return DEFAULT_PROJECT_DOC_MAX_BYTES
+        return value if value >= 0 else DEFAULT_PROJECT_DOC_MAX_BYTES
+
     def _ancestor_has_git(self, repo_root: str, git_marker: str) -> bool:
         """리뷰 #4: `repo_root` 위 조상 중 `.git` 을 가진 것이 있으면, Codex
         기본값(`[".git"]`)으로도 그 조상을 루트로 잡아 AGENTS.md 를 cwd 까지
@@ -1230,6 +1311,44 @@ class CodexCliAdapter:
         return ("codex root markers", True,
                 "project_root_markers includes \"{}\"".format(omhc_marker))
 
+    def _agents_md_budget_health(self, repo_root: Optional[str]):
+        """#33: 이미 설치된 구간이 Codex 의 `project_doc_max_bytes` 예산을 넘겨
+        끝나면 Codex 는 그걸 못 읽는다 — `_install_agents_md` 가 쓰는 시점에
+        막지만(다음 splice 부터), 이미 예산을 넘겨 설치된 채로 오래 방치된
+        구간은 status 로도 알려야 한다.
+
+        `codex root markers` 와 같은 두 단계 원칙을 따른다: 이 진단 자체가
+        무의미한 레포(AGENTS.md 가 Claude 와 공유돼 Path B 를 절대 안 쓰는
+        레포 — `agents_md.install`/`_install_agents_md` 와 같은 가드)는 행을
+        아예 내지 않는다(``None``). 진단은 유효한데 아직 판단할 근거가 없으면
+        (설치된 구간이 없다 — 설치 전이거나 collapse 됨) `----` 로 행은 내되
+        게이팅은 하지 않는다 — "every check gets PASS/FAIL/---- (never
+        SKIP)"(README) 는 판정 가능한 진단에 적용되지, 진단 자체가 무의미한
+        레포에는 적용되지 않는다."""
+        if repo_root is None:
+            return None
+        from .. import agents_md, managed_block
+
+        if agents_md.shared_with_claude(repo_root):
+            return None
+
+        path = agents_md.path_for(repo_root)
+        end = managed_block.installed_block_end_bytes(path)
+        if end is None:
+            return ("codex agents.md budget", None, "no omhc block in AGENTS.md")
+        limit = self._project_doc_max_bytes(self.toml_config_path())
+        if limit <= 0:
+            return ("codex agents.md budget", False,
+                     "project_doc_max_bytes={} in {} — Codex does not load AGENTS.md at all"
+                     .format(limit, self.toml_config_path()))
+        if end > limit:
+            return ("codex agents.md budget", False,
+                     "AGENTS.md omhc block ends at byte {} > project_doc_max_bytes={} "
+                     "in {} — Codex would not see it".format(
+                         end, limit, self.toml_config_path()))
+        return ("codex agents.md budget", True,
+                "AGENTS.md omhc block ends at byte {} (limit {})".format(end, limit))
+
     def health(self, repo_root: Optional[str], ledger_rows):
         rows = []
         try:
@@ -1238,6 +1357,12 @@ class CodexCliAdapter:
             marker_row = ("codex root markers", None, "unknown ({})".format(exc))
         if marker_row is not None:
             rows.append(marker_row)
+        try:
+            budget_row = self._agents_md_budget_health(repo_root)
+        except Exception as exc:
+            budget_row = ("codex agents.md budget", None, "unknown ({})".format(exc))
+        if budget_row is not None:
+            rows.append(budget_row)
         rows.extend(self._hook_health(repo_root, ledger_rows))
         return tuple(rows)
 
