@@ -765,6 +765,13 @@ class TestRebaseMarker(unittest.TestCase):
     def setUp(self):
         self.h = Harness()
         self.addCleanup(self.h.close)
+        # 마커 개수는 한 번의 판정을 끝까지 마쳤을 때만 센다. 훅 예산(80ms)을
+        # 실제 시계로 재면 부하가 큰 머신(load 7)에서 세션 60개 판정이 예산에
+        # 걸려 마커를 안 쓰고, 테스트가 3번 중 2번 실패했다. 예산 초과는
+        # _deadline_trips_after_first_stat 이 시계를 건너뛰어 따로 확인한다.
+        patcher = mock.patch.object(cli, "BACKFILL_TIME_BUDGET", 60.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _seed_known_unchanged(self, n, base):
         """이미 알려진, 이번 판정에서 안 자랄 세션 n 개를 원장에 직접 심는다
