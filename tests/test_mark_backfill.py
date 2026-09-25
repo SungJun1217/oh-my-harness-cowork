@@ -1124,5 +1124,56 @@ class TestLiveContinueWithoutASessionStart(unittest.TestCase):
         self.assertEqual(got.session_id, "cx1")
 
 
+class TestCompactSessionStart(unittest.TestCase):
+    """#30: 자동 압축 뒤 같은 세션에서 SessionStart(source=compact) 가 다시
+    발화한다. 이미 원장에 있는 세션이면 start 행을 또 남기지 않는다."""
+
+    def setUp(self):
+        self.h = Harness()
+        self.addCleanup(self.h.close)
+
+    def _starts(self, harness, session):
+        return [r for r in ledger.read(repo_key=self.h.key, home=self.h.home)
+                if r.get("event") == "start" and r.get("harness") == harness
+                and r.get("session") == session]
+
+    def test_compact_after_startup_adds_no_start_row(self):
+        self.h.mark(harness="codex-cli", session_id="cx1", source="startup")
+        self.h.mark(harness="codex-cli", session_id="cx1", source="compact")
+        self.h.mark(harness="codex-cli", session_id="cx1", source="compact")
+        self.assertEqual(len(self._starts("codex-cli", "cx1")), 1)
+
+    def test_compact_for_an_unknown_session_is_still_recorded(self):
+        """startup 을 놓친 세션(도중에 설치)이면 compact 가 첫 기록이다."""
+        self.h.mark(harness="codex-cli", session_id="cx9", source="compact")
+        self.assertEqual(len(self._starts("codex-cli", "cx9")), 1)
+
+    def test_compact_refreshes_age_for_a_long_lived_session(self):
+        """due() 는 가장 최근 start 행으로 나이를 잰다. 며칠째 쓰는 세션이
+        compact 만 반복해도 MAX_AGE 를 넘겨 빠지면 안 된다(#30 리뷰)."""
+        old = time.time() - 8 * 86400
+        ledger.append({"repo": self.h.key, "harness": "claude-code",
+                       "session": "cc1", "event": "start", "epoch": old,
+                       "path": "", "cwd": self.h.root}, home=self.h.home)
+        self.h.mark(harness="claude-code", session_id="cc1", source="compact")
+        self.assertEqual(len(self._starts("claude-code", "cc1")), 2)
+
+    def test_a_scan_row_alone_does_not_suppress_the_hook_row(self):
+        """backfill 이 대신 적은 행만 있으면 훅이 돈 증거를 남긴다."""
+        ledger.append({"repo": self.h.key, "harness": "codex-cli",
+                       "session": "cx2", "event": "start", "epoch": time.time(),
+                       "path": "", "cwd": self.h.root, "via": "scan"},
+                      home=self.h.home)
+        self.h.mark(harness="codex-cli", session_id="cx2", source="compact")
+        rows = self._starts("codex-cli", "cx2")
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[-1].get("via"), "scan")
+
+    def test_resume_still_adds_a_start_row(self):
+        self.h.mark(harness="codex-cli", session_id="cx1", source="startup")
+        self.h.mark(harness="codex-cli", session_id="cx1", source="resume")
+        self.assertEqual(len(self._starts("codex-cli", "cx1")), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
