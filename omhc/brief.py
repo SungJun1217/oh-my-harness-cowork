@@ -15,7 +15,7 @@ NOTES_NAME = "notes.txt"
 ARTIFACT_NAME = "omhc.txt"
 
 
-def _log_failure(home: Optional[str], detail: str) -> None:
+def log_failure(home: Optional[str], detail: str) -> None:
     """실패를 남기되 절대 던지지 않는다. 훅 경로에서 죽으면 세션 시작이 깨진다."""
     try:
         root = locate.omhc_root(home)
@@ -187,7 +187,7 @@ def compute(
             # 조용히 넘기면 `omhc status` 의 archive 행이 핀 없이도 PASS 를
             # 낸다(리뷰 결함) — 훅 경로의 유일한 실패 로그에 남겨야 사람이
             # 원인을 알 수 있다. 여기서 던지면 안 되므로(invariant 2) 로그만.
-            _log_failure(home, "pin failed: {}".format(pin_result.error))
+            log_failure(home, "pin failed: {}".format(pin_result.error))
         # watch.sweep 과 같은 증분 규칙을 쓴다. 전부 다시 덧붙이면 데몬이 돌고
         # 있을 때 같은 이벤트가 두 번 색인되어 `omhc log` 가 중복을 보이고
         # `omhc show #N` 이 낡은 행을 가리킬 수 있다.
@@ -195,7 +195,7 @@ def compute(
         index.append_new(idx, read.events)
         index.write_refs(state, ref, mint.failure_tags(read))
     except OSError as exc:
-        _log_failure(home, "archive failed: {}".format(exc))
+        log_failure(home, "archive failed: {}".format(exc))
 
     # 전달은 deliver 가 라우팅한다. 여기서 파일을 직접 쓰면 채널 추상이 프로덕션
     # 경로를 우회해, receipt·Path B·보편 바닥이 단위 테스트에서만 동작한다.
@@ -207,9 +207,9 @@ def compute(
             home=home, now=stamp,
         )
         if receipt.channel == "nowhere":
-            _log_failure(home, "delivery found no channel: " + receipt.cleanup_hint)
+            log_failure(home, "delivery found no channel: " + receipt.cleanup_hint)
     except Exception as exc:  # deliver 는 던지지 않아야 하지만 훅을 깨뜨릴 수는 없다
-        _log_failure(home, "delivery failed: {}".format(exc))
+        log_failure(home, "delivery failed: {}".format(exc))
 
     end_offset = max((e.offset + e.length for e in read.events), default=0)
     due.mark_delivered(state, watermark, to_harness=my_harness, epoch=stamp,
@@ -263,11 +263,11 @@ def emit(
             return 0
         if len(body.encode("utf-8")) > budget:
             # 출력 직전 재검사. 버그가 과대 페이로드를 주입하지 못하게 한다.
-            _log_failure(home, "body exceeded budget at print time; suppressed")
+            log_failure(home, "body exceeded budget at print time; suppressed")
             return 0
         chosen = wire or _wire_for(harness, home)
         stream.write(body if as_text or dry_run else hook_wire(body, chosen) + "\n")
         return 0
     except Exception:
-        _log_failure(home, traceback.format_exc())
+        log_failure(home, traceback.format_exc())
         return 0

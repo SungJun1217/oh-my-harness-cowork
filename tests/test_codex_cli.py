@@ -1215,8 +1215,9 @@ class TestHealth(unittest.TestCase):
             self._rollout(home, "s1", "2023-11-15T00:00:00.000Z",
                           extra_meta={"cwd": child})
             rows = CX.CodexCliAdapter(home=home).health(parent, [])
-            self.assertIsNone(rows[0][1])
-            self.assertIn("not judged yet", rows[0][2])
+            label, ok, detail = next(r for r in rows if r[0] == "codex hook")
+            self.assertIsNone(ok)
+            self.assertIn("not judged yet", detail)
 
     def test_garbage_rollout_and_config_do_not_raise(self):
         with tempfile.TemporaryDirectory() as home:
@@ -1316,8 +1317,8 @@ class TestStatusIntegration(unittest.TestCase):
         code, text = self.run_status(["--json"])
         payload = json.loads(text)
         self.assertIn("health", payload)
-        self.assertEqual(payload["health"][0]["label"], "codex hook")
-        self.assertFalse(payload["health"][0]["ok"])
+        row = next(h for h in payload["health"] if h["label"] == "codex hook")
+        self.assertFalse(row["ok"])
 
 
 class TestHealthMatchesAcrossNestedGitRoots(unittest.TestCase):
@@ -1677,6 +1678,230 @@ class TestRootMarkerHealth(unittest.TestCase):
             self.assertEqual(set(payload), set(cli._status_json_empty()))
             self.assertTrue(any(h["label"] == "codex root markers"
                                 for h in payload["health"]))
+
+
+class TestAgentsMdBudget(unittest.TestCase):
+    """#33: Codex 는 AGENTS.md 를 `project_doc_max_bytes` 만큼만 머리부터
+    읽는다 — 예산을 넘겨 설치하려는 Path B 는 claim 하지 말고 outbox 로
+    떨어뜨려야 하고, status 는 이미 넘겨 설치된 구간을 알려야 한다."""
+
+    def _write_config(self, home: str, text: str) -> None:
+        os.makedirs(os.path.join(home, ".codex"), exist_ok=True)
+        with open(os.path.join(home, ".codex", "config.toml"), "w",
+                 encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _repo(self, base: str) -> str:
+        root = os.path.join(base, "proj")
+        os.makedirs(root)
+        _repo.git(root, "init", "-q")
+        return root
+
+    def test_default_limit_when_config_is_missing(self):
+        with tempfile.TemporaryDirectory() as home:
+            adapter = CX.CodexCliAdapter(home=home)
+            self.assertEqual(adapter._project_doc_max_bytes(adapter.toml_config_path()),
+                             CX.DEFAULT_PROJECT_DOC_MAX_BYTES)
+
+    def test_reads_the_configured_limit(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._write_config(home, "project_doc_max_bytes = 4096\n")
+            adapter = CX.CodexCliAdapter(home=home)
+            self.assertEqual(adapter._project_doc_max_bytes(adapter.toml_config_path()), 4096)
+
+    def test_key_inside_a_table_is_not_top_level(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._write_config(
+                home, '[projects."/x"]\nproject_doc_max_bytes = 4096\n')
+            adapter = CX.CodexCliAdapter(home=home)
+            self.assertEqual(adapter._project_doc_max_bytes(adapter.toml_config_path()),
+                             CX.DEFAULT_PROJECT_DOC_MAX_BYTES)
+
+    def test_install_declines_and_falls_to_outbox_when_over_budget(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            self._write_config(home, "project_doc_max_bytes = 10\n")
+            bundle = A.HandoffBundle(body_md="[omhc] handoff\nGOAL  x\n",
+                                     repo_root=root, to_adapter_id="codex-cli")
+            adapter = CX.CodexCliAdapter(home=home)
+            with self.assertRaises(A.NoInjectionChannel):
+                adapter._install_agents_md(bundle)
+            self.assertFalse(os.path.exists(os.path.join(root, "AGENTS.md")))
+            log_path = os.path.join(home, ".omhc", "guard.log")
+            with open(log_path, encoding="utf-8") as fh:
+                self.assertIn("project_doc_max_bytes", fh.read())
+
+    def test_deliver_falls_all_the_way_to_the_outbox_when_over_budget(self):
+        """라우터(deliver)까지 통째로 — install_handoff 도 없고(훅 미설치) Path
+        B 도 예산 초과로 거절되면 보편 바닥(outbox)에 떨어져야 한다."""
+        from omhc import deliver
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            self._write_config(home, "project_doc_max_bytes = 10\n")
+            bundle = A.HandoffBundle(body_md="[omhc] handoff\nGOAL  x\n",
+                                     repo_root=root, to_adapter_id="codex-cli")
+            receipt = deliver.deliver(bundle, home=home, now=1000.0)
+            self.assertEqual(receipt.channel, "file-drop")
+            self.assertFalse(os.path.exists(os.path.join(root, "AGENTS.md")))
+
+    def test_install_succeeds_under_budget(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            bundle = A.HandoffBundle(body_md="[omhc] handoff\nGOAL  x\n",
+                                     repo_root=root, to_adapter_id="codex-cli")
+            adapter = CX.CodexCliAdapter(home=home)
+            receipt = adapter._install_agents_md(bundle)
+            self.assertEqual(receipt.channel, "agents-md")
+            self.assertTrue(os.path.exists(os.path.join(root, "AGENTS.md")))
+
+    def _row(self, rows):
+        return next((r for r in rows if r[0] == "codex agents.md budget"), None)
+
+    def test_status_row_is_uninformative_without_an_installed_block(self):
+        """AGENTS.md 의 status 관례: 판정 가능한 진단은 판정할 것이 없어도
+        `----` 로 행을 낸다(SKIP 이 아니다) — 아예 무의미한 레포(공유됨)만
+        행을 생략한다(아래 test_status_row_is_absent_when_shared_with_claude)."""
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertIsNone(ok)
+            self.assertIn("no omhc block", detail)
+
+    def test_status_row_is_absent_when_shared_with_claude(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            agents = os.path.join(root, "AGENTS.md")
+            claude = os.path.join(root, "CLAUDE.md")
+            with open(agents, "w", encoding="utf-8") as fh:
+                fh.write("neutral instructions")
+            os.symlink(agents, claude)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            self.assertIsNone(self._row(rows))
+
+    def test_status_row_fails_when_the_installed_block_is_over_budget(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            self._write_config(home, "project_doc_max_bytes = 10\n")
+            from omhc import agents_md
+
+            managed_block_path = agents_md.path_for(root)
+            from omhc import managed_block
+
+            managed_block.splice(managed_block_path, "[omhc] handoff\n",
+                                 captured_at=1000.0)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertFalse(ok)
+            self.assertIn("byte", detail)
+            self.assertIn("10", detail)
+
+    def test_status_row_passes_when_the_installed_block_is_under_budget(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            from omhc import agents_md, managed_block
+
+            managed_block.splice(agents_md.path_for(root), "[omhc] handoff\n",
+                                 captured_at=1000.0)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertTrue(ok)
+
+    def test_declining_over_budget_also_clears_a_stale_installed_block(self):
+        """리뷰 결함: 예산 초과로 거절만 하고 낡은 구간을 그대로 두면, Codex 는
+        outbox 로 떨어진 새 핸드오프 대신 그 낡은 구간을 계속 읽는다."""
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            agents = agents_md.path_for(root)
+            with open(agents, "w", encoding="utf-8") as fh:
+                fh.write("# user content\n")
+            managed_block.splice(agents, "[omhc] stale handoff\n", captured_at=1000.0)
+            self._write_config(home, "project_doc_max_bytes = 10\n")
+
+            bundle = A.HandoffBundle(body_md="[omhc] fresh handoff\nGOAL  x\n",
+                                     repo_root=root, to_adapter_id="codex-cli")
+            adapter = CX.CodexCliAdapter(home=home)
+            with self.assertRaises(A.NoInjectionChannel):
+                adapter._install_agents_md(bundle)
+
+            self.assertIsNone(managed_block.installed_captured_at(agents))
+            with open(agents, encoding="utf-8") as fh:
+                text = fh.read()
+            self.assertIn("# user content", text)
+            self.assertNotIn("stale handoff", text)
+
+    def test_declining_over_budget_never_touches_agents_md_shared_with_claude(self):
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            agents = agents_md.path_for(root)
+            claude = os.path.join(root, "CLAUDE.md")
+            managed_block.splice(agents, "[omhc] stale handoff\n", captured_at=1000.0)
+            os.symlink(agents, claude)
+            self._write_config(home, "project_doc_max_bytes = 10\n")
+
+            bundle = A.HandoffBundle(body_md="[omhc] fresh handoff\nGOAL  x\n",
+                                     repo_root=root, to_adapter_id="codex-cli")
+            adapter = CX.CodexCliAdapter(home=home)
+            with self.assertRaises(A.NoInjectionChannel):
+                adapter._install_agents_md(bundle)
+
+            # 예산 초과 거절이 shared_with_claude 가드를 우회해 공유 파일을
+            # 건드리면 안 된다 — 낡은 구간이 그대로 남아 있어야 한다.
+            self.assertIsNotNone(managed_block.installed_captured_at(agents))
+
+    def test_zero_limit_is_read_as_is_not_folded_to_default(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._write_config(home, "project_doc_max_bytes = 0\n")
+            adapter = CX.CodexCliAdapter(home=home)
+            self.assertEqual(adapter._project_doc_max_bytes(adapter.toml_config_path()), 0)
+
+    def test_negative_limit_falls_back_to_the_default(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._write_config(home, "project_doc_max_bytes = -1\n")
+            adapter = CX.CodexCliAdapter(home=home)
+            self.assertEqual(adapter._project_doc_max_bytes(adapter.toml_config_path()),
+                             CX.DEFAULT_PROJECT_DOC_MAX_BYTES)
+
+    def test_install_declines_when_the_limit_is_zero(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            self._write_config(home, "project_doc_max_bytes = 0\n")
+            bundle = A.HandoffBundle(body_md="[omhc] handoff\nGOAL  x\n",
+                                     repo_root=root, to_adapter_id="codex-cli")
+            adapter = CX.CodexCliAdapter(home=home)
+            with self.assertRaises(A.NoInjectionChannel) as ctx:
+                adapter._install_agents_md(bundle)
+            self.assertIn("project_doc_max_bytes=0", str(ctx.exception))
+            self.assertFalse(os.path.exists(os.path.join(root, "AGENTS.md")))
+
+    def test_status_row_fails_when_the_limit_is_zero(self):
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            self._write_config(home, "project_doc_max_bytes = 0\n")
+            managed_block.splice(agents_md.path_for(root), "[omhc] handoff\n",
+                                 captured_at=1000.0)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertFalse(ok)
+            self.assertIn("project_doc_max_bytes=0", detail)
 
 
 class TestHealthLedgerWindow(unittest.TestCase):

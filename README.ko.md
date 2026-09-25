@@ -169,6 +169,17 @@ git 이 아닌 프로젝트라면 최상위 디렉터리에서 `touch .omhc-root
 > `omhc status`의 `codex root markers` 행(아래 참고)이 이걸 대신 확인해
 > 줍니다.
 
+> [!IMPORTANT]
+> 실측(codex-cli 0.156.1): Codex 는 `AGENTS.md` 를 머리부터,
+> `project_doc_max_bytes`(기본 32768, 레포 루트부터 cwd 까지 체인 전체에
+> 대한 총 예산 하나) 만큼만 읽고 그 지점에서 예고 없이 자릅니다. Path B 는
+> 관리 구간을 언제나 `AGENTS.md` **맨 앞**에 쓰므로(예전에 끝에 있던 구간도
+> 다음 쓰기에서 앞으로 옮겨집니다) 파일이 커도 그 잘림을 피합니다. 그래도
+> 구간 자체가 설정된 `project_doc_max_bytes` 를 넘겨 끝난다면, omhc 는 Path
+> B 설치를 성공으로 주장하지 않고 outbox 로 대신 떨어집니다 — Codex 가 못
+> 볼 것을 쓰지 않습니다. `omhc status`의 `codex agents.md budget` 행(아래
+> 참고)이 이걸 알려줍니다.
+
 최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
 심링크합니다. pip·pipx 를 쓰지 않습니다(의존성이 0 이라 소스 트리가 곧
 설치물입니다). 다시 실행하면 업데이트(`~/.local/share/omhc` 아래 구버전은
@@ -315,6 +326,15 @@ fd 에 대한 단일 write(2) 는 크기와 무관하게 POSIX 상 원자적이�
 못 읽거나, 파싱할 수 없을 때(omhc 가 직접 고치는 일은 없습니다), 그리고
 키가 `[section]` 안에서만 보일 때(TOML 테이블은 키의 스코프를 바꾼다 —
 최상위에 있어야 합니다)도 모두 `----` 입니다.
+
+omhc 관리 구간이 `AGENTS.md` 에 지금 설치돼 있으면 `codex agents.md budget`
+행이 그 구간이 실제로 끝나는 바이트 오프셋을 `~/.codex/config.toml` 의
+`project_doc_max_bytes`(설정이 없거나 못 읽으면 기본값 32768)와 비교합니다.
+구간이 그 한도를 넘겨 끝나면 FAIL(게이팅)이고 오프셋과 한도를 함께 보여줍니다
+— Codex 가 그 구간을 못 볼 것이기 때문입니다. 설치된 구간이 없으면 `----`
+입니다. Path B 자신도 이 검사를 통과 못 할 걸 미리 아는 구간은 아예 쓰지
+않습니다 — 성공을 주장하지 않고 outbox 로 떨어지며, 그 사유를 `guard.log`
+에 남깁니다.
 
 감지된 하네스마다 `<adapter-id> hooks` 행(예: `claude-code hooks`,
 `codex-cli hooks`)도 붙습니다 — 하네스 디렉터리가 존재한다는 것만이 아니라
