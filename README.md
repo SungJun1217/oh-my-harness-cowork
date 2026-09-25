@@ -272,6 +272,21 @@ your own config — don't overwrite it.
 > (top-level `additionalContext`) is rejected by codex-cli 0.155.1 with
 > `hook: SessionStart Failed` and nothing gets injected.
 
+Codex also loads hooks from an inline `[hooks]` table in `config.toml`
+(same `hooks.<Event>[].hooks[].command` shape as `hooks.json`, just written
+as TOML array-of-tables — see the official
+[config-advanced docs](https://developers.openai.com/codex/config-advanced#hooks)).
+`omhc hooks install` still only ever writes `hooks.json`, but `omhc status`'s
+`codex-cli hooks` row and the hook path's `install_handoff` both recognize an
+omhc install that lives in `~/.codex/config.toml` instead — if you hand-wrote
+one there, you don't need `hooks.json` too. If both exist and both define an
+omhc `SessionStart` hook, Codex loads both and warns (per the docs); `status`
+shows that as an unjudged `----` row rather than PASS, naming both files.
+Project-level `<repo>/.codex/hooks.json` / `<repo>/.codex/config.toml` only
+count once that project's `.codex/` layer is trusted (`[projects."<path>"]
+trust_level = "trusted"` in `~/.codex/config.toml`) — otherwise omhc ignores
+them.
+
 `omhc status` gives every row one of three labels: **PASS** or **FAIL** for
 checks that were actually judged and can gate the exit code (adapters,
 archive, instruction files, `ledger rejects`, and adapter health rows such as

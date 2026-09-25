@@ -264,6 +264,20 @@ git 체크아웃이라면 레포의 `hooks/` 아래에 있습니다. 조각의 `
 > `additionalContext`)는 codex-cli 0.155.1에서 `hook: SessionStart Failed`로
 > 거부되고 아무것도 주입되지 않습니다.
 
+Codex 는 `config.toml` 의 인라인 `[hooks]` 테이블에서도 훅을 읽습니다(공식
+[config-advanced 문서](https://developers.openai.com/codex/config-advanced#hooks)
+참고 — `hooks.json` 과 같은 `hooks.<Event>[].hooks[].command` 구조를 TOML
+array-of-tables 로 적었을 뿐입니다). `omhc hooks install` 은 여전히
+`hooks.json` 에만 씁니다. 하지만 `omhc status` 의 `codex-cli hooks` 행과 훅
+경로의 `install_handoff` 는 `~/.codex/config.toml` 에 손으로 적은 omhc 설치도
+그대로 인식합니다 — 거기에 이미 적었다면 `hooks.json` 이 없어도 됩니다. 둘 다
+있고 둘 다 omhc `SessionStart` 훅을 정의하면 Codex 는 문서대로 둘 다 읽고
+경고합니다 — `status` 는 이걸 PASS 대신 미판정 `----` 행으로 보여주며 두
+파일 이름을 모두 적습니다. 프로젝트 쪽(`<repo>/.codex/hooks.json` /
+`<repo>/.codex/config.toml`)은 그 레포의 `.codex/` 레이어가 신뢰된 경우에만
+셉니다(`~/.codex/config.toml` 의 `[projects."<path>"] trust_level =
+"trusted"`) — 그렇지 않으면 omhc 는 무시합니다.
+
 `omhc status`의 모든 행은 세 라벨 중 하나입니다: 실제로 판정되어 exit code 를
 게이팅할 수 있는 **PASS**/**FAIL**(adapters, archive, instruction files,
 `ledger rejects`, `codex hook` 같은 어댑터 health 행), 그리고 정보성이거나

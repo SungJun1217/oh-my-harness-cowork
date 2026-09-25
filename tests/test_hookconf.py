@@ -9,6 +9,7 @@ import os
 import stat
 import tempfile
 import unittest
+from unittest import mock
 
 from omhc import hookconf
 
@@ -665,6 +666,136 @@ class TestHookconfMergeStrip(unittest.TestCase):
         changed = hookconf.strip(self.config_path)
         self.assertFalse(changed)
         self.assertFalse(os.path.exists(self.config_path))
+
+
+class TestTomlInlineHooks(unittest.TestCase):
+    """config.toml 의 인라인 `[[hooks.<Event>]]` (#32). 공식 문서
+    (developers.openai.com/codex/config-advanced, "Hooks" 절) 의 예시 그대로
+    array-of-tables 구조다."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.toml_path = os.path.join(self._tmp.name, "config.toml")
+
+    def _write(self, text: str) -> None:
+        with open(self.toml_path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_parses_the_documented_shape(self):
+        self._write(
+            '[[hooks.PreToolUse]]\n'
+            'matcher = "^Bash$"\n'
+            '\n'
+            '[[hooks.PreToolUse.hooks]]\n'
+            'type = "command"\n'
+            'command = \'/usr/bin/python3 "policy.py"\'\n'
+            'timeout = 30\n'
+            'statusMessage = "Checking Bash command"\n'
+        )
+        with open(self.toml_path, encoding="utf-8") as fh:
+            hooks = hookconf.parse_toml_hooks(fh.read())
+        self.assertEqual(hooks["PreToolUse"][0]["matcher"], "^Bash$")
+        self.assertEqual(hooks["PreToolUse"][0]["hooks"][0]["command"],
+                         '/usr/bin/python3 "policy.py"')
+
+    def test_has_runnable_call_toml_true_for_a_matching_session_start_hook(self):
+        self._write(
+            '[[hooks.SessionStart]]\n'
+            '\n'
+            '[[hooks.SessionStart.hooks]]\n'
+            'type = "command"\n'
+            'command = "omhc brief --harness codex-cli"\n'
+        )
+        self.assertTrue(hookconf.has_runnable_call_toml(
+            self.toml_path, "brief", {"--harness": "codex-cli"}))
+
+    def test_has_runnable_call_toml_false_when_matcher_excludes_startup(self):
+        self._write(
+            '[[hooks.SessionStart]]\n'
+            'matcher = "compact"\n'
+            '\n'
+            '[[hooks.SessionStart.hooks]]\n'
+            'type = "command"\n'
+            'command = "omhc brief --harness codex-cli"\n'
+        )
+        self.assertFalse(hookconf.has_runnable_call_toml(
+            self.toml_path, "brief", {"--harness": "codex-cli"}))
+
+    def test_ignores_unrelated_tables(self):
+        # 실측(이 머신의 ~/.codex/config.toml): [hooks.state...] 는 신뢰
+        # bookkeeping 이지 인라인 [hooks] 가 아니다 — hooks.<Event> 패턴이
+        # 아니므로 조용히 무시돼야 한다.
+        self._write(
+            '[hooks.state]\n'
+            '\n'
+            '[hooks.state."/x/hooks.json:session_start:0:0"]\n'
+            'sha256 = "deadbeef"\n'
+            '\n'
+            '[projects."/a/b"]\n'
+            'trust_level = "trusted"\n'
+        )
+        with open(self.toml_path, encoding="utf-8") as fh:
+            hooks = hookconf.parse_toml_hooks(fh.read())
+        self.assertEqual(hooks, {})
+
+    def test_missing_file_is_false_not_raise(self):
+        self.assertFalse(hookconf.has_runnable_call_toml(self.toml_path, "brief"))
+
+    def test_garbage_file_is_false_not_raise(self):
+        self._write("not { valid toml at all !!!\n[[[broken\n")
+        self.assertFalse(hookconf.has_runnable_call_toml(self.toml_path, "brief"))
+
+    def test_a_hooks_key_that_shadows_the_hooks_list_does_not_raise(self):
+        # 리뷰 #2 재현: 그룹의 `hooks` 키(내부적으로 리스트로 초기화된다)를
+        # 본문의 `hooks = "oops"` 로 덮어쓰면, 다음 [[hooks.<E>.hooks]] 가
+        # 그 리스트에 append 하려다 문자열이라 죽는다.
+        self._write(
+            '[[hooks.SessionStart]]\n'
+            'hooks = "oops"\n'
+            '\n'
+            '[[hooks.SessionStart.hooks]]\n'
+            'type = "command"\n'
+            'command = "omhc brief --harness codex-cli"\n'
+        )
+        with open(self.toml_path, encoding="utf-8") as fh:
+            hooks = hookconf.parse_toml_hooks(fh.read())
+        self.assertEqual(hooks["SessionStart"][0]["hooks"][0]["command"],
+                         "omhc brief --harness codex-cli")
+        self.assertTrue(hookconf.has_runnable_call_toml(
+            self.toml_path, "brief", {"--harness": "codex-cli"}))
+
+    def test_inspect_toml_wraps_a_parse_failure_as_cannot_parse(self):
+        # inspect_toml 은 parse_toml_hooks 자체가 예상 밖으로 던지는 경우까지
+        # 대비한다(리뷰 #2) — 그 경로를 이 테스트에서 강제로 재현한다.
+        self._write('[[hooks.SessionStart]]\n')
+        with mock.patch.object(hookconf, "parse_toml_hooks", side_effect=RuntimeError("boom")):
+            ok, detail = hookconf.inspect_toml(self.toml_path, {}, os.path.dirname(self.toml_path))
+        self.assertFalse(ok)
+        self.assertIn("cannot parse", detail)
+
+    def test_inspect_toml_pass_when_matching_shipped_fragment(self):
+        fragment = {"SessionStart": [{"hooks": [
+            {"type": "command", "command": "omhc brief --harness codex-cli"},
+        ]}]}
+        home = os.path.dirname(self.toml_path)
+        os.makedirs(os.path.join(home, ".local", "bin"), exist_ok=True)
+        bin_path = os.path.join(home, ".local", "bin", "omhc")
+        with open(bin_path, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(bin_path, 0o755)
+        self._write(self._toml_with_bin(home))
+        ok, detail = hookconf.inspect_toml(self.toml_path, fragment, home)
+        self.assertTrue(ok, detail)
+
+    def _toml_with_bin(self, home: str) -> str:
+        return (
+            '[[hooks.SessionStart]]\n'
+            '\n'
+            '[[hooks.SessionStart.hooks]]\n'
+            'type = "command"\n'
+            'command = "{}/.local/bin/omhc brief --harness codex-cli"\n'
+        ).format(home)
 
 
 if __name__ == "__main__":

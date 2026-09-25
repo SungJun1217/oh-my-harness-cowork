@@ -1225,8 +1225,15 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
             inst = adapters.get(adapter_id, home=home)
             hc = getattr(inst, "hook_config", lambda: None)()
             if hc is not None:
-                fragment = hookconf.load_fragment(hc.fragment_name)
-                ok, detail = hookconf.inspect(hc.config_path, fragment, inst.home)
+                # 어댑터가 `hooks_status()` 를 구현하면(예: codex-cli — hooks.json
+                # 뿐 아니라 config.toml 의 인라인 [hooks] 도 보는 판정, #32) 그걸
+                # 쓴다 — 코어(hookconf.inspect)는 hooks.json 한 위치만 안다.
+                custom = getattr(inst, "hooks_status", None)
+                if callable(custom):
+                    ok, detail = custom()
+                else:
+                    fragment = hookconf.load_fragment(hc.fragment_name)
+                    ok, detail = hookconf.inspect(hc.config_path, fragment, inst.home)
                 hook_rows.append(("{} hooks".format(adapter_id), ok, detail))
         except Exception as exc:
             # 조용히 버리지 않는다 — 판정이 죽었다는 사실 자체가 FAIL 행이다
@@ -1468,6 +1475,35 @@ def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
         try:
             if args.hooks_action == "install":
                 fragment = hookconf.load_fragment(hc.fragment_name)
+                custom_status = getattr(inst, "hooks_status", None)
+                # 어댑터가 `inline_hook_present()` 를 구현하면(codex-cli —
+                # config.toml 의 인라인 [hooks] 도 실행 가능한 omhc 호출을 담을
+                # 수 있다, #32) 그걸로 "hooks.json 이 아닌 다른 층에 이미 있는가"
+                # 를 먼저 묻는다 — "존재" 와 "배포 조각과 똑같은가" 는 다른
+                # 질문이다(리뷰 #1): 존재하면 그 층이 깨져 있어도(예: mark 가
+                # 빠짐) hooks.json 에 겹쳐 쓰지 않는다 — 겹치면 하네스가 두
+                # 층을 다 로드하고 경고하는 상태가 된다. 대신 깨져 있으면
+                # 그 사실을 알리고 exit 를 실패로 표시한다.
+                inline_present = getattr(inst, "inline_hook_present", None)
+                if callable(inline_present) and inline_present():
+                    ok, detail = (custom_status() if callable(custom_status)
+                                 else (True, "inline install present"))
+                    if ok is False:
+                        out.write("{}: inline install exists but differs -- {}\n".format(
+                            adapter_id, detail))
+                        out.write("{}: not writing {} (would duplicate)\n".format(
+                            adapter_id, hc.config_path))
+                        had_error = True
+                    else:
+                        out.write("{}: already up to date -- {}\n".format(adapter_id, detail))
+                    continue
+                if callable(custom_status):
+                    pre_ok, pre_detail = custom_status()
+                else:
+                    pre_ok, pre_detail = hookconf.inspect(hc.config_path, fragment, inst.home)
+                if pre_ok is not False:
+                    out.write("{}: already up to date -- {}\n".format(adapter_id, pre_detail))
+                    continue
                 had_backup = os.path.exists(hc.config_path)
                 changed = hookconf.merge(hc.config_path, fragment, inst.home)
                 if changed:
@@ -1479,7 +1515,10 @@ def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
                         out.write("{}: {}\n".format(adapter_id, hc.post_write_note))
                 else:
                     out.write("{}: already up to date\n".format(adapter_id))
-                ok, detail = hookconf.inspect(hc.config_path, fragment, inst.home)
+                if callable(custom_status):
+                    ok, detail = custom_status()
+                else:
+                    ok, detail = hookconf.inspect(hc.config_path, fragment, inst.home)
                 out.write("{}: {} -- {}\n".format(
                     adapter_id, "PASS" if ok else "FAIL", detail))
                 if not ok:
