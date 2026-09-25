@@ -15,7 +15,7 @@ running, and measuring only — no repo writes, no git writes (no `commit`, `che
 - No target given → review the uncommitted diff: `git diff HEAD` plus untracked files from `git status --short`.
 - A commit range / branch given → `git diff <base>...<head>`.
 - Read each changed hunk **in context** — the whole function, its callers, and its tests. A diff alone is not enough.
-- Design context when needed: `README.md` (Korean) and the code comments around the change.
+- Design context when needed: `README.md` / `docs/*.md` and the code comments around the change.
 
 ## What to check, in priority order
 
