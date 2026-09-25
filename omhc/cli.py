@@ -670,6 +670,31 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
                     }, home=home)
 
 
+def _recent_hook_start(key: str, harness: str, session: str, home,
+                       now: float) -> bool:
+    """이 세션의 start 행 중 **훅이 쓴**(via:"scan" 아닌) 것이 due() 가 보는
+    창 안에 있고, 나이 기한의 절반보다 젊은가(#30 리뷰).
+
+    - 창: due() 와 같은 기본 limit 으로 읽는다. 창 밖으로 밀려난 행을 근거로
+      건너뛰면 due() 에는 그 세션이 아예 안 보인다.
+    - via:"scan" 은 세지 않는다: backfill 이 대신 적은 행만 있으면 훅이 실제로
+      돈 증거(codex health)를 남겨야 한다.
+    - 나이: due() 는 세션의 가장 최근 start 행 epoch 로 나이를 잰다. compact 행을
+      전혀 안 남기면 며칠째 쓰는 세션이 MAX_AGE 를 넘겨 빠진다 — 절반보다
+      오래됐으면 남겨 나이를 갱신한다(기한 판정일 뿐 순서 기준이 아니다).
+    못 읽으면 False — 모르면 행을 남기는 쪽(예전 동작)이다."""
+    try:
+        for r in ledger.read(home=home, repo_key=key):
+            if (r.get("event") == "start" and r.get("harness") == harness
+                    and r.get("session") == session and r.get("via") != "scan"):
+                epoch = float(r.get("epoch") or 0)
+                if now - epoch < due.MAX_AGE_SECONDS / 2:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     """세션 시작을 원장에 남긴다. 훅이 부른다. 약 220바이트 한 줄."""
     raw = args.stdin if args.stdin is not None else _stdin_text()
@@ -700,7 +725,16 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     # Claude 트랜스크립트가 아직 쓰이지 않아 판정이 늘 fail-open 했고, Codex 는
     # rollout 이 없으면 영구히 비대화형으로 적힐 수 있었다. 판정은 brief 시점에
     # 어댑터가 실제 파일을 보고 내린다(brief.compute 가 due 에 넘기는 eligible).
-    ledger.append(row, home=home)
+    #
+    # 자동 압축 뒤 SessionStart 가 source:"compact" 로 같은 세션에서 다시
+    # 발화한다(Codex 실측, #30). 새 사람 턴이 아니므로 훅이 최근에 이미 적은
+    # 세션이면 start 행을 또 남기지 않는다(조건은 _recent_hook_start) — 게이트와 brief 의 재전달 조건 덕분에 해는
+    # 없었지만 머신 공용 원장만 불린다. 원장에 없는 세션(세션 도중에 omhc 를
+    # 설치해 startup 을 놓친 경우)이면 이 행이 첫 기록이므로 남긴다.
+    compact = str(payload.get("source") or "") == "compact"
+    if not (compact and session and _recent_hook_start(
+            key, args.harness, session, home, row["epoch"])):
+        ledger.append(row, home=home)
     # SessionStart 의 `source` 어휘는 Claude Code 와 Codex 가 공유한다(둘 다
     # 실측). "resume" 은 같은 세션에 새 턴이 이어붙었다는 뜻이다 — 그 세션이
     # 이미 다른 하네스에 전달됐었다면 due() 가 already_delivered() 에서 멈춰
