@@ -151,6 +151,43 @@ class TestCompute(unittest.TestCase):
                              repo_root=self.h.repo_root, home=self.h.home, now=NOW)
         self.assertIn("source of truth", body)
 
+    def test_old_stamped_notes_expire_but_legacy_lines_stay(self):
+        """#36: 7일이 지난 메모는 핸드오프에 붙지 않는다. 시각 없는 옛 줄은 남는다."""
+        from omhc import due
+        self.h.plant_codex_session()
+        os.makedirs(self.h.state, exist_ok=True)
+        with open(os.path.join(self.h.state, "notes.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("옛 형식 메모\n")
+            fh.write("{:.0f}\t지난달 메모\n".format(NOW - due.MAX_AGE_SECONDS - 60))
+            fh.write("{:.0f}\t어제 메모\n".format(NOW - 86400))
+        body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("어제 메모", body)
+        self.assertIn("옛 형식 메모", body)
+        self.assertNotIn("지난달 메모", body)
+        self.assertNotIn("\t", body)
+
+    def test_omhc_note_writes_a_stamp_that_the_reader_expires(self):
+        """쓰는 쪽과 읽는 쪽이 같은 형식을 쓰는지 고정한다(리뷰)."""
+        import time as _time
+        from omhc import cli, due
+        cwd = os.getcwd()
+        os.chdir(self.h.repo_root)
+        self.addCleanup(os.chdir, cwd)
+        out, err = io.StringIO(), io.StringIO()
+        code = cli.cmd_note(cli.build_parser().parse_args(["note", "탭\t포함 메모"]),
+                            home=self.h.home, out=out, err=err)
+        self.assertEqual(code, 0)
+        with open(os.path.join(self.h.state, "notes.txt"), encoding="utf-8") as fh:
+            line = fh.read().strip("\n")
+        m = brief._NOTE_STAMP.match(line)
+        self.assertIsNotNone(m, line)
+        self.assertEqual(m.group(2), "탭 포함 메모")
+        self.assertEqual(brief._notes(self.h.state, now=_time.time()), ["탭 포함 메모"])
+        self.assertEqual(brief._notes(self.h.state,
+                                      now=_time.time() + due.MAX_AGE_SECONDS + 60), [])
+
     def test_same_vendor_yields_empty(self):
         self.h.plant_codex_session()
         body = brief.compute(my_harness="codex-cli", my_session_id="me1",
