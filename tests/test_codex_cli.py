@@ -685,6 +685,229 @@ class TestWriteSide(unittest.TestCase):
             self.assertTrue(callable(channels[0]))
 
 
+class TestInlineTomlHooks(unittest.TestCase):
+    """#32: config.toml 의 인라인 `[[hooks.SessionStart]]` 도 hooks.json 과
+    같은 자격으로 훅 설치로 친다."""
+
+    def _install_toml(self, home: str) -> None:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "config.toml"), "w", encoding="utf-8") as fh:
+            fh.write(
+                '[[hooks.SessionStart]]\n'
+                '\n'
+                '[[hooks.SessionStart.hooks]]\n'
+                'type = "command"\n'
+                'command = "omhc brief --harness codex-cli"\n'
+            )
+
+    def _install_json(self, home: str) -> None:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "hooks.json"), "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": [
+                {"hooks": [{"type": "command",
+                            "command": "omhc brief --harness codex-cli"}]}]}}, fh)
+
+    def test_inline_only_is_installed(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_toml(home)
+            self.assertTrue(CX.CodexCliAdapter(home=home).hook_is_installed())
+
+    def test_inline_only_install_handoff_succeeds(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_toml(home)
+            receipt = CX.CodexCliAdapter(home=home).install_handoff(
+                A.HandoffBundle(body_md="[omhc] hi\n", repo_root=REPO,
+                               to_adapter_id="codex-cli"))
+            self.assertTrue(receipt.paths_written)
+
+    def test_neither_is_not_installed(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.assertFalse(CX.CodexCliAdapter(home=home).hook_is_installed())
+
+    def _make_bin(self, home: str) -> None:
+        bin_path = os.path.join(home, ".local", "bin", "omhc")
+        os.makedirs(os.path.dirname(bin_path), exist_ok=True)
+        with open(bin_path, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(bin_path, 0o755)
+
+    def _shipped_hooks(self, home: str):
+        # hooks/codex-hooks.json 이 배포하는 정확한 모양(mark + brief --wire
+        # claude) — hooks_status()/inspect 는 이 전체와 비교하지, has_runnable_call
+        # 처럼 brief 하나만 보지 않는다.
+        bin_path = os.path.join(home, ".local", "bin", "omhc")
+        return [
+            {"type": "command", "command": "{} mark --harness codex-cli".format(bin_path)},
+            {"type": "command",
+             "command": "{} brief --harness codex-cli --wire claude".format(bin_path)},
+        ]
+
+    def _install_full_json(self, home: str) -> None:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "hooks.json"), "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": [
+                {"hooks": self._shipped_hooks(home)}]}}, fh)
+
+    def _install_full_toml(self, home: str) -> None:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        bin_path = os.path.join(home, ".local", "bin", "omhc")
+        with open(os.path.join(directory, "config.toml"), "a", encoding="utf-8") as fh:
+            fh.write(
+                '[[hooks.SessionStart]]\n'
+                '\n'
+                '[[hooks.SessionStart.hooks]]\n'
+                'type = "command"\n'
+                'command = "{bin} mark --harness codex-cli"\n'
+                '\n'
+                '[[hooks.SessionStart.hooks]]\n'
+                'type = "command"\n'
+                'command = "{bin} brief --harness codex-cli --wire claude"\n'
+                .format(bin=bin_path))
+
+    def test_hooks_status_pass_via_hooks_json_only(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._make_bin(home)
+            self._install_full_json(home)
+            ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
+            self.assertTrue(ok, detail)
+            self.assertIn("hooks.json", detail)
+
+    def test_hooks_status_pass_via_inline_only(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._make_bin(home)
+            self._install_full_toml(home)
+            ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
+            self.assertTrue(ok, detail)
+            self.assertIn("config.toml", detail)
+
+    def test_hooks_status_warns_when_both_present(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._make_bin(home)
+            self._install_full_json(home)
+            self._install_full_toml(home)
+            ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
+            self.assertIsNone(ok)
+            self.assertIn("both", detail)
+
+    def test_hooks_status_fail_when_neither_present(self):
+        with tempfile.TemporaryDirectory() as home:
+            ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
+            self.assertFalse(ok)
+
+    def test_garbage_config_toml_fails_open(self):
+        with tempfile.TemporaryDirectory() as home:
+            directory = os.path.join(home, ".codex")
+            os.makedirs(directory, exist_ok=True)
+            with open(os.path.join(directory, "config.toml"), "w", encoding="utf-8") as fh:
+                fh.write("not { valid toml at all !!!\n[[[broken\n")
+            self.assertFalse(CX.CodexCliAdapter(home=home).hook_is_installed())
+
+    def _write_projects_trust(self, home: str, repo: str, trust_level: str) -> None:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "config.toml"), "a", encoding="utf-8") as fh:
+            fh.write('\n[projects."{}"]\ntrust_level = "{}"\n'.format(
+                os.path.realpath(repo), trust_level))
+
+    def test_project_trust_body_end_is_not_fooled_by_a_multiline_array_bracket(self):
+        # 리뷰 #3 재현: 예전엔 project 본문의 끝을 `^[ \t]*\[` 로 다시 찾았는데,
+        # 이건 #31 이 이미 걸러낸 "여러 줄 배열 값의 원소도 줄 맨 앞에 `[`
+        # 로 올 수 있다" 문제를 그대로 반복한다 — 공유 스캐너를 쓰면
+        # trust_level 이 (가짜 헤더로 오인된 배열 원소 앞이 아니라) 진짜
+        # 다음 헤더 전까지 온전히 본문으로 잡혀야 한다.
+        with tempfile.TemporaryDirectory() as home, \
+                tempfile.TemporaryDirectory() as repo:
+            directory = os.path.join(home, ".codex")
+            os.makedirs(directory, exist_ok=True)
+            with open(os.path.join(directory, "config.toml"), "w", encoding="utf-8") as fh:
+                fh.write(
+                    '[projects."{}"]\n'
+                    'ignored = [\n'
+                    '  "a",\n'
+                    ']\n'
+                    'trust_level = "trusted"\n'.format(os.path.realpath(repo)))
+            self.assertEqual(
+                CX.CodexCliAdapter(home=home)._project_trust_level(repo), "trusted")
+
+    def test_project_level_hooks_json_counts_when_trusted(self):
+        with tempfile.TemporaryDirectory() as home, \
+                tempfile.TemporaryDirectory() as repo:
+            self._write_projects_trust(home, repo, "trusted")
+            project_dir = os.path.join(repo, ".codex")
+            os.makedirs(project_dir, exist_ok=True)
+            with open(os.path.join(project_dir, "hooks.json"), "w", encoding="utf-8") as fh:
+                json.dump({"hooks": {"SessionStart": [
+                    {"hooks": [{"type": "command",
+                                "command": "omhc brief --harness codex-cli"}]}]}}, fh)
+            self.assertTrue(CX.CodexCliAdapter(home=home).hook_is_installed(repo))
+
+    def test_project_level_hooks_json_ignored_when_untrusted(self):
+        with tempfile.TemporaryDirectory() as home, \
+                tempfile.TemporaryDirectory() as repo:
+            self._write_projects_trust(home, repo, "untrusted")
+            project_dir = os.path.join(repo, ".codex")
+            os.makedirs(project_dir, exist_ok=True)
+            with open(os.path.join(project_dir, "hooks.json"), "w", encoding="utf-8") as fh:
+                json.dump({"hooks": {"SessionStart": [
+                    {"hooks": [{"type": "command",
+                                "command": "omhc brief --harness codex-cli"}]}]}}, fh)
+            self.assertFalse(CX.CodexCliAdapter(home=home).hook_is_installed(repo))
+
+    def test_project_level_ignored_when_trust_unknown(self):
+        with tempfile.TemporaryDirectory() as home, \
+                tempfile.TemporaryDirectory() as repo:
+            # ~/.codex/config.toml 에 이 레포에 대한 [projects."..."] 항목이 아예 없다
+            project_dir = os.path.join(repo, ".codex")
+            os.makedirs(project_dir, exist_ok=True)
+            with open(os.path.join(project_dir, "hooks.json"), "w", encoding="utf-8") as fh:
+                json.dump({"hooks": {"SessionStart": [
+                    {"hooks": [{"type": "command",
+                                "command": "omhc brief --harness codex-cli"}]}]}}, fh)
+            self.assertFalse(CX.CodexCliAdapter(home=home).hook_is_installed(repo))
+
+    def test_hooks_install_skips_duplicate_when_inline_already_installed(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._make_bin(home)
+            self._install_full_toml(home)
+            out = io.StringIO()
+            code = cli.main(["hooks", "install", "--harness", "codex-cli"], home=home, out=out)
+            self.assertEqual(code, 0)
+            self.assertIn("already up to date", out.getvalue())
+            self.assertFalse(os.path.exists(os.path.join(home, ".codex", "hooks.json")))
+
+    def test_hooks_status_reports_differs_not_not_found_for_a_partial_inline_install(self):
+        # 리뷰 #1 재현: brief 는 있지만 mark 도 --wire claude 도 없는 인라인
+        # 설치 — "존재하지만 배포 조각과 다르다" 이지 "없다" 가 아니다.
+        with tempfile.TemporaryDirectory() as home:
+            self._install_toml(home)  # brief 만, mark 없음, --wire claude 없음
+            ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
+            self.assertFalse(ok)
+            self.assertNotIn("not found", detail)
+            self.assertIn("differs from shipped fragment", detail)
+
+    def test_hooks_install_does_not_duplicate_a_partial_inline_install(self):
+        # 리뷰 #1 재현: 부분 인라인 설치 위에 `omhc hooks install` 이 hooks.json
+        # 을 겹쳐 쓰면 Codex 가 두 층을 다 읽고 경고하며, 인라인 쪽은 여전히
+        # 매 세션 실패한다 — 대신 hooks.json 을 쓰지 않고 실패로 보고해야
+        # 한다.
+        with tempfile.TemporaryDirectory() as home:
+            self._make_bin(home)
+            self._install_toml(home)  # brief 만 있는 부분 인라인 설치
+            out = io.StringIO()
+            code = cli.main(["hooks", "install", "--harness", "codex-cli"], home=home, out=out)
+            self.assertNotEqual(code, 0)
+            self.assertIn("differs", out.getvalue())
+            self.assertFalse(os.path.exists(os.path.join(home, ".codex", "hooks.json")))
+            # 재확인해도 여전히 "설치 안 됨" 이 아니라 "다르다" 로 보고돼야 한다.
+            ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
+            self.assertFalse(ok)
+            self.assertNotIn("not found", detail)
+
+
 class TestRegistryV1(unittest.TestCase):
     def test_both_v1_adapters_are_registered(self):
         from omhc import adapters
@@ -788,6 +1011,21 @@ class TestHealth(unittest.TestCase):
         os.utime(path, (self.INSTALL_EPOCH, self.INSTALL_EPOCH))
         return path
 
+    def _install_toml_hook(self, home: str) -> str:
+        directory = os.path.join(home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, "config.toml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(
+                '[[hooks.SessionStart]]\n'
+                '\n'
+                '[[hooks.SessionStart.hooks]]\n'
+                'type = "command"\n'
+                'command = "omhc brief --harness codex-cli"\n'
+            )
+        os.utime(path, (self.INSTALL_EPOCH, self.INSTALL_EPOCH))
+        return path
+
     def _rollout(self, home: str, session_id: str, iso_ts: str, *,
                  extra_meta=None, raw: bytes = None) -> str:
         stamp = time.gmtime()
@@ -830,7 +1068,7 @@ class TestHealth(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("1 consecutive Codex session", detail)
             self.assertIn("newest: codex_cli_rs", detail)
-            self.assertIn("no trust entry", detail)
+            self.assertIn("no hooks.state trust hash", detail)
 
     def test_pass_when_the_ledger_has_a_matching_codex_row(self):
         with tempfile.TemporaryDirectory() as home:
@@ -840,6 +1078,36 @@ class TestHealth(unittest.TestCase):
                 REPO, [{"harness": "codex-cli", "session": "s1", "event": "start"}])
             self.assertTrue(rows[0][1])
             self.assertIn("ran for the latest session", rows[0][2])
+
+    def test_inline_only_install_is_judged_from_config_toml_mtime(self):
+        # #32 리뷰 1 재현: 예전엔 install_epoch 을 언제나 hooks.json 의 mtime
+        # 으로 삼아서, 인라인 전용 설치(hooks.json 자체가 없다)에서 이 stat
+        # 이 ENOENT 로 죽어 이 행이 매번 `----(unknown)` 으로만 남았다 —
+        # 신뢰 안 된 인라인 훅이 조용히 스킵되는 걸 잡아야 할 행이 제 역할을
+        # 못 했다. 이제 실제로 설치된 파일(config.toml)의 mtime 을 쓴다.
+        with tempfile.TemporaryDirectory() as home:
+            self._install_toml_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z")
+            rows = CX.CodexCliAdapter(home=home).health(
+                REPO, [{"harness": "codex-cli", "session": "s1", "event": "start"}])
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(rows[0][1], rows[0][2])
+            self.assertIn("ran for the latest session", rows[0][2])
+
+    def test_inline_only_install_fails_when_a_later_session_has_no_hook_row(self):
+        with tempfile.TemporaryDirectory() as home:
+            self._install_toml_hook(home)
+            self._rollout(home, "s1", "2023-11-15T00:00:00.000Z",
+                          extra_meta={"originator": "codex_cli_rs"})
+            rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertEqual(len(rows), 1)
+            label, ok, detail = rows[0]
+            self.assertEqual(label, "codex hook")
+            self.assertFalse(ok)
+            self.assertIn("1 consecutive Codex session", detail)
+            # 인라인 설치는 hooks.json 의 hooks.state 신뢰 해시와 다른 메커니즘
+            # 이다 — 그 사실이 힌트로만 남아야지 확정 진단으로 말하면 안 된다.
+            self.assertIn("hint, not a diagnosis", detail)
 
     def test_pass_when_only_an_older_pre_trust_session_is_missing(self):
         """리뷰 결함: 신뢰는 config.toml 을 바꾸지 hooks.json 을 바꾸지 않는다 —
@@ -987,7 +1255,7 @@ class TestHealth(unittest.TestCase):
                          .format(hooks_path))
             rows = CX.CodexCliAdapter(home=home).health(REPO, [])
             self.assertFalse(rows[0][1])
-            self.assertNotIn("no trust entry", rows[0][2])
+            self.assertNotIn("no hooks.state trust hash", rows[0][2])
 
 
 class TestStatusIntegration(unittest.TestCase):
