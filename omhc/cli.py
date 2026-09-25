@@ -771,6 +771,18 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
         agents_md.collapse(root)
     except Exception:
         pass
+    # 이 하네스가 세션 시작 시 자기 훅보다 먼저 AGENTS.md 류를 읽는 경우(#36),
+    # "이미 읽혔으니 지운다" 판단은 하네스별 지식이라 어댑터에 위임한다(선택
+    # 메서드, discover/health 와 같은 패턴 — adapter.py 의
+    # on_session_start_mark 참고). compact 는 새 사람 턴이 아니라 이미 읽던
+    # 세션이 이어지는 것뿐이므로 부르지 않는다 — 그 세션이 이미 소비한 블록을
+    # compact 때마다 다시 판정할 이유가 없다.
+    if not compact:
+        try:
+            adapters.get(args.harness, home=home).on_session_start_mark(
+                root, source=str(payload.get("source") or ""), epoch=row["epoch"])
+        except Exception:
+            pass
     # 오래된(24시간 넘은) omhc outbox 파일을 지운다(#36) — 훅 경로이므로
     # 값싼 것만 한다(listdir 하나, 없으면 즉시 리턴).
     try:

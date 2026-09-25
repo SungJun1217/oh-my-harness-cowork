@@ -726,6 +726,174 @@ class TestWriteSide(unittest.TestCase):
             self.assertIsNotNone(managed_block.installed_captured_at(agents_path))
 
 
+class TestOnSessionStartMark(unittest.TestCase):
+    """#36: 이 세션의 mark(startup) 가 "이미 읽힌" AGENTS.md 블록을 붕괴시켜
+    다음 Codex 세션이 못 읽게 한다. resume 은 리뷰 #2 에 따라 건드리지
+    않는다 — "훅보다 먼저 읽는다"는 순서를 startup 에서만 실측했다."""
+
+    def _bare_repo(self, base: str) -> str:
+        root = os.path.join(base, "proj")
+        os.makedirs(root)
+        _repo.git(root, "init", "-q")
+        return root
+
+    def test_block_captured_before_this_startup_mark_is_collapsed(self):
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            managed_block.splice(agents_md.path_for(root), "[omhc] old\n",
+                                 captured_at=1000.0)
+
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="startup", epoch=1000.0 + 3600)
+
+            self.assertIsNone(managed_block.installed_captured_at(agents_md.path_for(root)))
+
+    def test_block_captured_after_this_mark_epoch_is_kept(self):
+        """같은 SessionStart 안에서 brief(Path B) 가 병렬로 이 세션 몫의
+        블록을 이미 써 놓은 경우(경합) — mark 가 그걸 지우면 이 세션조차
+        핸드오프를 못 읽는다."""
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            managed_block.splice(agents_md.path_for(root), "[omhc] just written\n",
+                                 captured_at=2000.0)
+
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="startup", epoch=2000.0)
+
+            self.assertIsNotNone(managed_block.installed_captured_at(agents_md.path_for(root)))
+
+    def test_shared_with_claude_is_never_collapsed(self):
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            agents_path = agents_md.path_for(root)
+            claude_path = os.path.join(root, "CLAUDE.md")
+            managed_block.splice(agents_path, "[omhc] old\n", captured_at=1000.0)
+            os.symlink(agents_path, claude_path)
+
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="startup", epoch=1000.0 + 3600)
+
+            self.assertIsNotNone(managed_block.installed_captured_at(agents_path))
+
+    def test_compact_source_never_collapses(self):
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            managed_block.splice(agents_md.path_for(root), "[omhc] old\n",
+                                 captured_at=1000.0)
+
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="compact", epoch=1000.0 + 3600)
+
+            self.assertIsNotNone(managed_block.installed_captured_at(agents_md.path_for(root)))
+
+    def test_resume_source_never_collapses(self):
+        """리뷰 #2: resume 에서 Codex 가 AGENTS.md diff 를 언제 계산하는지는
+        아직 실측하지 못했다 — startup 만 붕괴시킨다."""
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            managed_block.splice(agents_md.path_for(root), "[omhc] old\n",
+                                 captured_at=1000.0)
+
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="resume", epoch=1000.0 + 3600)
+
+            self.assertIsNotNone(managed_block.installed_captured_at(agents_md.path_for(root)))
+
+    def test_a_splice_between_marks_judgment_and_the_strip_call_is_not_lost(self):
+        """리뷰 #1 재현: mark 가 "낡았다"고 판정한 직후, 다른 프로세스(같은
+        SessionStart 안에서 병렬로 도는 brief 등)가 새 핸드오프 Y 를 그
+        자리에 써 놓는다 — Y 는 살아남아야 한다."""
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            path = agents_md.path_for(root)
+            managed_block.splice(path, "[omhc] old\n", captured_at=1000.0)
+
+            real = managed_block.installed_captured_at
+            calls = {"n": 0}
+
+            def fake(p):
+                calls["n"] += 1
+                value = real(p)
+                if calls["n"] == 1:
+                    # mark 의 판정(첫 호출)이 끝나자마자, 다른 프로세스가
+                    # 이 세션 몫의 새 블록을 이미 써 놓았다고 흉내낸다.
+                    managed_block.splice(p, "[omhc] concurrent Y\n", captured_at=9999.0)
+                return value
+
+            with mock.patch.object(managed_block, "installed_captured_at", side_effect=fake):
+                CX.CodexCliAdapter(home=home).on_session_start_mark(
+                    root, source="startup", epoch=1000.0 + 3600)
+
+            self.assertEqual(managed_block.installed_captured_at(path), 9999.0)
+
+    def test_a_splice_between_strips_read_and_write_is_not_lost(self):
+        """리뷰 #1 재현: strip_if_captured 자신의 첫 읽기와 실제로 지우는
+        쓰기 사이(재확인 지점)에 새 핸드오프 Y 가 끼어들어도 살아남는다."""
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            path = agents_md.path_for(root)
+            managed_block.splice(path, "[omhc] old\n", captured_at=1000.0)
+
+            real = managed_block.installed_captured_at
+            calls = {"n": 0}
+
+            def fake(p):
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    # strip_if_captured 의 쓰기 직전 재확인(두 번째 호출) —
+                    # 그 값을 읽기 전에 다른 프로세스가 이미 새로 썼다고
+                    # 흉내낸다.
+                    managed_block.splice(p, "[omhc] concurrent Y\n", captured_at=9999.0)
+                return real(p)
+
+            with mock.patch.object(managed_block, "installed_captured_at", side_effect=fake):
+                CX.CodexCliAdapter(home=home).on_session_start_mark(
+                    root, source="startup", epoch=1000.0 + 3600)
+
+            self.assertEqual(managed_block.installed_captured_at(path), 9999.0)
+            self.assertEqual(calls["n"], 2)
+
+    def test_no_block_is_a_noop_and_never_raises(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._bare_repo(base)
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="startup", epoch=1000.0)
+
+    def test_an_internal_failure_is_swallowed(self):
+        """훅 경로에서 불리므로(invariant 2) 무엇이 터져도 던지지 않는다."""
+        from omhc import managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home, \
+             mock.patch.object(managed_block, "installed_captured_at",
+                               side_effect=RuntimeError("boom")):
+            root = self._bare_repo(base)
+            CX.CodexCliAdapter(home=home).on_session_start_mark(
+                root, source="startup", epoch=1000.0)
+
+
 class TestInlineTomlHooks(unittest.TestCase):
     """#32: config.toml 의 인라인 `[[hooks.SessionStart]]` 도 hooks.json 과
     같은 자격으로 훅 설치로 친다."""

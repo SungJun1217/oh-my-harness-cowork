@@ -241,6 +241,26 @@ class HarnessAdapter:
         """
         return ()
 
+    def on_session_start_mark(self, repo_root: str, *, source: str, epoch: float) -> None:
+        """`mark` 의 SessionStart 훅 경로에서, 이 하네스로 마크될 때마다 불리는
+        선택 메서드 — `discover`/`health` 와 같은 패턴이다. 기본은 no-op.
+
+        "이 하네스가 세션 시작 시 AGENTS.md/CLAUDE.md 류를 자기 SessionStart
+        훅보다 먼저 읽는다"는 사실은 하네스별 실측(#36, codex-cli 0.156.1
+        sandbox 실측: 첫 턴은 훅 실행 전에 이미 읽은 뒤라 훅이 그 파일을 고쳐도
+        소용없다)이라 코어가 아니라 어댑터가 안다. 코어(cmd_mark)는 어떤 조건에서
+        부를지(`source` != "compact")만 정하고, "이미 읽혔으니 지워도 되는가"의
+        판단(캡처 시각과의 margin, Claude 공유 가드)은 구현이 갖는다.
+
+        `source` 는 SessionStart 훅 payload 의 원문 값이다("startup"/"resume"/
+        "compact"/빈 문자열 등, 두 하네스가 공유하는 어휘 — cli.py 참고).
+        `epoch` 는 이 mark 호출이 기록한 원장 행의 epoch 다(이 세션이 지금
+        막 이 하네스에서 새로 시작/재개됐다는, mark 가 가진 가장 이른 시각).
+
+        훅 경로에서 불리므로(invariant 2) 절대 던지지 않는다 — 호출자도 감싸지만
+        구현 스스로도 감싸야 한다(기본 동작이 no-op 인 이유)."""
+        return None
+
     def hook_config(self):
         """이 하네스의 SessionStart 훅 설정 위치. 선택 메서드 — `health`/
         `fallback_channels`/`discover` 와 같은 패턴이다. 기본은 None(훅 개념이

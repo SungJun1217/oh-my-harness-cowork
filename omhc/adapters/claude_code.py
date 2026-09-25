@@ -621,3 +621,10 @@ class ClaudeCodeAdapter:
             fragment_name="claude-settings.fragment.json",
             post_write_note="",
         )
+
+    def on_session_start_mark(self, repo_root: str, *, source: str, epoch: float) -> None:
+        """Claude Code 가 CLAUDE.md 류를 언제 읽는지는 아직 실측하지 못했다
+        (#36) — 안다는 근거가 없으니 no-op 이다. 기반 클래스를 아무도
+        상속하지 않으므로(#36 이전에도 이미 그랬듯) 기본값이 상속으로
+        얻어지지 않는다."""
+        return None

@@ -177,6 +177,12 @@ def session_meta(path: str) -> Optional[dict]:
 _PROGRAMMATIC_ORIGINATORS = frozenset({"applecider", "codex_exec"})
 _PROGRAMMATIC_ORIGINATOR_PREFIXES = ("splitlane",)
 
+# managed_block 의 captured 는 초 단위로 반올림된다(#36) — 같은 SessionStart
+# 안에서 병렬로 도는 mark 와 brief 가 같은 초나 그 인접 초에 각자 epoch 를
+# 재면, 이 margin 없이는 brief 가 이 세션 몫으로 방금 쓴 블록을 mark 가
+# "이미 읽힌 낡은 블록"으로 오인해 지울 수 있다(on_session_start_mark 참고).
+_CONSUMED_BLOCK_MARGIN_SECONDS = 2.0
+
 
 def _is_headless_originator(originator) -> bool:
     if not isinstance(originator, str):
@@ -1075,6 +1081,57 @@ class CodexCliAdapter:
         try:
             if not agents_md.shared_with_claude(repo_root):
                 agents_md.collapse(repo_root, force=True)
+        except Exception:
+            pass
+
+    def on_session_start_mark(self, repo_root: str, *, source: str, epoch: float) -> None:
+        """#36: Codex 는 AGENTS.md 를 자기 SessionStart 훅보다 **먼저** 읽는다
+        (실측, codex-cli 0.156.1 sandbox, rollout 증거) — 첫 턴은 훅이 파일을
+        고치든 지우든 이미 읽은 뒤라, 여기서 블록을 지워도 "이 세션이 이미
+        읽었다"는 사실 자체는 바꿀 수 없다. 그래도 지금 지워 두면 **다음**
+        Codex 세션은 이 블록을 못 읽는다 — 블록 수명이 "이 세션이 소비할 때
+        까지"로 줄어든다(예전엔 24시간 staleness 뿐이었다). 다음 턴엔 Codex
+        가 스스로 "이전 AGENTS.md 지시는 더 이상 적용되지 않는다"를 알려준다
+        (실측) — 핸드오프의 '지시가 아니다' 성격과도 맞는다.
+
+        `source` 는 "startup" 만 본다 — "읽기가 훅보다 먼저"라는 순서는
+        **startup 에서만 실측했다**(리뷰). resume(같은 세션의 다음 턴)에서
+        Codex 가 AGENTS.md diff 를 언제 계산하는지(사람의 첫 턴 입력 시점일
+        수도 있다)는 아직 실측하지 못했다 — 만약 그게 훅보다 뒤라면, resume
+        에서도 붕괴시키면 그 턴이 아직 보지도 못한, 이 세션 자신의 brief 가
+        방금 쓴 블록을 지워 버릴 수 있다. 그래서 resume 은 건드리지 않는다.
+        "compact" 는 새 턴이 아니므로(#30 과 같은 구분) 호출자(cmd_mark)가
+        아예 부르지 않지만, 여기서도 다시 확인해 방어한다.
+
+        경합(리뷰 #1): 같은 SessionStart 안에서 Codex 는 자기 훅들을 병렬로
+        돌린다(실측) — mark(이 메서드)와 brief(Path B 설치)가 동시에 실행될
+        수 있다. brief 가 hooks.json 미신뢰 등으로 Path B 를 골라 **이 세션**
+        몫의 새 블록을 이미 써 놓았는데, mark 가 그걸 "이미 읽힌 낡은 블록"
+        으로 오인해 지우면 이 세션조차 못 읽는 핸드오프가 된다. 블록의
+        captured_at 은 초 단위로 반올림되므로(managed_block), `epoch`(mark
+        가 이 세션에 대해 기록한 원장 epoch)와 같은 초이거나 그 이후, 혹은
+        `_CONSUMED_BLOCK_MARGIN_SECONDS` 안쪽이면 이 세션(또는 이후) 것일
+        수 있어 건드리지 않는다. 그래도 여기서 판정한 뒤 실제로 지우기까지는
+        여전히 시간차가 있다(check-then-act) — `agents_md.collapse_if_captured`
+        가 그 값을 들고 다시 확인한 뒤에만 지운다(managed_block.strip_if_captured
+        참고): 그 사이 다른 프로세스가 새 구간을 써 놓았으면 값이 달라져
+        있으므로 손대지 않는다. `#33` 거절 경로와 같은 가드도 쓴다: AGENTS.md
+        가 Claude Code 와 공유되면(먼저 확인) 절대 건드리지 않는다. 훅
+        경로에서 불리므로 절대 던지지 않는다(invariant 2)."""
+        if source != "startup":
+            return
+        from .. import agents_md, managed_block
+
+        try:
+            if agents_md.shared_with_claude(repo_root):
+                return
+            path = agents_md.path_for(repo_root)
+            captured = managed_block.installed_captured_at(path)
+            if captured is None:
+                return
+            if captured > epoch - _CONSUMED_BLOCK_MARGIN_SECONDS:
+                return
+            agents_md.collapse_if_captured(repo_root, captured)
         except Exception:
             pass
 
