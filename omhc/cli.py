@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import select
 import sys
 import time
 from typing import Dict, List, Optional
@@ -29,6 +30,45 @@ def _stdin_text() -> str:
             return ""
         return sys.stdin.read()
     except Exception:
+        return ""
+
+
+# --dry-run 이 stdin 을 기다리는 시간의 상한(초). 훅 예산과는 무관하다 —
+# 사람이 손으로 부르는 경로다.
+_DRY_RUN_STDIN_TIMEOUT = 0.2
+# 훅 payload 는 1KB 남짓이다. `yes |` 처럼 끝없이 쓰는 쪽이면 데이터가 늘
+# 준비돼 있어 타임아웃이 안 걸리므로 크기로도 끊는다(리뷰).
+_DRY_RUN_STDIN_CAP = 1 << 20
+
+
+def _dry_run_stdin_text() -> str:
+    """`--dry-run`(`--stdin` 없이)용 stdin 읽기 — 읽되 멈추지는 않는다(#27
+    리뷰). 문서화된 쓰임 하나가 `echo '{"cwd": R}' | omhc brief --dry-run`
+    처럼 다른 cwd 에서 payload 를 파이프로 넘기는 것이라 아예 안 읽으면 그
+    쓰임이 깨진다. 그렇다고 `sys.stdin.read()` 를 그대로 쓰면 파이프의 다른
+    쪽 끝이 한 줄 보내고 열어만 둔 채로 있어도(TTY 가 아니라 isatty() 는
+    False) EOF 를 영영 못 만나 멈춘다. 그래서 select 로 "지금 읽을 게 있는가"
+    만 묻고, 있으면 읽고, 다음 데이터가 타임아웃 안에 안 오면 거기서 멈춘다
+    — EOF(echo 처럼 쓰고 닫음)도 "읽을 게 있다"로 잡혀 즉시 반환된다."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return ""
+        fd = sys.stdin.fileno()
+        chunks = []
+        total = 0
+        while total < _DRY_RUN_STDIN_CAP:
+            ready, _w, _x = select.select([fd], [], [], _DRY_RUN_STDIN_TIMEOUT)
+            if not ready:
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        # select 는 Windows 에서 파이프에 못 쓴다; fileno()/read() 도 닫힌
+        # 스트림이면 던질 수 있다. 훅 경로가 아니어도 절대 던지지 않는다.
         return ""
 
 
@@ -77,6 +117,43 @@ def _ref_repo_key(ref) -> Optional[str]:
     return locate.owning_repo_key(ref.cwd)
 
 
+# rebase 마커의 event 값. session/path 가 없는(자기 세션이 아닌) 원장 행이므로
+# due()/log 랭크/known_sessions/newest_start/codex health 모두 "event=='start'"
+# 만 보는 기존 필터에 자동으로 걸러진다 — 필드 자체를 안 넣는 편이 "모르는
+# 리더는 무시한다"를 코드로 강제하는 것보다 안전하다(#28).
+REBASE_EVENT = "rebase"
+
+
+def _append_rebase_marker(adapter_id: str, key: str, home, now: float) -> None:
+    """`adapter_id` 의 알려진 모든 세션에 대해 "이 지점 이후로 baseline 위치가
+    최소 여기"라고 한 번에 선언하는 행. 개별 seen 행(#22 증상: backfill 마다
+    알려진 세션 수만큼 늘던 것) 대신 이것 하나만 남긴다 — session/path 가
+    없으므로 known_sessions/newest_start/log 랭크/codex health 는 그대로
+    무시한다(모두 event=='start' 나 session 존재를 전제로 거른다)."""
+    ledger.append({
+        "repo": key, "harness": adapter_id, "event": REBASE_EVENT, "via": "scan",
+        "epoch": now,
+    }, home=home)
+
+
+def _distinct_sessions_with_path(rows: List[dict], *, exclude=frozenset()) -> List[str]:
+    """`rows` 를 뒤에서부터 훑어 path 있는 distinct session id 를 최신순으로
+    돌려준다 — "이번 라운드에 볼 후보"(writer, 최대 `REACTIVATE_SCAN_CAP`
+    개로 자름)와 "마커가 실제로 덮은 세션 집합"(reader, `own_rows` 를 마커
+    **이전** 구간으로 슬라이스한 뒤 같은 함수로 재구성) 둘 다 반드시 같은
+    순위를 써야 한다(#28 2차 리뷰) — 각자 따로 구현하면 어긋나는 순간
+    "마커가 확인 못 한 세션까지 덮는다"는 바로 그 버그가 재발한다."""
+    out = []
+    seen = set()
+    for row in reversed(rows):
+        sid = row.get("session")
+        if not sid or sid in exclude or sid in seen or not row.get("path"):
+            continue
+        seen.add(sid)
+        out.append(sid)
+    return out
+
+
 def _rebaseline_after_fresh_start(adapter_id: str, key: str, root: str, home,
                                   own_rows: List[dict], added: set,
                                   now: float, deadline: float) -> None:
@@ -102,20 +179,44 @@ def _rebaseline_after_fresh_start(adapter_id: str, key: str, root: str, home,
     않는 이유는 백필 origin 에서는 **B 가 들어온 바로 그 순간**(아직 A 가
     안 자랐을 가능성이 가장 높은 시점) 찍으므로, 지연 경로보다 흡수될
     애매구간(다음 mark 까지의 창)이 짧기 때문이다 — 두 경로가 같은 결과로
-    수렴하지만 이쪽이 더 이르다."""
-    others = []
-    seen_sid = set()
-    for row in reversed(own_rows):
-        sid = row.get("session")
-        if not sid or sid in added or sid in seen_sid or not row.get("path"):
-            continue
-        seen_sid.add(sid)
-        others.append(sid)
-        if len(others) >= REACTIVATE_SCAN_CAP:
-            break
+    수렴하지만 이쪽이 더 이르다.
+
+    #28: 여기서 재기준이 필요한 A 들 중 실제로 자란 적 없는(size 가 그대로인)
+    세션은 개별 seen 행 대신 한 번의 `rebase` 마커로 흡수한다 — 실측(#22):
+    새 Codex 세션 20개가 5개씩 채워지는 backfill 마다 다른 세션 최대 20개를
+    다시 stat 해 seen 행을 남겨 34개가 늘었다. 실제로 자란(agent 혼잣말 등)
+    세션은 여전히 자기 seen 행을 받는다 — **그 행을 마커보다 먼저 쓴다**:
+    마커는 "이 라운드에서 안 자란 것으로 확인된 세션들"에만 해당하고, 자란
+    세션은 자기 위치를 스스로 갱신하므로 마커가 걔들의 판정을 흐리지 않는다.
+
+    리뷰(#28 1차): 마커는 "**이번에 실제로 훑은** 세션들이 최소 여기까지는
+    안 자란 채 확인됐다" 는 선언이다 — deadline 이 중간에 끊거나(`break`),
+    stat 이 일시적 OSError 로 실패하거나, seen 행 자체가 `ledger.append`
+    상한에 걸려 버려지면, 이번 라운드는 "훑은 것 전부 확인" 이 아니다 —
+    확인 못 한 세션도 마커가 똑같이 덮어버려 그 세션의 실제 위치를 실제보다
+    뒤로(더 최신으로) 잘못 민다. 재현: A 가 B 전에 이미 자란 채(사람 턴 포함)
+    deadline/OSError 때문에 이번 라운드에 확인 안 됐는데 다른 세션(안 자람)
+    때문에 마커가 찍히면, 다음 라운드에 A 의 위치가 마커 뒤로 밀려 그 애매한
+    사전 성장이 (흡수돼야 할 것이) 명확한 재개로 오판된다 — due() 가 B 대신
+    A 를 돌려준다. 그래서 전수 확인 여부(`complete`)를 추적해, 완전할 때만
+    마커 하나로 묶고, 아니면 확인된 만큼만(옛 방식대로) 개별 seen 행을
+    남긴다.
+
+    리뷰(#28 2차): `complete` 는 **cap 초과와 무관하다** — cap
+    (`REACTIVATE_SCAN_CAP`)에 걸려 이번 라운드 후보에서 아예 빠진 세션은
+    "확인 못 한 것" 이 아니라 "원래 이번 마커가 아무것도 약속하지 않는
+    것"이다(마커가 덮는 범위 자체가 `_reactivate_grown_sessions` 쪽에서
+    "이번 마커를 쓸 때의 top-N" 으로 재구성된다 — 그쪽 주석 참고). cap 을
+    `complete` 에 얹으면(1차 버전의 실수) 알려진 세션이 20개를 넘는 레포에서
+    영원히 개별 seen 으로 되돌아가 애초에 고치려던 행 폭증이 그대로
+    재현된다(실측: n=25/60 에서 HEAD 와 같은 84행/80seen)."""
+    others = _distinct_sessions_with_path(own_rows, exclude=added)[:REACTIVATE_SCAN_CAP]
+    complete = True
+    unchanged = []  # (sid, path, size) — 이 라운드에서 안 자란 것으로 확인됨
     for sid in others:
         if time.time() > deadline:
-            return
+            complete = False
+            break
         # 이 세션의 마지막 path/size — 리뷰(3차 #3)의 fallback 으로 쓴다.
         path = None
         prior_size = None
@@ -134,18 +235,36 @@ def _rebaseline_after_fresh_start(adapter_id: str, key: str, root: str, home,
         try:
             cur_size = os.stat(path).st_size
         except OSError:
+            # 일시적 실패 — 이 세션의 "안 자람" 을 확인 못 했다(#28 리뷰).
+            complete = False
             continue
         # fallback: 이전에 알던 baseline 이 있으면 그것 — 64KB 안에 개행을
         # 못 찾아도 baseline 이 레코드 중간으로 밀리지 않는다. 없으면 None
         # (size 그대로). 0 으로 대체하면 처음부터 다시 읽어 옛 사람 턴으로
         # 거짓 재활성화한다(리뷰에서 재현).
-        ledger.append({
+        aligned = fsio.line_aligned_size(path, cur_size, fallback=prior_size)
+        if prior_size is not None and aligned == prior_size:
+            # 안 자랐다 — complete 로 밝혀지면 이 세션은 마커 하나로 충분하다
+            # (#28). 아니라면 아래에서 옛 방식(개별 seen)으로 되돌린다.
+            unchanged.append((sid, path, aligned))
+            continue
+        if not ledger.append({
             "repo": key, "harness": adapter_id, "session": sid,
             "event": "seen", "via": "scan",
-            "size": fsio.line_aligned_size(path, cur_size,
-                                           fallback=prior_size),
+            "size": aligned,
             "epoch": now, "path": path, "cwd": root,
-        }, home=home)
+        }, home=home):
+            complete = False
+    if unchanged:
+        if complete:
+            _append_rebase_marker(adapter_id, key, home, now)
+        else:
+            for sid, path, size in unchanged:
+                ledger.append({
+                    "repo": key, "harness": adapter_id, "session": sid,
+                    "event": "seen", "via": "scan", "size": size,
+                    "epoch": now, "path": path, "cwd": root,
+                }, home=home)
 
 
 def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
@@ -277,6 +396,40 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
     재개 행을 그 뒤에 또 얹지 않는다(원장 append 순서가 due() 의 "가장 최근"
     판정이므로, 얹으면 방금 채운 더 최신 세션 대신 재개된 낡은 세션이 이긴다).
 
+    #28: 조건 (a) 에서 superseded 이면서 안 자란 세션도 매 mark 마다 개별
+    seen 행을 받았다(신뢰된 훅 B 뒤에서 지연 재기준이 매번 돈다) — 그런
+    세션들은 `_append_rebase_marker` 하나로 묶는다. 자란 세션(안 자란 것과
+    갈리는 그 자리)은 여전히 자기 seen 행을 마커보다 먼저 받는다.
+
+    리뷰(#28 1차): deadline 이 세션 중간에 끊거나(`break`), stat 이 일시적
+    OSError 로 실패하거나, seen/grew 행이 `ledger.append` 상한에 걸려
+    버려지면 이번 라운드는 "훑은 것 전부 확인" 이 아니다 — 확인 못 한
+    세션에도 마커가 똑같이 적용되면 그 세션의 위치를 실제보다 앞당겨(마커
+    뒤로) 잘못 민다. 그래서 `_rebaseline_after_fresh_start` 와 같은
+    `complete` 규칙을 쓴다 — 완전할 때만 마커, 아니면 확인된 만큼만 개별
+    seen.
+
+    리뷰(#28 2차): `complete` 는 cap(`REACTIVATE_SCAN_CAP`) 초과와 무관하다
+    — cap 은 대신 **읽는 쪽**(`marker_covers`, 아래)에서 다룬다. 마커는
+    "이 하네스의 알려진 세션 전부" 가 아니라 "**그 마커를 쓸 당시 top-N**
+    (같은 순위 함수로 뽑은)이 안 자란 채 확인됐다" 는 뜻이다 — 그래서
+    어떤 세션의 baseline 위치에 마커를 반영해도 되는지는, 그 세션이 마커
+    **작성 시점**의 top-N 에 있었는지로 판정해야 한다(`own_rows` 를 마커
+    이전 구간으로 슬라이스해 같은 `_distinct_sessions_with_path` 로
+    재구성 — writer 가 실제로 훑은 후보와 정확히 같은 집합이 나온다: 그
+    구간 안에서 이미 top-N 안이었던 세션이 이 라운드에 자라 새 행을 얻어도
+    같은 top-N **안에서** 순위만 바뀔 뿐 다른 세션을 밀어내지 않는다 —
+    cap 밖에 있던 세션은 애초에 이 라운드에 후보가 아니었으므로 새 행을
+    받을 수 없다).
+
+    재현(리뷰 2차, "x-far"): cap 밖에 있던 세션이 B 전에 이미 자란 채(사람
+    턴 포함) 이번 마커에 확인된 적이 없는데, 나중에 자기 훅으로 재진입하며
+    `own_rows` 맨 뒤에 새 start 행을 얻으면 — 그 행은 "마커 **이후**" 구간에
+    있으므로 마커 작성 시점 top-N 재구성(`own_rows[:last_marker_pos]`)에는
+    안 잡힌다. `sid in marker_covers` 가 False 로 남아 baseline 위치가 그대로
+    유지되고, superseded 판정이 여전히 정확하다 — due() 는 그 애매한 사전
+    성장을 재개로 오판하지 않는다.
+
     훅 경로이므로 절대 던지지 않는다 — 호출자(cmd_mark)가 통째로 감싼다.
     """
     rows = ledger.read(repo_key=key, home=home)
@@ -314,21 +467,37 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
         if not own_rows:
             continue
 
+        # 이 라운드에서 "안 자랐다" 로 확인될 세션들의 자리를 한 번에 미는
+        # 마커의 위치(#28) — session/path 가 없어 위 known_sessions·newest_start
+        # 류의 필터에 안 걸리지만, 여기서는 baseline **위치**(조건 a) 계산에
+        # 쓴다.
+        last_marker_pos = -1
+        for i, row in enumerate(own_rows):
+            if row.get("event") == REBASE_EVENT:
+                last_marker_pos = i
+
+        # #28 2차 리뷰: 이 마커가 실제로 덮는 세션 집합 — 마커를 **쓸
+        # 당시**의 top-N 을, 그때와 같은 순위 함수로 own_rows 를 마커
+        # 이전 구간(`[:last_marker_pos]`)만 잘라 재구성한다(위 함수
+        # docstring 의 "x-far" 재현 참고). 마커가 없으면(아직 한 번도 안
+        # 찍혔으면) 당연히 아무것도 안 덮는다.
+        marker_covers = (
+            set(_distinct_sessions_with_path(
+                own_rows[:last_marker_pos])[:REACTIVATE_SCAN_CAP])
+            if last_marker_pos >= 0 else set()
+        )
+
         # 이 하네스의 최근 distinct 세션(최신 먼저), path 있는 것만 — no
         # discover(), no 날짜 창. 14일 전에 시작한 세션도 여전히 원장에
         # path 를 들고 있으면 재개를 잡는다.
-        recent_sessions: List[str] = []
-        for row in reversed(own_rows):
-            sid = row.get("session")
-            if not sid or not row.get("path") or sid in recent_sessions:
-                continue
-            recent_sessions.append(sid)
-            if len(recent_sessions) >= REACTIVATE_SCAN_CAP:
-                break
+        recent_sessions = _distinct_sessions_with_path(own_rows)[:REACTIVATE_SCAN_CAP]
+        complete = True  # cap 은 더 이상 completeness 에 영향 없다(#28 2차).
 
+        unchanged = []  # (sid, path, size) — 이 라운드에서 안 자란 것으로 확인됨
         for sid in recent_sessions:
             if time.time() > deadline:
-                return
+                complete = False
+                break
             path = None
             baseline = None
             baseline_pos = -1
@@ -350,6 +519,8 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
             try:
                 cur_size = os.stat(path).st_size
             except OSError:
+                # 일시적 실패 — 이 세션의 "안 자람" 을 확인 못 했다(#28 리뷰).
+                complete = False
                 continue
 
             if baseline is None:
@@ -358,7 +529,7 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
                 # 스냅한다(리뷰) — 레코드 중간을 baseline 으로 잡으면 그
                 # 레코드가 마저 쓰인 뒤 skip-to-newline 로직이 통째로
                 # 건너뛴다.
-                ledger.append({
+                if not ledger.append({
                     "repo": key, "harness": adapter_id, "session": sid,
                     "event": "seen", "via": "scan",
                     # 첫 관측이라 이전 baseline 이 없다. 0 으로 대체하지
@@ -367,7 +538,8 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
                     # 그대로(64KB 넘는 레코드를 쓰는 중일 때만, 알려진 한계).
                     "size": fsio.line_aligned_size(path, cur_size),
                     "epoch": now, "path": path, "cwd": root,
-                }, home=home)
+                }, home=home):
+                    complete = False
                 continue
 
             # 조건 (a): baseline 이후 같은 하네스의 **다른** 세션 start 행이
@@ -391,13 +563,31 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
             # 자랐다면(자라지 않은 경우와 달리) 그 성장이 B 전인지 후인지
             # 알 도리가 없다 — size 하나로는 순서를 못 가리므로 흡수한다
             # (README 의 남은 한계).
+            #
+            # #28: baseline **위치** 는 이 세션 자신의 마지막 size 행이거나,
+            # (이 세션이 이전 라운드에 "안 자랐다"로 확인돼 마커로 흡수됐을
+            # 수 있으므로) 그보다 나중일 수 있는 이 하네스의 마지막 rebase
+            # 마커 — 둘 중 더 뒤엣것이다. 마커 뒤에는 이 세션의 진짜 위치가
+            # 최소 거기까지 왔다는 뜻이라, 그 뒤에 생긴 성장을 애매함 없이
+            # 바로 판정할 수 있다(마커 자신은 이 세션이 실제로 자랐는지는
+            # 모른다 — 그래서 size 는 안 건드리고 위치 계산에만 쓴다).
+            #
+            # #28 2차: 단, 그 마커가 **이** 세션을 실제로 덮었을 때만
+            # (`marker_covers`, 위) — 안 그러면 마커를 쓸 당시 cap 밖에
+            # 있어 확인된 적 없는 세션("x-far")이 나중에 자기 훅으로
+            # 재진입하는 것만으로 애매한 사전 성장이 명확한 재개로
+            # 둔갑한다(리뷰 재현, 위 함수 docstring).
+            effective_pos = (
+                max(baseline_pos, last_marker_pos)
+                if sid in marker_covers else baseline_pos
+            )
             superseded = any(
                 row.get("event") == "start" and row.get("session") != sid
-                for row in own_rows[baseline_pos + 1:]
+                for row in own_rows[effective_pos + 1:]
             )
             if superseded:
                 if cur_size > baseline:
-                    ledger.append({
+                    if not ledger.append({
                         "repo": key, "harness": adapter_id, "session": sid,
                         "event": "seen", "via": "scan",
                         # fallback=이전 baseline(리뷰 3차 #3) — 못 찾아도
@@ -405,15 +595,12 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
                         "size": fsio.line_aligned_size(path, cur_size,
                                                        fallback=baseline),
                         "epoch": now, "path": path, "cwd": root,
-                    }, home=home)
+                    }, home=home):
+                        complete = False
                 else:
-                    # 안 자랐다 — 지금 크기 그대로 재기준점만 B 뒤로 옮긴다
-                    # (값은 안 바뀐다, 원장에서의 **위치**만 바뀐다).
-                    ledger.append({
-                        "repo": key, "harness": adapter_id, "session": sid,
-                        "event": "seen", "via": "scan", "size": baseline,
-                        "epoch": now, "path": path, "cwd": root,
-                    }, home=home)
+                    # 안 자랐다 — complete 로 밝혀지면 개별 seen 대신 이
+                    # 라운드가 끝날 때 한 번의 마커로 흡수한다(#28).
+                    unchanged.append((sid, path, baseline))
                 continue
             if cur_size <= baseline:
                 continue
@@ -445,11 +632,12 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
                 # 줄이 개행 없이 끝났으면(막 쓰는 중이었을 수 있다) 그 레코드는
                 # 아직 안전히 다 읽은 게 아니라서 baseline 에 넣으면 다음 읽기가
                 # 그 줄을 통째로 건너뛴다(리뷰 #2).
-                ledger.append({
+                if not ledger.append({
                     "repo": key, "harness": adapter_id, "session": sid,
                     "event": "start", "via": "scan", "size": since.end_offset,
                     "grew": 1, "epoch": now, "path": path, "cwd": root,
-                }, home=home)
+                }, home=home):
+                    complete = False
                 try:
                     if due.already_delivered(state, sid, harness):
                         due.mark_reopened(state, sid, adapter_id, now)
@@ -463,11 +651,23 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
             # 못 읽었으면 `end_offset` 이 실제로 읽은 데까지만 반영하므로,
             # 다음 mark 가 못 읽은 나머지를 이어서 본다 — `cur_size` 를 그대로
             # 썼다면 그 사이에 있었을 수도 있는 사람 턴을 영영 건너뛴다.
-            ledger.append({
+            if not ledger.append({
                 "repo": key, "harness": adapter_id, "session": sid,
                 "event": "seen", "via": "scan", "size": since.end_offset,
                 "epoch": now, "path": path, "cwd": root,
-            }, home=home)
+            }, home=home):
+                complete = False
+
+        if unchanged:
+            if complete:
+                _append_rebase_marker(adapter_id, key, home, now)
+            else:
+                for sid, path, size in unchanged:
+                    ledger.append({
+                        "repo": key, "harness": adapter_id, "session": sid,
+                        "event": "seen", "via": "scan", "size": size,
+                        "epoch": now, "path": path, "cwd": root,
+                    }, home=home)
 
 
 def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
@@ -506,6 +706,14 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     # 이미 다른 하네스에 전달됐었다면 due() 가 already_delivered() 에서 멈춰
     # resumed 턴을 영영 못 내보낸다(#22). "compact" 는 같은 신호를 주지 않는다
     # — 컨텍스트만 압축했을 뿐 사람의 새 턴이 없으므로 재전달할 것이 없다.
+    # 이 reopen 은 여전히 "다시 열렸을 수 있다"는 힌트일 뿐이다 — 빈 프롬프트
+    # resume 은 source:"resume" 을 내면서도 새 사람 턴을 안 남기고, mark/brief
+    # 동시 실행이면 이 reopen 이 brief 가 방금 내보낸 턴 뒤에 붙을 수도 있다
+    # (#27). 그래도 지운다고 브리지를 고치는 게 아니다 — due() 가 이 세션을
+    # 다시 후보로 보게 하는 유일한 신호가 이것이기 때문이다. 실제로 새로운지는
+    # brief.compute 가 delivered.tsv 의 offset(5번째 열)과 이 세션의 사람 said
+    # 이벤트를 비교해 판정한다 — mark 는 "후보로 볼까"만 결정하고, brief 는
+    # "보낼 게 있나"를 결정한다. 둘의 책임이 다르다.
     if session and str(payload.get("source") or "") == "resume":
         try:
             due.mark_reopened(state, session, args.harness, row["epoch"])
@@ -1118,9 +1326,21 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
 
 
 def cmd_brief(args, *, home=None, out=sys.stdout) -> int:
+    # --dry-run 은 사람이 손으로 확인하려고 부르는 경로다(훅은 --dry-run 을
+    # 절대 넘기지 않는다). 문서화된 쓰임 하나가 `echo '{"cwd": R}' | omhc brief
+    # --dry-run` 처럼 다른 cwd 에서 payload 를 파이프로 넘기는 것이라, 아예 안
+    # 읽으면 그 쓰임이 깨진다(리뷰). 그렇다고 `_stdin_text()` 를 그대로 쓰면
+    # 파이프의 다른 쪽 끝이 열려만 있고 아직 아무것도 안 쓴 채면(TTY 가 아니라
+    # isatty() 는 False) EOF 를 기다리며 멈춘다(#27). `_dry_run_stdin_text()`
+    # 는 select 로 "지금 읽을 게 있는가"만 먼저 물어 그 사이를 가른다. 실제
+    # 훅 경로(dry_run=False)는 오늘과 똑같이 그대로 읽는다.
+    if args.dry_run and args.stdin is None:
+        stdin_text = _dry_run_stdin_text()
+    else:
+        stdin_text = args.stdin if args.stdin is not None else _stdin_text()
     return brief.emit(
         harness=args.harness,
-        stdin_text=args.stdin if args.stdin is not None else _stdin_text(),
+        stdin_text=stdin_text,
         budget=args.budget,
         wire=args.wire,
         force=args.force,

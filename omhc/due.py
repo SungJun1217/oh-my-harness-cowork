@@ -116,14 +116,52 @@ def delivered_order(state_dir: str) -> List[str]:
     return sorted(last, key=last.get)
 
 
-def mark_delivered(state_dir: str, watermark, *, to_harness: str, epoch: float) -> None:
-    """이 세션을 이 하네스에 전달했다고 기록한다. 같은 것을 두 번 밀지 않기 위함."""
+def mark_delivered(
+    state_dir: str,
+    watermark,
+    *,
+    to_harness: str,
+    epoch: float,
+    offset: Optional[int] = None,
+) -> None:
+    """이 세션을 이 하네스에 전달했다고 기록한다. 같은 것을 두 번 밀지 않기 위함.
+
+    `offset` 은 이 전달이 원본 세션에서 어디까지 읽었는지(마지막으로 포함된
+    이벤트의 offset+length) — 5번째 열로 덧붙인다(#27). 옛 4열 줄을 읽는 모든
+    리더(already_delivered, last_delivered, delivered_order, status, cmd_log)는
+    parts[0]/parts[1] 만 보므로 열이 늘어도 그대로 동작한다. offset 이 None 이면
+    (호출자가 모르는 경우) 4열 그대로 남긴다 — 옛 리더와 완전히 같은 모양."""
     if watermark is None:
         return
-    line = "\t".join(
-        (watermark.session_id, to_harness, watermark.harness, "{:.0f}".format(epoch))
-    )
-    fsio.append_line(_delivered_path(state_dir), line)
+    fields = [watermark.session_id, to_harness, watermark.harness, "{:.0f}".format(epoch)]
+    if offset is not None:
+        fields.append(str(offset))
+    fsio.append_line(_delivered_path(state_dir), "\t".join(fields))
+
+
+def last_delivery_offset(state_dir: str, session_id: str, to_harness: str) -> Optional[int]:
+    """이 세션을 이 하네스로 마지막 전달했을 때의 5번째 열(offset).
+
+    reopen 은 힌트일 뿐이라(#27 근본 원인) brief 가 실제로 새 사람 턴이 있는지
+    확인해야 한다 — 이 값이 그 기준선이다. 일치하는 줄이 없거나, 있어도 옛
+    4열 포맷이면 None — "기준을 모른다"는 뜻이고 호출자는 오늘까지의 동작
+    (조건 없이 다시 보냄)을 그대로 유지해야 한다."""
+    try:
+        with open(_delivered_path(state_dir), encoding="utf-8", errors="replace") as fh:
+            lines = [line for line in fh if line.strip()]
+    except OSError:
+        return None
+    for line in reversed(lines):
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) < 2 or parts[0] != session_id or parts[1] != to_harness:
+            continue
+        if len(parts) >= 5:
+            try:
+                return int(parts[4])
+            except ValueError:
+                return None
+        return None
+    return None
 
 
 def mark_reopened(state_dir: str, session_id: str, from_harness: str, epoch: float) -> None:

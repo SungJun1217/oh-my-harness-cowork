@@ -147,6 +147,25 @@ def compute(
 
     ref = refs[0]
     read = adapter.read_session(ref)
+
+    # reopen 은 mark 가 "다시 열렸을 수 있다"고 남기는 힌트일 뿐, 새 사람 턴이
+    # 실제로 있다는 보장이 아니다(#27) — 빈 프롬프트 resume(`codex exec resume
+    # <id> ""`)은 source:"resume" 을 내고 reopen 을 남기지만, mark/brief 동시
+    # 실행 경합은 사람의 턴 자체가 없이도 reopen 만 남긴다. mark 의 reopen
+    # 기록은 그대로 둔다 — due() 가 이 세션을 다시 후보로 보게 하는 신호는
+    # 여전히 그것뿐이다. 대신 여기서 "이전에 이 하네스로 전달한 지점 뒤에 사람의
+    # said 이벤트가 있는가"를 확인해 실제로 새로울 때만 내보낸다. 없으면
+    # 게이트도 기록도 건드리지 않고 "보낼 것 없음"과 같은 빈 문자열을 돌려준다.
+    # (빈 프롬프트 자체는 guard.safe 가 이미 걸러 said 이벤트조차 안 만든다
+    # — codex_cli.py 의 `text = ...text_of(...).strip()`; `if not guard.safe(...)`
+    # — 그래서 offset 비교만으로 충분하다.)
+    prior_offset = due.last_delivery_offset(state, watermark.session_id, my_harness)
+    if prior_offset is not None and not any(
+        e.verb == "said" and e.author == "human" and e.offset >= prior_offset
+        for e in read.events
+    ):
+        return ""
+
     body = mint.mint(read, to_adapter_id=my_harness, budget=budget, now=stamp,
                      notes=_notes(state))
     if not body:
@@ -192,7 +211,9 @@ def compute(
     except Exception as exc:  # deliver 는 던지지 않아야 하지만 훅을 깨뜨릴 수는 없다
         _log_failure(home, "delivery failed: {}".format(exc))
 
-    due.mark_delivered(state, watermark, to_harness=my_harness, epoch=stamp)
+    end_offset = max((e.offset + e.length for e in read.events), default=0)
+    due.mark_delivered(state, watermark, to_harness=my_harness, epoch=stamp,
+                       offset=end_offset)
     return body
 
 

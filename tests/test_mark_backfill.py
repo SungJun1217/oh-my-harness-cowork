@@ -4,6 +4,7 @@ Codex→Claude 를 볼 수 있게 한다. due() 자체는 손대지 않는다.
 """
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -54,8 +55,16 @@ class Harness:
         return code, out.getvalue()
 
     def scan_rows(self, harness="codex-cli"):
+        # #28: rebase 마커도 via=="scan" 이지만 session 이 없다 — 이 헬퍼는
+        # 항상 "특정 세션에 대한" 스캔 행을 의미했으므로 마커는 제외한다.
         rows = ledger.read(repo_key=self.key, home=self.home)
-        return [r for r in rows if r.get("harness") == harness and r.get("via") == "scan"]
+        return [r for r in rows if r.get("harness") == harness and r.get("via") == "scan"
+               and r.get("session")]
+
+    def marker_rows(self, harness="codex-cli"):
+        rows = ledger.read(repo_key=self.key, home=self.home)
+        return [r for r in rows if r.get("harness") == harness
+               and r.get("event") == cli.REBASE_EVENT]
 
 
 class TestEndToEnd(unittest.TestCase):
@@ -718,6 +727,367 @@ class TestReactivateGrownSessions(unittest.TestCase):
         code, out = self.h.mark()
         self.assertEqual(code, 0)
         self.assertEqual(out, "")
+
+
+@contextlib.contextmanager
+def _deadline_trips_after_first_stat(target_name):
+    """#28 리뷰 재현: `cli.<target_name>` 안에서 `os.stat` 이 처음 불린
+    **뒤부터** `time.time()` 이 deadline 을 훌쩍 넘긴 값을 돌려주게 만든다 —
+    그 함수를 호출하는 동안만(armed 는 그 함수 진입 전엔 절대 안 켜진다).
+    첫 세션의 stat 은 정상적으로 끝나고, 그다음 세션 처리 직전의 deadline
+    검사에서 걸려 `break` 하게 된다."""
+    orig_fn = getattr(cli, target_name)
+    orig_stat = os.stat
+    orig_time = time.time
+    state = {"armed": False}
+
+    def fake_stat(path, *a, **kw):
+        result = orig_stat(path, *a, **kw)
+        state["armed"] = True
+        return result
+
+    def fake_time():
+        return (orig_time() + 10 ** 6) if state["armed"] else orig_time()
+
+    def wrapped(*args, **kwargs):
+        with mock.patch("os.stat", side_effect=fake_stat), \
+             mock.patch.object(time, "time", side_effect=fake_time):
+            return orig_fn(*args, **kwargs)
+
+    with mock.patch.object(cli, target_name, side_effect=wrapped):
+        yield
+
+
+class TestRebaseMarker(unittest.TestCase):
+    """#28: backfill/지연 재기준 둘 다에서, 안 자란 다른 세션들은 개별 seen
+    행 대신 (repo, harness) 당 하나의 `rebase` 마커로 흡수한다."""
+
+    def setUp(self):
+        self.h = Harness()
+        self.addCleanup(self.h.close)
+
+    def _seed_known_unchanged(self, n, base):
+        """이미 알려진, 이번 판정에서 안 자랄 세션 n 개를 원장에 직접 심는다
+        (실제 backfill 을 거치지 않고 "알려진 세션" 상태만 재현한다)."""
+        sids = []
+        for i in range(n):
+            sid = "old{}".format(i)
+            path = self.h.plant(sid, base - 10000 + i)
+            ledger.append({
+                "repo": self.h.key, "harness": "codex-cli", "session": sid,
+                "event": "start", "epoch": base - 10000 + i, "path": path,
+                "cwd": self.h.root, "via": "scan", "size": os.path.getsize(path),
+            }, home=self.h.home)
+            sids.append(sid)
+        return sids
+
+    def test_twenty_unchanged_sessions_yield_markers_not_per_session_seen_rows(self):
+        """20 개(딱 REACTIVATE_SCAN_CAP) + 4 개가 새로 들어와도 여전히 라운드당
+        마커 하나, 개별 seen 행은 없다(#28 2차 리뷰: complete 는 cap 과
+        무관하다 — 아래 test_beyond_the_cap_* 이 cap 을 넘는 규모를 다룬다)."""
+        now = time.time()
+        self._seed_known_unchanged(20, now)
+
+        for i in range(4):
+            self.h.plant("new{}".format(i), now - 1000 + i * 10)
+            self.h.mark()
+
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
+        markers = [r for r in codex_rows if r.get("event") == cli.REBASE_EVENT]
+        old_seen = [r for r in codex_rows if r.get("event") == "seen"
+                   and str(r.get("session", "")).startswith("old")]
+        self.assertLessEqual(len(markers), 4, codex_rows)
+        self.assertEqual(old_seen, [])
+        # 마커는 session/path 가 없다 — known_sessions·newest_start·log 랭크가
+        # 세션으로 착각하면 안 된다(#28).
+        for m in markers:
+            self.assertNotIn("session", m)
+            self.assertNotIn("path", m)
+
+    def test_a_session_that_grew_before_b_still_gets_its_own_seen_row(self):
+        """애매한 사전 성장(B 전, agent 전용)은 여전히 자기 seen 행을 받는다
+        — 마커가 그 흡수를 대신 삼켜 위치를 잘못 앞당기면 안 된다."""
+        now = time.time()
+        sids = self._seed_known_unchanged(3, now)
+        grown_sid = sids[0]
+        grown_path = None
+        for r in ledger.read(repo_key=self.h.key, home=self.h.home):
+            if r.get("session") == grown_sid:
+                grown_path = r.get("path")
+        _repo.append_codex_turn(grown_path, ordinal=90)  # 순수 에이전트 셸 실행
+
+        self.h.plant("new-b", now - 500)
+        self.h.mark()  # backfill(B) 이 이 순간 old0 은 이미 자란 상태다
+
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
+        grown_seen = [r for r in codex_rows if r.get("session") == grown_sid
+                     and r.get("event") == "seen"]
+        self.assertEqual(len(grown_seen), 1, codex_rows)
+        markers = [r for r in codex_rows if r.get("event") == cli.REBASE_EVENT]
+        self.assertEqual(len(markers), 1, codex_rows)
+
+    def test_lazy_path_writes_one_marker_under_a_trusted_hook_b(self):
+        """B 가 자기 자신의 신뢰된 훅으로 직접 들어오면(백필이 아니다) 지연
+        재기준(`_reactivate_grown_sessions`)이 돈다 — 안 자란 여러 A 를 한
+        번의 마커로 흡수하고, A 의 나중 human 턴은 여전히 재활성화된다."""
+        now = time.time()
+        sids = self._seed_known_unchanged(5, now)
+
+        self.h.mark(harness="codex-cli", session_id="new-b")  # B 자신의 신뢰된 훅
+
+        self.h.mark()  # Claude mark — 지연 재기준이 5개의 A 를 한 마커로 흡수
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
+        markers = [r for r in codex_rows if r.get("event") == cli.REBASE_EVENT]
+        old_seen = [r for r in codex_rows if r.get("event") == "seen"
+                   and str(r.get("session", "")).startswith("old")]
+        self.assertEqual(len(markers), 1, codex_rows)
+        self.assertEqual(old_seen, [])
+
+        # B(new-b) 를 전달한 뒤, A(=sids[0]) 의 사람 턴이 계속되면 여전히
+        # 재활성화된다.
+        got_b = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        self.assertIsNotNone(got_b)
+        self.assertEqual(got_b.session_id, "new-b")
+        due.mark_delivered(self.h.state, got_b, to_harness="claude-code", epoch=now)
+
+        reactivated_sid = sids[0]
+        reactivated_path = None
+        for r in rows:
+            if r.get("session") == reactivated_sid:
+                reactivated_path = r.get("path")
+        with open(reactivated_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_repo.codex_user_row("B 이후 A 의 재개 턴", ordinal=90),
+                                ensure_ascii=False) + "\n")
+        self.h.mark()
+        got = due.due(self.h.key, "claude-code", "me3", now, home=self.h.home)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.session_id, reactivated_sid)
+
+    def test_beyond_the_cap_backfill_path_still_yields_one_marker_per_round(self):
+        """[리뷰 2차] `complete` 는 cap(`REACTIVATE_SCAN_CAP`) 초과와 무관하다
+        — 알려진 세션이 cap 을 훨씬 넘어도(top-N 만 후보이고 나머지는 애초에
+        손대지 않으므로) 라운드당 마커 하나, 확인된 세션엔 개별 seen 행이
+        없다. cap 을 `complete` 에 얹었던 1차 실수를 되돌리면 n=25/60 에서
+        HEAD 와 같은 행 폭증(측정: 84행/80 seen)이 재현된다."""
+        for n in (cli.REACTIVATE_SCAN_CAP + 5, cli.REACTIVATE_SCAN_CAP + 40):
+            with self.subTest(n=n):
+                h = Harness()
+                self.addCleanup(h.close)
+                now = time.time()
+                for i in range(n):
+                    sid = "old{}".format(i)
+                    path = h.plant(sid, now - 100000 + i)
+                    ledger.append({
+                        "repo": h.key, "harness": "codex-cli", "session": sid,
+                        "event": "start", "epoch": now - 100000 + i, "path": path,
+                        "cwd": h.root, "via": "scan", "size": os.path.getsize(path),
+                    }, home=h.home)
+
+                for r in range(4):
+                    h.plant("new-b{}".format(r), now - 1000 + r * 10)
+                    h.mark()
+
+                rows = ledger.read(repo_key=h.key, home=h.home)
+                codex_rows = [row for row in rows if row.get("harness") == "codex-cli"]
+                markers = [row for row in codex_rows if row.get("event") == cli.REBASE_EVENT]
+                old_seen = [row for row in codex_rows if row.get("event") == "seen"
+                           and str(row.get("session", "")).startswith("old")]
+                self.assertEqual(len(markers), 4, codex_rows)
+                self.assertEqual(old_seen, [], codex_rows)
+
+    def test_beyond_the_cap_lazy_path_still_yields_one_marker_per_round(self):
+        """위와 같지만 B 가 매번 backfill 이 아니라 자기 자신의 신뢰된
+        훅으로 직접 들어오는 경우(지연 재기준 경로)."""
+        for n in (cli.REACTIVATE_SCAN_CAP + 5, cli.REACTIVATE_SCAN_CAP + 40):
+            with self.subTest(n=n):
+                h = Harness()
+                self.addCleanup(h.close)
+                now = time.time()
+                for i in range(n):
+                    sid = "old{}".format(i)
+                    path = h.plant(sid, now - 100000 + i)
+                    ledger.append({
+                        "repo": h.key, "harness": "codex-cli", "session": sid,
+                        "event": "start", "epoch": now - 100000 + i, "path": path,
+                        "cwd": h.root, "via": "scan", "size": os.path.getsize(path),
+                    }, home=h.home)
+
+                for r in range(4):
+                    h.mark(harness="codex-cli", session_id="new-b{}".format(r))
+                    h.mark()  # Claude mark — 지연 재기준
+
+                rows = ledger.read(repo_key=h.key, home=h.home)
+                codex_rows = [row for row in rows if row.get("harness") == "codex-cli"]
+                markers = [row for row in codex_rows if row.get("event") == cli.REBASE_EVENT]
+                old_seen = [row for row in codex_rows if row.get("event") == "seen"
+                           and str(row.get("session", "")).startswith("old")]
+                self.assertEqual(len(markers), 4, codex_rows)
+                self.assertEqual(old_seen, [], codex_rows)
+
+    def test_x_far_reentering_via_its_own_hook_is_not_falsely_reactivated(self):
+        """[리뷰 2차, "x-far" 재현] cap 밖에 있던 세션이 B 전에 이미 자란
+        채(사람 턴 포함) 마커에 확인된 적 없는데, 나중에 자기 신뢰된
+        훅으로(path 는 있지만 size 는 없는 새 start 행) 재진입해 이번
+        라운드의 top-N 안으로 들어와도, 마커가 그 애매한 사전 성장을 명확한
+        재개로 둔갑시키면 안 된다 — `marker_covers` 는 마커를 **쓸 당시**의
+        top-N 만 기억해야 한다(마커 이전 구간으로 슬라이스해 재구성)."""
+        now = time.time()
+        n = cli.REACTIVATE_SCAN_CAP + 5
+        xfar_sid = "old0"  # 가장 먼저 심어 가장 오래된 것 — top-N(cap) 밖으로 밀린다
+        xfar_path = None
+        for i in range(n):
+            sid = "old{}".format(i)
+            path = self.h.plant(sid, now - 100000 + i)
+            if sid == xfar_sid:
+                xfar_path = path
+            ledger.append({
+                "repo": self.h.key, "harness": "codex-cli", "session": sid,
+                "event": "start", "epoch": now - 100000 + i, "path": path,
+                "cwd": self.h.root, "via": "scan", "size": os.path.getsize(path),
+            }, home=self.h.home)
+        # x-far 는 B 가 들어오기 전에 이미 사람 턴으로 자란다 — cap 밖이라
+        # 이번 라운드엔 확인되지 않는다.
+        with open(xfar_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_repo.codex_user_row("B 전, cap 밖에서의 사전 성장",
+                                                       ordinal=90),
+                                ensure_ascii=False) + "\n")
+
+        self.h.plant("new-b", now - 500, human="B 세션 첫 턴")
+        self.h.mark()  # backfill(B) — top-N(cap) 안만 확인되고 마커가 찍힌다
+
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
+        self.assertEqual(
+            len([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT]), 1,
+            codex_rows)
+        # x-far 는 이번 라운드에 확인되지 않았다 — 아무 행도 안 남는다.
+        self.assertEqual(
+            [r for r in codex_rows if r.get("session") == xfar_sid
+             and r.get("via") == "scan" and r is not codex_rows[0]], [])
+
+        # x-far 가 자기 신뢰된 훅으로 재진입한다 — path 는 진짜지만(같은
+        # rollout) size 는 없다(#28 2차 리뷰가 재현하는 정확한 모양).
+        stdin = json.dumps({"cwd": self.h.root, "session_id": xfar_sid,
+                            "transcript_path": xfar_path})
+        args = cli.build_parser().parse_args(
+            ["mark", "--harness", "codex-cli", "--stdin", stdin])
+        out = io.StringIO()
+        code = cli.cmd_mark(args, home=self.h.home, out=out)
+        self.assertEqual(code, 0)
+
+        self.h.mark()  # Claude mark — 지연 재기준이 이제 top-N 에 들어온 x-far 를 본다
+
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
+        xfar_grew = [r for r in codex_rows if r.get("session") == xfar_sid and r.get("grew")]
+        self.assertEqual(xfar_grew, [], codex_rows)
+
+        # 진짜 더 최신 세션(C)이 들어오면 due() 는 여전히 그걸 돌려준다 —
+        # x-far 가 아니다. x-far 재진입 행의 epoch 는 그 mark 호출 시점의
+        # **실제** 시각(cmd_mark 가 round(time.time(),0) 을 쓴다)이라, C 도
+        # 그 뒤의 실제 시각으로 심어야 newest_start 필터에 안 걸린다.
+        after_reentry = time.time()
+        self.h.plant("new-c", after_reentry + 10, human="C 세션 첫 턴")
+        self.h.mark()
+        got = due.due(self.h.key, "claude-code", "me-final", now, home=self.h.home)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.session_id, "new-c")
+
+    def _seed_two_known(self, now, grown_sid_human_turn):
+        """a-stale(B 전에 이미 사람 턴으로 자람) 와 a-unch(안 자람) 를
+        원장에 심는다 — 아래 세 리뷰 재현이 공유하는 준비 단계."""
+        path_stale = self.h.plant("a-stale", now - 5000, human="원래 턴")
+        ledger.append({
+            "repo": self.h.key, "harness": "codex-cli", "session": "a-stale",
+            "event": "start", "epoch": now - 5000, "path": path_stale,
+            "cwd": self.h.root, "via": "scan", "size": os.path.getsize(path_stale),
+        }, home=self.h.home)
+        path_unch = self.h.plant("a-unch", now - 4000)
+        ledger.append({
+            "repo": self.h.key, "harness": "codex-cli", "session": "a-unch",
+            "event": "start", "epoch": now - 4000, "path": path_unch,
+            "cwd": self.h.root, "via": "scan", "size": os.path.getsize(path_unch),
+        }, home=self.h.home)
+        if grown_sid_human_turn:
+            with open(path_stale, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(_repo.codex_user_row("B 전의 사람 턴", ordinal=90),
+                                    ensure_ascii=False) + "\n")
+        return path_stale, path_unch
+
+    def test_deadline_trip_mid_backfill_rebaseline_does_not_mark_unverified_session(self):
+        """[high, 리뷰 재현] 마커는 하네스 전체("이 하네스의 알려진 세션
+        전부가 안 자란 채 확인됐다")에 적용된다 — deadline 이 a-unch 만
+        확인한 채 a-stale(B 전에 이미 자람) 을 못 보고 끊으면, a-unch 만
+        가지고 마커를 찍으면 안 된다. 안 그러면 다음 라운드에 a-stale 이
+        마커 뒤로 잘못 밀려 애매한 사전 성장이 명확한 재개로 오판되고, due()
+        가 B 대신 a-stale 을 돌려준다."""
+        now = time.time()
+        self._seed_two_known(now, grown_sid_human_turn=True)
+        self.h.plant("new-b", now - 100, human="B 세션 첫 턴")
+
+        with _deadline_trips_after_first_stat("_rebaseline_after_fresh_start"):
+            self.h.mark()  # backfill(B) — a-unch 만 확인되고 a-stale 은 못 본다
+
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
+        self.assertEqual([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT],
+                         [], "전수 확인이 아니었으니 마커를 찍으면 안 된다")
+
+        self.h.mark()  # 정상 라운드 — a-stale 의 사전 성장은 흡수돼야지 재개가 아니다
+        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.session_id, "new-b")
+
+    def test_deadline_trip_mid_lazy_reactivate_does_not_mark_unverified_session(self):
+        """[high, 리뷰 재현] 위와 같은 재현을 지연(lazy) 경로에서 — B 가
+        백필이 아니라 자기 자신의 신뢰된 훅으로 들어온 경우."""
+        now = time.time()
+        self._seed_two_known(now, grown_sid_human_turn=True)
+        self.h.mark(harness="codex-cli", session_id="new-b")  # B 자신의 신뢰된 훅
+
+        with _deadline_trips_after_first_stat("_reactivate_grown_sessions"):
+            self.h.mark()  # Claude mark — 지연 재기준, a-unch 만 확인되고 끊긴다
+
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
+        self.assertEqual([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT],
+                         [], "전수 확인이 아니었으니 마커를 찍으면 안 된다")
+
+        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.session_id, "new-b")
+
+    def test_transient_stat_error_on_one_session_does_not_mark_the_others(self):
+        """[medium, 리뷰 재현] a-stale 의 stat 이 일시적으로 실패해도(예:
+        PermissionError) a-unch 가 안 자란 것으로 확인됐다는 이유만으로
+        마커를 찍으면 안 된다 — 확인 못 한 a-stale 에도 그 마커가 똑같이
+        적용되기 때문이다."""
+        now = time.time()
+        path_stale, _ = self._seed_two_known(now, grown_sid_human_turn=True)
+        self.h.plant("new-b", now - 100, human="B 세션 첫 턴")
+
+        orig_stat = os.stat
+
+        def flaky_stat(path, *a, **kw):
+            if path == path_stale:
+                raise PermissionError("transient")
+            return orig_stat(path, *a, **kw)
+
+        with mock.patch("os.stat", side_effect=flaky_stat):
+            self.h.mark()
+
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
+        self.assertEqual([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT],
+                         [], "a-stale 을 확인 못 했으니 마커를 찍으면 안 된다")
+
+        self.h.mark()  # stat 이 다시 정상 — a-stale 의 사전 성장은 흡수된다
+        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.session_id, "new-b")
 
 
 class TestLiveContinueWithoutASessionStart(unittest.TestCase):
