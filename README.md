@@ -386,14 +386,15 @@ this layout.
 |---|---|
 | `omhc status [--json]` | The one human dashboard. Includes archive lag (`lag_bytes`, `tail=…B`) and pull rate |
 | `omhc log [--last N] [--grep P] [--verb V] [--file P]` | Indexed events, one per line. Each line starts with a `<session>#N` ref you can paste straight into `show` |
+| `omhc trace <path> [--all] [--last N] [--json]` | File → session reverse index (sessionwiki `trace` prior art): every indexed event that touched `path`, across both harnesses' sessions, oldest first (newest last, like `log`), each line tagged with harness and a `show`-able ref. Defaults to `modified` only; `--all` adds `inspected`/`ran` mentions. A path/suffix match that's ambiguous across distinct files is reported (with candidates), never guessed. Only covers sessions that were delivered or seen by `watch` — an untouched file just means "not indexed yet", not "never edited"; a session indexed only by `watch` (no ledger `start` row yet) shows `?` for harness |
 | `omhc show <E1\|#137\|abcdef01#137> [--full]` | **Looks up the original bytes by offset** (tier (b) entry point). Bare `#N` resolves against the most recently delivered session (same rule `log`'s pull accounting uses); `<prefix>#N` names the session explicitly — an ambiguous prefix lists the candidates |
 | `omhc note "<text>"` | Leave a note. Either harness's agent can call it from the plain command line |
 
 **Pull rate** ("pulled X of N recent injections") is the one number for
 judging whether omhc's overhead is worth it: X is how many of the last N
 (`PULL_RATE_WINDOW`, 20) delivered sessions for this repo were actually dug
-into via `omhc show` or `omhc log` (each session counts once, no matter how
-many times it's pulled) — a human running `omhc log` by hand counts too, not
+into via `omhc show`, `omhc log`, or `omhc trace` (each session counts once, no
+matter how many times it's pulled) — a human running `omhc log` by hand counts too, not
 just an agent. The window is over the most recent deliveries in append order
 (matched by session id), not the whole history — otherwise a repo used for a
 long time would show a rate that keeps drifting down as old, no-longer-pulled

@@ -373,12 +373,14 @@ outbox 가 대신 받는 게 아니라 Codex 쪽 `brief` 호출 자체가 없어
 |---|---|
 | `omhc status [--json]` | 유일한 사람용 대시보드. 아카이브 지연(`lag_bytes`, `tail=…B`)과 인출률 포함 |
 | `omhc log [--last N] [--grep P] [--verb V] [--file P]` | 색인된 이벤트를 한 줄씩. 각 줄은 `<session>#N` 참조로 시작하며 그대로 `show`에 넘길 수 있음 |
+| `omhc trace <path> [--all] [--last N] [--json]` | 파일 → 세션 역인덱스(sessionwiki `trace` 선례). `path`를 건드린 색인된 이벤트를 두 하네스 세션을 넘나들며 오래된 순으로(최신이 마지막 줄, `log`와 같은 순서) 나열하고, 각 줄에 하네스와 `show`로 열 수 있는 참조를 붙임. 기본은 `modified`만; `--all`은 `inspected`/`ran` 언급까지 포함. 접미사 매칭이 서로 다른 파일 여럿에 걸쳐 모호하면 짐작하지 않고 후보를 보여줌. 전달됐거나 `watch`가 본 세션만 잡힌다 — 안 잡힌다고 "고친 적 없다"는 뜻은 아니고 "아직 색인 안 됐다"는 뜻; `watch`로만 색인되고 원장에 아직 `start` 행이 없는 세션은 하네스 칸이 `?`로 나옴 |
 | `omhc show <E1\|#137\|abcdef01#137> [--full]` | **원본 바이트를 오프셋으로 조회** (tier (b) 진입점). 맨 `#N`은 가장 최근 전달된 세션 기준(`log`의 인출률 회계와 같은 규칙)이고, `<prefix>#N`은 세션을 직접 지정함 — 접두사가 모호하면 후보를 나열함 |
 | `omhc note "<text>"` | 메모. 두 하네스의 에이전트가 맨 명령줄로 호출 가능 |
 
 **인출률**("pulled X of N recent injections")은 omhc 의 부담이 값을 하는지
 판단할 유일한 숫자입니다. N 은 이 레포에 전달된 가장 최근 `PULL_RATE_WINDOW`
-(20)개 세션, X 는 그중 `omhc show`나 `omhc log`로 실제로 파본 세션 수입니다
+(20)개 세션, X 는 그중 `omhc show`, `omhc log`, `omhc trace`로 실제로 파본 세션
+수입니다
 (같은 세션을 여러 번 파봐도 한 번만 셉니다) — 사람이 손으로 `omhc log`를
 돌려도 셈에 들어갑니다, 에이전트뿐 아니라. 창은 전달된 전체 역사가 아니라
 가장 최근 전달들(append 순서, 세션 id 로 매칭)만 봅니다 — 안 그러면 오래 쓴

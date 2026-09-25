@@ -7,7 +7,7 @@ import re
 import select
 import sys
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import (
     adapters, agents_md, brief, due, fsio, gate, hookconf, index, ledger, locate,
@@ -805,17 +805,20 @@ def cmd_note(args, *, home=None, out=sys.stdout, err=None) -> int:
 
 def _record_pull(key: str, state: str, via: str, home, session: Optional[str] = None,
                  tag: Optional[str] = None) -> None:
-    """`show`/`log` 로 산출물을 인출했다는 행을 원장에 남긴다. §9 인출률 회계.
+    """`show`/`log`/`trace` 로 산출물을 인출했다는 행을 원장에 남긴다. §9 인출률 회계.
 
     `harness` 키를 절대 넣지 않는다 — due() 는 event=="start" 만 보고,
     backfill 은 harness+start 로 own_rows 를 거르고, codex health() 도
     event=="start" 만 "훅이 돌았다"는 증거로 센다. 이 세 곳 중 어디에도
-    pull 행이 섞여 들면 안 된다. 실패는 show/log 의 결과에 영향을 주면
+    pull 행이 섞여 들면 안 된다. 실패는 show/log/trace 의 결과에 영향을 주면
     안 되므로 통째로 삼킨다(훅 경로는 아니지만 fail-open 을 유지한다).
 
     show 는 실제로 읽은 세션을 넘긴다. `#N` 은 옛 세션의 색인에 떨어질 수 있어
-    "가장 최근 전달" 로 두면 보지 않은 세션의 인출률이 오른다. 대상이 하나로
-    정해지지 않는 log 만 가장 최근 전달 세션(delivered.tsv 마지막 줄)에 돌린다."""
+    "가장 최근 전달" 로 두면 보지 않은 세션의 인출률이 오른다. trace 도
+    마찬가지다 — 화면에 실제로 찍힌 매치의 세션들을 하나씩 넘긴다(#35 리뷰:
+    매치가 0건이거나 모호하면 아예 호출하지 않는다 — "가장 최근 전달"로
+    근사하면 안 본 세션까지 인출률에 잡힌다). 대상이 하나로 정해지지 않는
+    log 만 가장 최근 전달 세션(delivered.tsv 마지막 줄)에 돌린다."""
     try:
         session = session or due.last_delivered(state)
         if not session:
@@ -944,6 +947,168 @@ def cmd_log(args, *, home=None, out=sys.stdout) -> int:
         )
     if not rows:
         out.write("no events (run a session in another harness first)\n")
+    return 0
+
+
+# --- trace ------------------------------------------------------------------
+
+
+# 기본은 `modified` 만 — sessionwiki 의 파일→세션 역인덱스처럼 "이 파일을 고친
+# 세션" 이 1차 질문이다. `--all` 은 이 파일이 **언급된** 흔적(읽거나 돌린 명령의
+# 인자에 나온 경로)까지 넓힌다 — `inspected`/`ran` 은 파일을 바꾸지 않았어도
+# `paths` 를 채우는 유일한 다른 두 동사다(codex_cli.py `_item_fact`,
+# claude_code.py `_paths_of`).
+_TRACE_DEFAULT_VERBS = frozenset({"modified"})
+_TRACE_ALL_VERBS = frozenset({"modified", "inspected", "ran"})
+
+
+def _norm_posix(path: str) -> Tuple[str, ...]:
+    """경로를 '/' 로 쪼갠 세그먼트로. 접미사 비교(끝에서부터 몇 조각이
+    같은가)의 단위 — os.sep 이 다른 곳(윈도우 Codex 로그 등)에서도 문자열
+    그대로 비교할 수 있다."""
+    return tuple(seg for seg in path.replace("\\", "/").split("/") if seg not in ("", "."))
+
+
+def _path_suffix_match(target_segs: Tuple[str, ...], candidate: str) -> bool:
+    cand_segs = _norm_posix(candidate)
+    return bool(target_segs) and len(cand_segs) >= len(target_segs) \
+        and cand_segs[-len(target_segs):] == target_segs
+
+
+def _normalize_against(base: str, raw: str) -> str:
+    """`raw` 를 절대경로로 접는다(realpath) — 상대경로면 `base` 기준.
+    파일이 지금 없어도(지워진 옛 커밋) realpath 는 정규화만 하고 던지지 않는다."""
+    p = raw if os.path.isabs(raw) else os.path.join(base, raw)
+    return os.path.realpath(p)
+
+
+def cmd_trace(args, *, home=None, out=sys.stdout) -> int:
+    """`<path>` 를 건드린 색인된 이벤트를 세션을 넘나들며 찾는다(#35, sessionwiki
+    `trace` 선례). 색인은 전달 시점이나 `watch` 가 세우므로, 아직 한쪽 하네스도
+    이 레포에서 전달·감시된 적 없으면 아무리 최근에 고친 파일도 안 보인다 —
+    그 사실 자체를 결과 메시지가 알린다."""
+    root, key, state = _state_for(home)
+    reason = locate.refused_root(root)
+    if reason:
+        out.write("{}\n".format(reason))
+        return 1
+
+    # 인자는 cwd 기준 상대/절대 둘 다일 수 있고, 색인에 적힌 경로는 레포 루트
+    # 기준 상대(Codex FileChange 의 diff 헤더)이거나 절대(Claude Code 의
+    # file_path)일 수 있다 — 양쪽을 realpath 로 접어 같은 잣대로 비교한다.
+    target_abs = _normalize_against(os.getcwd(), args.path)
+    target_segs = _norm_posix(args.path)
+
+    verbs = _TRACE_ALL_VERBS if args.all else _TRACE_DEFAULT_VERBS
+
+    session_harness: Dict[str, str] = {}
+    for row in ledger.read(home=home, limit=0, repo_key=key):
+        if row.get("event") == "start" and row.get("session"):
+            session_harness.setdefault(row["session"], row.get("harness") or "?")
+
+    exact: List[Tuple[str, object]] = []
+    # 정규화된 절대경로 -> 그 파일을 언급한 (session, row) 목록. 정확히 일치하는
+    # 게 하나도 없을 때만 접미사 매칭으로 넘어가고, 그마저 서로 다른 파일 여럿에
+    # 걸치면(모호) 아예 쓰지 않는다 — 잘못된 파일의 이력을 보여주는 것보다
+    # "없다"고 하는 편이 안전하다(가이드: "unambiguous 할 때만 허용").
+    #
+    # 리뷰(#35): 행 하나가 서로 다른 두 접미사-일치 경로를 동시에 담을 수 있다
+    # (예: paths=("omhc/adapters/__init__.py", "omhc/__init__.py"), 둘 다
+    # `__init__.py` 로 끝난다) — 첫 매치에서 멈추면 그 행이 실은 두 후보 파일
+    # 중 무엇을 가리키는지 모른다는 사실이 사라져, 다른 행이 그중 하나만 담아도
+    # "버킷이 하나뿐이다"로 잘못 판정된다(재현: repro 세션 s1/s2). 그래서
+    # 일치하는 **모든** 경로를 각자의 버킷에 넣는다 — 같은 행이 여러 버킷에
+    # 나뉘어 들어가도 상관없다(모호하면 애초에 아무 버킷도 안 쓴다).
+    suffix_buckets: Dict[str, List[Tuple[str, object]]] = {}
+    for idx_path in _index_files(state):
+        session = os.path.basename(idx_path)[: -len(".idx")]
+        for row in index.rows(idx_path):
+            if row.verb not in verbs or not row.paths:
+                continue
+            matched_exact = False
+            for p in row.paths:
+                if _normalize_against(root, p) == target_abs:
+                    exact.append((session, row))
+                    matched_exact = True
+                    break
+            if matched_exact:
+                continue
+            for p in row.paths:
+                if _path_suffix_match(target_segs, p):
+                    suffix_buckets.setdefault(_normalize_against(root, p), []).append(
+                        (session, row))
+
+    matches = exact
+    if not matches:
+        if len(suffix_buckets) == 1:
+            matches = next(iter(suffix_buckets.values()))
+        elif len(suffix_buckets) > 1:
+            candidates = sorted(
+                locate.relativize(root, p) or p for p in suffix_buckets)
+            if args.json:
+                # JSON 스트림에 안내 문장을 섞지 않는다(리뷰) — 소비자가 후보로
+                # 다시 물을 수 있게 객체로 낸다. 결과 목록(배열)과 모양이 달라
+                # 모호함을 빈 결과와 헷갈리지 않는다.
+                out.write(json.dumps({"ambiguous": candidates}, ensure_ascii=False) + "\n")
+            else:
+                out.write("ambiguous: {} matches {} — pass a longer path\n".format(
+                    args.path, ", ".join(candidates)))
+            return 0
+
+    _session_rank = _session_log_rank(key, state, home)
+    matches.sort(key=lambda pair: (_session_rank(pair[0]), pair[1].seq))
+
+    if args.last is not None and args.last >= 0:
+        matches = matches[len(matches) - args.last :] if args.last else []
+
+    if not matches:
+        if args.json:
+            out.write("[]\n")
+        else:
+            out.write(
+                "no indexed events touched {}; only delivered or watched sessions "
+                "are indexed\n".format(args.path))
+        return 0
+
+    # #35 리뷰: pull 회계는 **실제로 화면에 찍힌** 세션에만 붙인다 — 매치가
+    # 0건이거나 모호해도 due.last_delivered() 로 떨어지면 "가장 최근 전달"이
+    # 매번 인출된 것처럼 인출률이 부풀어 README 설명("실제로 파본 세션")과
+    # 어긋난다(리뷰). `log` 는 대상이 하나로 안 좁혀져 그 근사를 쓰지만, trace
+    # 는 이미 세션이 좁혀져 있으니 근사할 이유가 없다.
+    delivered = set(due.delivered_order(state))
+    for session in dict.fromkeys(s for s, _ in matches):
+        if session in delivered:
+            _record_pull(key, state, "trace", home, session=session)
+
+    # `log`(#10)과 같은 이유로 이 배치가 아니라 상태 디렉터리 전체에서 유일하게
+    # 만든다 — 필터로 짧아진 접두사가 화면 밖 다른 세션과 겹치면 그 ref 를
+    # `show` 에 넘겼을 때 모호해진다.
+    n = _unique_prefix_len(_all_session_ids(state))
+
+    if args.json:
+        out.write(json.dumps([
+            {
+                "ref": "{}#{}".format(session[:n], row.seq),
+                "session": session,
+                "harness": session_harness.get(session, "?"),
+                "verb": row.verb,
+                "ok": row.ok,
+                "arg": row.arg,
+                "paths": list(row.paths),
+            }
+            for session, row in matches
+        ], ensure_ascii=False, indent=2) + "\n")
+        return 0
+
+    for session, row in matches:
+        ref = "{}#{}".format(session[:n], row.seq)
+        content = row.arg or ",".join(row.paths)
+        out.write(
+            "{} {} {} {} {}\n".format(
+                ref, session_harness.get(session, "?"), row.verb,
+                "ok" if row.ok else "FAIL", content,
+            )
+        )
     return 0
 
 
@@ -1644,6 +1809,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--verb", default="")
     p.add_argument("--file", default="")
     p.set_defaults(func=cmd_log)
+
+    p = sub.add_parser(
+        "trace",
+        help="파일을 건드린 색인된 이벤트를 두 하네스 세션을 넘나들며 보인다",
+        description="색인된 세션 중 이 파일을 건드린 이벤트를 `show` 로 열 수 있는 "
+                     "참조와 함께 오래된 순으로(최신이 마지막 줄, `log` 와 같은 "
+                     "순서) 나열한다. 색인은 전달 시점이나 `omhc watch` 가 세우므로, "
+                     "아직 전달·감시된 적 없는 세션은 여기 안 잡힌다. `watch` 로만 "
+                     "색인되고 아직 원장에 start 행이 없는 세션은 하네스 칸이 `?` 로 "
+                     "나온다.")
+    p.add_argument("path", help="상대·절대경로 모두 가능")
+    p.add_argument("--all", action="store_true",
+                   help="modified 뿐 아니라 inspected/ran 언급까지 포함")
+    p.add_argument("--last", type=int, default=30)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_trace)
 
     p = sub.add_parser("note", help="메모를 남긴다 (에이전트도 부를 수 있다)")
     p.add_argument("text", nargs="+")
