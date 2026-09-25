@@ -10,8 +10,8 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from . import (
-    adapters, agents_md, brief, due, fsio, gate, hookconf, index, ledger, locate,
-    managed_block, pin, watch,
+    adapters, agents_md, brief, deliver, due, fsio, gate, hookconf, index, ledger,
+    locate, managed_block, pin, watch,
 )
 from .adapter import AdapterUnavailable, SessionRef
 
@@ -769,6 +769,12 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     # 어떤 omhc 호출에서든 오래된 AGENTS.md 구간을 붕괴시킨다.
     try:
         agents_md.collapse(root)
+    except Exception:
+        pass
+    # 오래된(24시간 넘은) omhc outbox 파일을 지운다(#36) — 훅 경로이므로
+    # 값싼 것만 한다(listdir 하나, 없으면 즉시 리턴).
+    try:
+        deliver.prune_outbox(root, now=time.time())
     except Exception:
         pass
     if args.verbose:
@@ -1730,6 +1736,9 @@ def cmd_clear(args, *, home=None, out=sys.stdout) -> int:
     rejected_cleared = ledger.clear_rejected(key, home=home)
     if rejected_cleared:
         removed.append("{} ledger reject row(s)".format(rejected_cleared))
+    outbox_removed = deliver.prune_outbox(root, now=time.time(), force=True)
+    if outbox_removed:
+        removed.append("{} outbox file(s)".format(len(outbox_removed)))
     out.write("cleared {}\n".format(", ".join(removed) if removed else "nothing"))
     return 0
 

@@ -184,6 +184,25 @@ its own project.
 > Codex can't see — `omhc status`'s `codex agents.md budget` row (see below)
 > reports it.
 
+> [!NOTE]
+> `<repo>/.omhc/outbox/` files are transient. `omhc mark` (run by the
+> SessionStart hook) deletes omhc's own outbox files once they're older than
+> 24 hours; `omhc clear` deletes all of them for the repo immediately. Files
+> that don't match omhc's own naming and header are never touched. Every file
+> drop also tries to register `.omhc/` in `.git/info/exclude` (skipped once
+> it's already registered, or if it's already ignored some other way), the
+> same per-clone mechanism the AGENTS.md managed block uses. When Codex's own SessionStart hook succeeds (Path A),
+> omhc also collapses any leftover AGENTS.md managed block (Path B) from
+> before right away, instead of waiting the usual 24 hours — so a fresh
+> session never reads a stale block alongside the fresh hook handoff. That
+> cleanup is skipped in a repo where `AGENTS.md` is shared with Claude Code
+> (see below) — omhc never writes to a shared `AGENTS.md` at all, whether
+> installing or collapsing. Every
+> handoff file (outbox header, AGENTS.md block marker) carries both a Unix
+> epoch and a human-readable UTC timestamp, so a relative age shown in the
+> body ("3m ago", frozen at mint time) can be checked against the real
+> capture time.
+
 This unpacks the latest release into `~/.local/share/omhc/<version>` and
 symlinks `~/.local/bin/omhc` — no pip, no pipx (zero dependencies, so the
 source tree *is* the install). Re-run to update (old versions under

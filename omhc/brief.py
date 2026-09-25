@@ -24,7 +24,8 @@ def log_failure(home: Optional[str], detail: str) -> None:
         # (ValueError)로 터진다. 로그 한 줄 때문에 전달이 끊기면 안 된다.
         with open(os.path.join(root, GUARD_LOG), "a", encoding="utf-8",
                   errors="backslashreplace") as fh:
-            fh.write("--- {}\n{}\n".format(time.strftime("%Y-%m-%dT%H:%M:%SZ"), detail))
+            fh.write("--- {}\n{}\n".format(
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), detail))
     except OSError:
         pass
 

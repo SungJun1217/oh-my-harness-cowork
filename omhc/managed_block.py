@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from typing import Optional
 
 from . import fsio
@@ -14,14 +15,25 @@ END = "<!-- {}:end -->".format(MARKER_ID)
 STALE_AFTER_SECONDS = 24 * 3600
 
 _BLOCK = re.compile(
-    re.escape(BEGIN_PREFIX) + r'\s+captured="(?P<captured>[0-9.]+)"\s*-->'
+    re.escape(BEGIN_PREFIX) + r'\s+captured="(?P<captured>[0-9.]+)"'
+    r'(?:\s+captured_utc="[^"]*")?\s*-->'
     r".*?" + re.escape(END) + r"\n?",
     re.S,
 )
 
 
+def _iso_readable(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
 def _begin(captured_at: float) -> str:
-    return '{} captured="{:.0f}" -->'.format(BEGIN_PREFIX, captured_at)
+    # captured_utc 는 사람이 읽는 절대시각이다(#36) — 본문(body_md)의 상대
+    # 나이("3m ago")는 mint 시점에 얼어붙으므로, 이게 있어야 나중에 읽는
+    # 사람이 그 상대값이 얼마나 낡았는지 가늠할 수 있다. captured(epoch) 는
+    # is_stale/installed_captured_at 가 그대로 계속 읽는다 — 마커 포맷을
+    # 바꾸지 않는다.
+    return '{} captured="{:.0f}" captured_utc="{}" -->'.format(
+        BEGIN_PREFIX, captured_at, _iso_readable(captured_at))
 
 
 def _block_text(body: str, captured_at: float) -> str:
