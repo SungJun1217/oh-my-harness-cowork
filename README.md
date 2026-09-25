@@ -161,6 +161,17 @@ For a non-git project, `touch .omhc-root` at its top-level directory — without
 either `.git` or `.omhc-root`, every subdirectory you run omhc from becomes
 its own project.
 
+> [!IMPORTANT]
+> Measured (codex-cli 0.155.1): in a `.omhc-root` project, Codex started in a
+> subfolder does **not** read the ancestor `AGENTS.md` with its default
+> `project_root_markers = [".git"]` — Path B (the AGENTS.md managed block) is
+> then silently ineffective. Add `.omhc-root` to that setting in
+> `~/.codex/config.toml` (keep `.git` too):
+> ```toml
+> project_root_markers = [".git", ".omhc-root"]
+> ```
+> `omhc status`'s `codex root markers` row (see below) checks this for you.
+
 This unpacks the latest release into `~/.local/share/omhc/<version>` and
 symlinks `~/.local/bin/omhc` — no pip, no pipx (zero dependencies, so the
 source tree *is* the install). Re-run to update (old versions under
@@ -286,6 +297,18 @@ Claude's `mark` backfill. It shows `----` while it cannot judge yet: no
 interactive Codex session here since `hooks.json` changed (the date is shown),
 only headless `codex exec` sessions (they never count — open an interactive
 `codex` here once), or an unknown error.
+
+For a repo whose root is marked by `.omhc-root` (not `.git`, and with no `.git`
+in any ancestor directory either — Codex's own default already reaches down
+from there), a `codex root markers` row checks whether
+`~/.codex/config.toml`'s `project_root_markers` includes `.omhc-root` — see
+the box above. It never gates: this setting only matters for Path B (the
+AGENTS.md fallback), so it PASSes when the marker is there and otherwise shows
+`----` with the exact line to add — plus, when the omhc Codex hook isn't
+installed, an explicit note that Path B is currently your only channel to
+Codex. `----` also covers a config file that's missing, unreadable, or that
+can't be parsed (never written by omhc), and a key found only inside a
+`[section]` (TOML tables scope keys — it must be at the top level).
 
 For every detected harness, status also adds a `<adapter-id> hooks` row
 (e.g. `claude-code hooks`, `codex-cli hooks`) that checks whether omhc's

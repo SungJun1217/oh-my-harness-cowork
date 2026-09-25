@@ -1186,6 +1186,231 @@ class TestHealthMatchesAcrossOmhcRootMarker(unittest.TestCase):
         self.assertTrue(line.startswith("PASS"), out.getvalue())
 
 
+class TestFirstTableHeader(unittest.TestCase):
+    """리뷰: 줄 맨 앞의 `[` 가 모두 섹션 머리는 아니다."""
+
+    def test_headers_and_non_headers(self):
+        F = CX._first_table_header
+        self.assertGreaterEqual(F('a = 1\n[tui]\n'), 0)
+        self.assertGreaterEqual(F('a = 1\n  [projects."/a b"]\n'), 0)
+        self.assertGreaterEqual(F('[[mcp]]\n'), 0)
+        self.assertGreaterEqual(F('x = [\n  ".git",\n]\n[t]\n'), 0)
+        self.assertEqual(F('other = [\n  ["a", "b"],\n]\nk = 1\n'), -1)
+        self.assertEqual(F('s = """\n[x]\n"""\n'), -1)
+        self.assertEqual(F('# [c]\nk = 1\n'), -1)
+        # basic 여러 줄 문자열 안의 \""" 는 끝이 아니다.
+        self.assertGreaterEqual(F('a = """x \\""" y"""\n[t]\n'), 0)
+
+    def test_a_nested_array_value_is_unparseable(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "c.toml")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write('project_root_markers = [\n  [".omhc-root"],\n]\n')
+            state, _ = CX.CodexCliAdapter(home=home)._codex_root_markers(path)
+            self.assertEqual(state, "unparseable")
+
+    def test_a_nested_array_element_does_not_hide_a_later_top_level_key(self):
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".codex"))
+            path = os.path.join(home, ".codex", "config.toml")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write('other = [\n  ["a", "b"],\n]\n'
+                         'project_root_markers = [".git", ".omhc-root"]\n')
+            state, markers = CX.CodexCliAdapter(home=home)._codex_root_markers(path)
+            self.assertEqual(state, "ok")
+            self.assertIn(".omhc-root", markers)
+
+
+class TestRootMarkerHealth(unittest.TestCase):
+    """#31: `.omhc-root` 로만 정해진 프로젝트(=`.git` 없음)에서 Codex 의
+    `project_root_markers` 설정이 `.omhc-root` 를 포함하는지 진단한다."""
+
+    def _omhc_root_repo(self, base: str) -> str:
+        root = os.path.join(base, "proj")
+        os.makedirs(root)
+        open(os.path.join(root, ".omhc-root"), "w").close()
+        return root
+
+    def _row(self, rows):
+        return next((r for r in rows if r[0] == "codex root markers"), None)
+
+    def test_git_repo_gets_no_row(self):
+        with tempfile.TemporaryDirectory() as home:
+            rows = CX.CodexCliAdapter(home=home).health(REPO, [])
+            self.assertIsNone(self._row(rows))
+
+    def test_no_repo_root_gets_no_row(self):
+        with tempfile.TemporaryDirectory() as home:
+            rows = CX.CodexCliAdapter(home=home).health(None, [])
+            self.assertIsNone(self._row(rows))
+
+    def _write_config(self, home: str, text: str, *, encoding: str = "utf-8") -> None:
+        os.makedirs(os.path.join(home, ".codex"), exist_ok=True)
+        with open(os.path.join(home, ".codex", "config.toml"), "w",
+                 encoding=encoding) as fh:
+            fh.write(text)
+
+    def test_missing_config_is_uninformative_not_a_fail(self):
+        """리뷰 #1: Path A(훅 설치)가 정상인 보통 설정에서 이 설정은 아무 효과가
+        없으므로 게이팅하면 안 된다 — PASS 아니면 언제나 `----`."""
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._omhc_root_repo(base)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertIsNone(ok)
+            self.assertIn("not found", detail)
+            self.assertIn('project_root_markers = [".git", ".omhc-root"]', detail)
+
+    def test_config_without_the_key_is_uninformative(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._omhc_root_repo(base)
+            self._write_config(home, 'model = "gpt-5"\n')
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertIsNone(ok)
+            self.assertIn("lacks", detail)
+
+    def test_key_without_the_marker_is_uninformative(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._omhc_root_repo(base)
+            self._write_config(home, 'project_root_markers = [".git"]\n')
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertIsNone(ok)
+            self.assertIn("lacks", detail)
+
+    def test_multi_line_array_with_the_marker_passes(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._omhc_root_repo(base)
+            self._write_config(
+                home, 'project_root_markers = [\n  ".git",\n  ".omhc-root",\n]\n')
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertTrue(ok)
+            self.assertIn(".omhc-root", detail)
+
+    def test_garbage_config_cannot_be_judged(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._omhc_root_repo(base)
+            self._write_config(home, 'project_root_markers = [1, 2, {nested = true}]\n')
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertIsNone(ok)
+            self.assertIn("cannot judge", detail)
+
+    def test_key_inside_a_table_is_not_top_level(self):
+        """리뷰 #2: `[table]` 뒤의 키는 그 테이블에 스코프돼 최상위 키가
+        아니다 — 예를 들어 신뢰 테이블 뒤에 사람이 실수로 이어 붙인 경우."""
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._omhc_root_repo(base)
+            self._write_config(
+                home,
+                '[projects."/some/path"]\n'
+                'trusted = true\n'
+                'project_root_markers = [".git", ".omhc-root"]\n')
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertIsNone(ok)
+            self.assertIn("[section]", detail)
+            self.assertIn("above the first [section]", detail)
+
+    def test_bom_prefixed_config_is_still_read(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._omhc_root_repo(base)
+            self._write_config(
+                home, 'project_root_markers = [".git", ".omhc-root"]\n',
+                encoding="utf-8-sig")
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertTrue(ok)
+
+    def test_quoted_key_and_single_quoted_strings_are_recognized(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._omhc_root_repo(base)
+            self._write_config(home, "\"project_root_markers\" = ['.git', '.omhc-root']\n")
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertTrue(ok)
+
+    def test_unreadable_config_is_distinct_from_missing(self):
+        """디렉터리를 그 자리에 두면 open() 이 IsADirectoryError(OSError) 를
+        낸다 — FileNotFoundError 와 다른 사유로 구분돼야 한다."""
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._omhc_root_repo(base)
+            os.makedirs(os.path.join(home, ".codex"))
+            os.makedirs(os.path.join(home, ".codex", "config.toml"))
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            label, ok, detail = self._row(rows)
+            self.assertIsNone(ok)
+            self.assertIn("cannot read", detail)
+            self.assertNotIn("not found", detail)
+
+    def test_an_ancestor_git_repo_makes_the_row_disappear(self):
+        """리뷰 #4: `repo_root` 위에 `.git` 조상이 있으면 Codex 기본값으로도
+        그 조상에서부터 AGENTS.md 를 cwd 까지 읽으므로 마커를 더할 필요가
+        없다."""
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            _repo.git(base, "init", "-q")
+            root = self._omhc_root_repo(base)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            self.assertIsNone(self._row(rows))
+
+    def test_missing_config_notes_it_is_the_only_channel_when_the_hook_is_not_installed(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._omhc_root_repo(base)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            _label, _ok, detail = self._row(rows)
+            self.assertIn("isn't installed", detail)
+            self.assertIn("only channel", detail)
+
+    def test_missing_config_notes_path_a_covers_it_when_the_hook_is_installed(self):
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._omhc_root_repo(base)
+            os.makedirs(os.path.join(home, ".codex"))
+            with open(os.path.join(home, ".codex", "hooks.json"), "w",
+                     encoding="utf-8") as fh:
+                json.dump({"hooks": {"SessionStart": [
+                    {"hooks": [{"type": "command",
+                                "command": "omhc brief --harness codex-cli"}]}]}}, fh)
+            rows = CX.CodexCliAdapter(home=home).health(root, [])
+            _label, _ok, detail = self._row(rows)
+            self.assertIn("Path A currently delivers", detail)
+
+    def test_status_json_key_set_is_unchanged(self):
+        """새 행은 `health` 리스트 안의 원소일 뿐, status --json 의 최상위 키
+        집합을 늘리지 않는다(#19 의 계약)."""
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._omhc_root_repo(base)
+            out_root = io.StringIO()
+            cwd = os.getcwd()
+            os.chdir(root)
+            try:
+                with mock.patch.object(cli.adapters, "present",
+                                       return_value=["codex-cli"]):
+                    cli.cmd_status(
+                        cli.build_parser().parse_args(["status", "--json"]),
+                        home=home, out=out_root)
+            finally:
+                os.chdir(cwd)
+            payload = json.loads(out_root.getvalue())
+            self.assertEqual(set(payload), set(cli._status_json_empty()))
+            self.assertTrue(any(h["label"] == "codex root markers"
+                                for h in payload["health"]))
+
+
 class TestHealthLedgerWindow(unittest.TestCase):
     """리뷰 결함: ledger.read 의 기본 limit(2000, 머신 전체 공유)이 다른 레포의
     행으로 채워지면 이 레포/세션의 행이 창 밖으로 밀려날 수 있다. health 에
