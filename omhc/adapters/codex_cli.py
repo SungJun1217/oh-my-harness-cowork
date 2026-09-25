@@ -1057,7 +1057,26 @@ class CodexCliAdapter:
                 "no omhc SessionStart hook at {}; the artifact would be written but "
                 "never read".format(self.hooks_path())
             )
-        return install_state_artifact(bundle, home=self._home)
+        receipt = install_state_artifact(bundle, home=self._home)
+        self._collapse_stale_agents_md_block(bundle.repo_root)
+        return receipt
+
+    def _collapse_stale_agents_md_block(self, repo_root: str) -> None:
+        """Path A(신선한 훅 핸드오프) 가 성공했는데 그 옆에 예전 Path B 구간
+        (#33 예산 초과나 훅이 한동안 안 돌던 시기에 깔린 것)이 남아 있으면,
+        다음 Codex 세션이 신선한 훅 핸드오프와 낡은 AGENTS.md 지시를 동시에
+        읽는다(#36) — collapse() 자체는 24시간 지나야 지우므로 여기서
+        force=True 로 즉시 지운다. `#33` 거절 경로와 똑같은 가드를 쓴다:
+        AGENTS.md 가 Claude Code 와 공유되면 절대 건드리지 않는다. 이 메서드는
+        훅 경로(brief → deliver → install_handoff)에서 불리므로 무엇을 하든
+        절대 던지지 않는다(invariant 2)."""
+        from .. import agents_md
+
+        try:
+            if not agents_md.shared_with_claude(repo_root):
+                agents_md.collapse(repo_root, force=True)
+        except Exception:
+            pass
 
     def fallback_channels(self):
         """Path B: install_handoff 가 실패할 때만 열린다 —

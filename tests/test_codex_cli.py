@@ -684,6 +684,47 @@ class TestWriteSide(unittest.TestCase):
             self.assertEqual(len(channels), 1)
             self.assertTrue(callable(channels[0]))
 
+    def test_install_handoff_collapses_a_stale_agents_md_block(self):
+        """#36: Path A(훅) 가 성공하면 그 옆의 낡은 Path B 구간을 즉시
+        붕괴시킨다 — 안 그러면 다음 Codex 세션이 신선한 훅 핸드오프와 낡은
+        AGENTS.md 지시를 동시에 읽는다."""
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = os.path.join(base, "proj")
+            os.makedirs(root)
+            _repo.git(root, "init", "-q")
+            self._install_hook(home)
+            managed_block.splice(agents_md.path_for(root), "[omhc] stale handoff\n",
+                                 captured_at=1000.0)
+
+            bundle = A.HandoffBundle(body_md="[omhc] fresh\n", repo_root=root,
+                                     to_adapter_id="codex-cli")
+            CX.CodexCliAdapter(home=home).install_handoff(bundle)
+
+            self.assertIsNone(managed_block.installed_captured_at(agents_md.path_for(root)))
+
+    def test_install_handoff_never_touches_agents_md_shared_with_claude(self):
+        from omhc import agents_md, managed_block
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = os.path.join(base, "proj")
+            os.makedirs(root)
+            _repo.git(root, "init", "-q")
+            self._install_hook(home)
+            agents_path = agents_md.path_for(root)
+            claude_path = os.path.join(root, "CLAUDE.md")
+            managed_block.splice(agents_path, "[omhc] stale handoff\n", captured_at=1000.0)
+            os.symlink(agents_path, claude_path)
+
+            bundle = A.HandoffBundle(body_md="[omhc] fresh\n", repo_root=root,
+                                     to_adapter_id="codex-cli")
+            CX.CodexCliAdapter(home=home).install_handoff(bundle)
+
+            self.assertIsNotNone(managed_block.installed_captured_at(agents_path))
+
 
 class TestInlineTomlHooks(unittest.TestCase):
     """#32: config.toml 의 인라인 `[[hooks.SessionStart]]` 도 hooks.json 과

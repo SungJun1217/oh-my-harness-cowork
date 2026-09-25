@@ -180,6 +180,23 @@ git 이 아닌 프로젝트라면 최상위 디렉터리에서 `touch .omhc-root
 > 볼 것을 쓰지 않습니다. `omhc status`의 `codex agents.md budget` 행(아래
 > 참고)이 이걸 알려줍니다.
 
+> [!NOTE]
+> `<repo>/.omhc/outbox/` 의 파일은 오래 두지 않습니다. `omhc mark`(SessionStart
+> 훅이 부름)가 omhc 자신이 쓴 outbox 파일 중 24시간 넘은 것만 지우고, `omhc
+> clear` 는 이 레포의 것을 즉시 전부 지웁니다 — omhc 의 이름 규칙·헤더와 맞지
+> 않는 파일은 절대 건드리지 않습니다. 매 file drop 마다 `.omhc/` 를
+> `.git/info/exclude` 에 등재를 시도합니다(이미 등재됐거나 다른 방식으로
+> 무시 중이면 건너뜁니다) — AGENTS.md 관리 구간이 쓰는 것과 같은, 이 클론에만
+> 해당하는 등재 방식입니다. Codex 자신의 SessionStart 훅이 성공하면(Path A),
+> 그 옆에 남아 있던 AGENTS.md 관리 구간(Path B)도 평소의 24시간을 기다리지
+> 않고 그 자리에서 붕괴시킵니다 — 새 세션이 신선한 훅 핸드오프와 낡은 구간을
+> 동시에 읽지 않게 합니다. 이 정리는 `AGENTS.md` 가 Claude Code 와 공유되는
+> 레포(아래 참고)에서는 하지 않습니다 — omhc 는 공유된 `AGENTS.md` 를 설치할
+> 때든 붕괴시킬 때든 아예 건드리지 않습니다. 모든 핸드오프 산출물(outbox
+> 헤더, AGENTS.md 구간 시작 마커)은
+> 유닉스 epoch 와 사람이 읽는 UTC 시각을 함께 담아, 본문에 적힌("3m ago" 같은,
+> mint 시점에 얼어붙는) 상대 나이가 실제로 얼마나 낡았는지 확인할 수 있습니다.
+
 최신 릴리스를 `~/.local/share/omhc/<버전>` 에 풀고 `~/.local/bin/omhc` 로
 심링크합니다. pip·pipx 를 쓰지 않습니다(의존성이 0 이라 소스 트리가 곧
 설치물입니다). 다시 실행하면 업데이트(`~/.local/share/omhc` 아래 구버전은

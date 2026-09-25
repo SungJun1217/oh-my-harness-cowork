@@ -60,3 +60,5 @@ State lives in `~/.omhc/<repo-key>/` (`locate.py`); `fsio.py` owns atomic writes
 5. No tool-name field in the IR — the two harnesses' tool vocabularies are disjoint.
 6. Timestamps are not an ordering source (they go backwards); order is ordinal/byte offset.
 7. The on-disk formats are undocumented and change; parse by whitelist, fail open, and report degradation in `status`. Codex rollouts nest `content_item_kinds` under `payload.internal_chat_message_metadata_passthrough`; `user.*` kinds are human.
+
+**Design rule: never add a summarization/rewrite stage.** The handoff is a direct extraction (verbatim `said` text, whitelisted verbs) — never pipe it through an LLM or a rewrite step to "clean it up". Summarizing launders provenance: a paraphrase can silently promote a rejected proposal into an instruction, or blend agent claims into what reads like a human quote, which is exactly what invariant 3 exists to prevent (see arXiv 2607.29167 on summarization-induced memory poisoning, and OWASP ASI06 — agent memory/context poisoning, https://owasp.org/www-project-agent-memory-guard/). `guard.py` only ever drops text; it never rewrites it.
