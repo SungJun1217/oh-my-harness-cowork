@@ -16,7 +16,7 @@
 실측(codex-cli 0.155.1): 신뢰되지 않은 `hooks.json`은 메시지 없이
 조용히 건너뛰어 Codex 쪽의 `mark`도 `brief`도 한 번도 돌지 않습니다.
 `deliver()`(Path B 포함)는 `brief` 호출 안에서만 실행되므로, 훅이
-신뢰되지 않으면 Claude→Codex 방향은 `AGENTS.md` 관리 구간이나
+신뢰되지 않으면 Claude→Codex 방향은 `AGENTS.md` managed block이나
 outbox가 대신 받는 게 아니라 아예 켜지지 않습니다. Path B/outbox는
 `brief`가 실제로 도는데 `install_handoff`가 실패할 때 열립니다.
 대표적으로 `~/.codex/hooks.json`에 omhc 훅이 없을 때이지만,
@@ -27,31 +27,31 @@ outbox가 대신 받는 게 아니라 아예 켜지지 않습니다. Path B/outb
 
 Codex→Claude는 더 이상 그 훅에 매이지 않습니다. Claude 자신의
 `mark`가 Codex 어댑터의 `discover()`를 불러, 이 레포에서 이미
-원장에 있는 그 하네스 행보다 더 최근인 Codex 세션의 원장 행을
-롤아웃 파일에서 바로 채워 넣습니다(`via:"scan"`, `mark` 호출당 최대
+ledger에 있는 그 하네스 행보다 더 최근인 Codex 세션의 ledger 행을
+롤아웃 파일에서 바로 backfill합니다(`via:"scan"`, `mark` 호출당 최대
 5개). `omhc status`의 `codex hook` 행은 일부러 이 `scan` 행을 세지
 않습니다. 세면 훅 자체가 안 돈 사실이 가려지기 때문입니다. **알려진
 구멍(#22, 기본 설정에서는 무해함):** 그 5개를 넘는 초과분(또는
 `discover()` 자신의 훅 예산에 밀려 못 본 나머지)은 이후 어떤 `mark`도
-다시 채우지 않습니다. 다음 호출의 watermark가 이미 이번에 고른 것
-중 가장 최근 것이라, 그보다 오래된 미채움 세션은 "원장에 있는
+다시 backfill하지 않습니다. 다음 호출의 watermark가 이미 이번에 고른 것
+중 가장 최근 것이라, 그보다 오래된 backfill 안 된 세션은 "ledger에 있는
 것보다 최신이어야 한다"는 판정에 영영 걸립니다. 이게 무해한 이유는
 `due()`에 가장 최근의 **자격 있는** 외래 세션 하나만 필요하고,
 `discover()`가 `brief`의 자격 판정과 **같은** 헤드리스 필터
-(`allow_headless()`)를 쓰기 때문입니다. 그래서 보통 백필되는 집합과
-`due()`가 원하는 집합이 같습니다. 유일하게 깨지는 경우는 백필을
+(`allow_headless()`)를 쓰기 때문입니다. 그래서 보통 backfill되는 집합과
+`due()`가 원하는 집합이 같습니다. 유일하게 깨지는 경우는 backfill을
 돌린 `mark`와 이후 `brief` 사이에 `OMHC_ALLOW_HEADLESS` 값이
 달라지는 것뿐입니다. 그러면 헤드리스 세션 5개보다 더 뒤에 있는
-대화형 세션이 원장에서 통째로 빠질 수 있습니다. 흔치 않은 설정
+대화형 세션이 ledger에서 통째로 빠질 수 있습니다. 흔치 않은 설정
 변경이라 고치지 않았습니다.
 
 ### 훅 없이 재개된 Codex 세션 알아내기
 
 `session_meta.timestamp`는 롤아웃 첫 줄에서 한 번만 읽고 다시
-갱신하지 않습니다. `codex exec resume`(실측: 같은 롤아웃에 이어
+업데이트하지 않습니다. `codex exec resume`(실측: 같은 롤아웃에 이어
 쓰고 새 `session_meta`는 안 남깁니다)이 이 값을 움직이지 않으므로,
 재개된 세션의 시작 epoch는 그대로입니다. 첫 줄 시각으로도
-`already_delivered`의 세션 id로도 재개가 일어났다는 걸 백필 경로가
+`already_delivered`의 세션 id로도 재개가 일어났다는 걸 backfill 경로가
 알 수 없었습니다. Codex 훅이 신뢰돼 있으면 문제없습니다.
 SessionStart가 `source:"resume"`으로 발화하고, `mark`가 새 start
 행과 `delivered.tsv`의 `reopen` 줄을 남깁니다(`source:"compact"`는
@@ -60,13 +60,13 @@ SessionStart가 `source:"resume"`으로 발화하고, `mark`가 새 start
 필요했습니다. invariant 6은 여전히 마지막 레코드 타임스탬프나
 mtime을 **순서** 기준으로 쓰는 것을 금지하지만, 파일 **크기**는
 "언제"가 아니라 "이 파일이 자랐다"만 알려줍니다. 이제 `mark`의
-백필이 원장에 남은 각 외래 세션의 마지막 크기도 stat 해 비교하고
+backfill이 ledger에 남은 각 외래 세션의 마지막 크기도 stat 해 비교하고
 (다시 스캔하지 않고, 날짜 디렉터리 창도 안 쓰므로 14일짜리
 `discover()` 창 밖의 세션도 여전히 잡습니다), 자랐으면 어댑터의
 선택 메서드 `read_session_since(ref, offset)`로 늘어난 꼬리만
 읽어(Codex: 다음 줄 경계로 스냅) 그 꼬리에 진짜 사람의 새 턴이
 있는지만 확인합니다. 에이전트 혼자 움직인 성장(도구 호출,
-`turn_aborted`, `task_complete`)은 크기 기준만 갱신하고 세션을
+`turn_aborted`, `task_complete`)은 크기 baseline만 업데이트하고 세션을
 다시 띄우지 않습니다. 꼬리를 읽는 비용은 여전히 바이트에
 비례하므로(실측 ~22µs/KB) 최대한 일찍 멈춥니다. `stop_at_human_turn`
 은 사람의 턴을 찾는 즉시 돌아오고(실측: 45MB 롤아웃에서도 턴이 읽기
@@ -95,17 +95,17 @@ baseline이 있으면 그 값으로 대체해, 최악의 경우도 그 구간을
 개행이 마저 붙은 뒤 같은(아직 안 읽은) 줄에서 "새" 성장을 또 찾아
 같은 턴을 두 번 전달하게 됩니다.
 
-이렇게 찾은 재개도 여전히 **원장 append 순서**(새 `start` 행,
+이렇게 찾은 재개도 여전히 **ledger append 순서**(새 `start` 행,
 `grew:1`)로 자리를 잡습니다. `due()`가 늘 쓰던 그 순서 규칙
 그대로입니다. 행의 epoch는 이 `mark` 자신의 현재 시각이라
 `due.MAX_AGE_SECONDS`가 오래됐다고 걸러내지 않습니다. 한 전환
 구간에서 더 최신 세션에 밀린 세션도 영원히 막히지는 않습니다. 그
-더 최신 세션의 start 행이 원장에 **어떻게** 들어왔든 마찬가지입니다.
-백필 스캔으로 들어왔다면 밀린 세션의 baseline을 **같은** `mark`
+더 최신 세션의 start 행이 ledger에 **어떻게** 들어왔든 마찬가지입니다.
+backfill 스캔으로 들어왔다면 밀린 세션의 baseline을 **같은** `mark`
 호출 안에서(아직 아무것도 안 자랐을 가능성이 가장 높은 시점에) 그
 뒤로 바로 옮기고, 그 세션 **자신의** 신뢰된 훅이 직접 start 행을
-남겼다면(백필 스캔에는 안 보입니다. 이미 원장이 아는 세션이라서요)
-다음 재판정 라운드가 그 사이 자랐든 안 자랐든 무관하게 같은 재기준점 이동을
+남겼다면(backfill 스캔에는 안 보입니다. 이미 ledger가 아는 세션이라서요)
+다음 재판정 라운드가 그 사이 자랐든 안 자랐든 무관하게 같은 rebaseline을
 지연(lazy) 적용합니다. 어느 경로든 그 새 start 행 **뒤로** 또
 자라면 새 판정으로 다시 잡힙니다. 다만 이미 진 그 구간 자체를
 되돌리지는 않습니다. 이 방식은 지금까지 손도 못 댔던 경우도 함께
@@ -114,8 +114,8 @@ Codex 쪽 SessionStart 없이 곧장 새 Claude 세션으로 넘어가는 경우
 니다. 성장 확인은 A를 받는 쪽을 포함해 **어떤** `mark`에서도
 돌므로 A 쪽에 훅이 필요 없습니다.
 
-**남은 한계:** 순서 근거 자체는 여전히 원장 append 순서라, 더
-최신 세션의 start 행이 들어온 시점과 밀린 세션이 재기준점을 얻는
+**남은 한계:** 순서 근거 자체는 여전히 ledger append 순서라, 더
+최신 세션의 start 행이 들어온 시점과 밀린 세션이 rebaseline되는
 시점(늦어도 다음 `mark` 한 번) **사이**에 밀린 세션이 이미
 자랐다면, 그 성장이 그 사이 어느 쪽에서 일어났는지는 size만으로
 가릴 수 없어 그대로 흡수됩니다. 그 구간은 더 최신 **start**가
@@ -156,11 +156,11 @@ Codex 매핑은 실제 rollout 194개(codex-cli 0.141–0.155.1)로 실측했고
 남깁니다. 0.144–0.148은 셸 호출이 어댑터가 일부러 파싱하지 않는
 JavaScript 소스 안에만 있어서(화이트리스트, fail-closed), 그 세션은
 수정 사항만 있고 `ran` 이벤트 없이 읽힙니다. 모르는 레코드 종류는
-여전히 `unparsed`로 계상됩니다.
+여전히 `unparsed`로 집계됩니다.
 
 ## Claude Code 포크는 자기 턴이 생겨야 넘어갑니다
 
-`/branch`, `--fork-session`, 백그라운드 `/fork`로 만든 포크는 자기 사람 턴이 생기기 전까지 핸드오프 원천이 되지 않습니다(#34).
+`/branch`, `--fork-session`, 백그라운드 `/fork`로 만든 포크는 자기 사람 턴이 생기기 전까지 핸드오프 대상이 되지 않습니다(#34).
 
 포크는 SessionStart를 `source:"fork"`로 시작하고(2.1.214 이전은
 `"resume"`), 새 session_id를 받으며, 트랜스크립트는 부모의 현재
@@ -176,9 +176,9 @@ JavaScript 소스 안에만 있어서(화이트리스트, fail-closed), 그 세�
 애초에 `delivered.tsv` 행이 없어서 적용되지 않습니다.
 
 Claude 어댑터의 `classify()`(`list_sessions`, `ref_for_path`,
-`brief`의 적격성 판정이 함께 쓰는 지점)에서 고쳤습니다. 포크된
+`brief`의 eligibility 판정이 함께 쓰는 지점)에서 고쳤습니다. 포크된
 트랜스크립트는 `forkedFrom`이 없는 `author=="human"` 턴, 즉 포크
-자신이 새로 타이핑한 턴이 하나라도 있어야 적격입니다. 흔한 경우는
+자신이 새로 타이핑한 턴이 하나라도 있어야 핸드오프 대상이 됩니다. 흔한 경우는
 값싸게 처리합니다. 앞 몇 줄에 `forkedFrom`/`fork_inherit`이
 보여야만 포크로 취급하고, "포크 자신의 턴이 있는가" 스캔은 복사
 구간이 끝나는 첫 레코드에서 멈춥니다. 50ms 시간 상한은 전체
@@ -189,7 +189,7 @@ Claude 어댑터의 `classify()`(`list_sessions`, `ref_for_path`,
 보기도 전에 항상 fail-open 돼서(이 레포의 실제 6.9MB 세션을
 포크로 다시 써 12.6MB로 복제한 픽스처로 재현: 428바이트 핸드오프가
 또 나갔습니다) 정작 고치려던 버그가 안 고쳐졌습니다. 어느 상한이든
-걸리면 예전 동작(적격)으로 엽니다. 실측(synthetic, 새 턴을 못
+걸리면 예전처럼 대상으로 봅니다(fail-open). 실측(synthetic, 새 턴을 못
 찾는 복사-전용 케이스): 6.3MB ~7ms, 12.6MB ~13ms, 25.1MB ~26ms,
 30MB(끝까지 못 찾음) ~32ms이고, 새 턴이 있는 현실적인 2MB 복사
 구간은 ~2ms에 끝납니다. own tail의 예상 밖 레코드 모양(`message`가
@@ -209,7 +209,7 @@ dict가 아니거나 `text` 블록의 `text`가 문자열이 아닌 등)은 한 
 
 Claude Code의 on-disk 스키마는 문서화되지 않았고 2026년 내내
 파괴적으로 변했습니다(공식 `SessionStore`조차 엔트리를 "opaque"로
-선언합니다). 화이트리스트, fail-open, `status`의 열화 보고로
+선언합니다). 화이트리스트, fail-open, `status`의 degradation 보고로
 완화하지만, 깨질 것을 전제로 설계했습니다. 아카이브가 포인터인
 이유가 이것입니다.
 

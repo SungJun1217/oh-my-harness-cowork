@@ -61,8 +61,8 @@ PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
 
 | 슬롯 | 출처 | 규칙 |
 |---|---|---|
-| `GOAL` | 세션의 첫 사람 턴 | 축자 인용만. 재작성하지 않음 |
-| `NEXT` | 세션의 마지막 사람 턴(사람 턴이 하나뿐이면 그것은 이미 `GOAL`이므로 비움) | 축자 인용만. **그 턴이 짧은 승인("계속 진행해")이면 비움.** `NEXT`에 넣으면 이전 에이전트의 제안이 사람의 지시로 세탁됨 |
+| `GOAL` | 세션의 첫 사람 턴 | 원문 그대로만. 재작성하지 않음 |
+| `NEXT` | 세션의 마지막 사람 턴(사람 턴이 하나뿐이면 그것은 이미 `GOAL`이므로 비움) | 원문 그대로만. **그 턴이 짧은 승인("계속 진행해")이면 비움.** `NEXT`에 넣으면 이전 에이전트의 제안이 사람의 지시로 세탁됨 |
 | `PLAN?` | 이전 에이전트의 마지막 발화 | `NEXT`가 비었을 때만 채움. `?`가 "검증되지 않은 주장"이라는 표시 |
 | `FAIL` | 기계가 관측한 실패(`ok=False`) | 인자 앞 40자가 같은 이후 성공이 있으면 해소된 것으로 보고 보고하지 않음. 최대 2개, `omhc show`용 태그 `[E1]`/`[E2]` |
 | `DID` | 기계가 관측한 수정 경로 | 레포 루트 상대경로, 최대 4개 |
@@ -78,12 +78,12 @@ PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/flow-dark.svg">
-  <img src="assets/flow-light.svg" width="100%" alt="SessionStart 훅이 mark 와 brief 를 부르고, due() 가 상대 하네스의 최신 세션을 고르고, 화이트리스트 파서가 Event 를 만들고, mint() 가 900바이트 이하 핸드오프를 렌더링하고, gate() 가 세션당 한 번만 통과시키고, 아카이브가 원본을 하드링크하며 오프셋 색인을 남기는 그림">
+  <img src="assets/flow-light.svg" width="100%" alt="SessionStart 훅이 mark 와 brief 를 부르고, due() 가 상대 하네스의 최신 세션을 고르고, 화이트리스트 파서가 Event 를 만들고, mint() 가 900바이트 이하 핸드오프를 렌더링하고, gate() 가 세션당 한 번만 통과시키고, 아카이브가 원본을 하드링크하며 오프셋 인덱스을 남기는 그림">
 </picture>
 
 | 방향 | 필요한 것 |
 |---|---|
-| Codex → Claude | Claude 훅만 있으면 됩니다. Claude의 `mark`가 Codex 롤아웃 파일도 훑어서 그 세션을 원장에 채워 넣으므로(`via:"scan"`) Codex 자신의 훅이 돌 필요가 없습니다 |
+| Codex → Claude | Claude 훅만 있으면 됩니다. Claude의 `mark`가 Codex 롤아웃 파일도 훑어서 그 세션을 ledger에 backfill하므로(`via:"scan"`) Codex 자신의 훅이 돌 필요가 없습니다 |
 | Claude → Codex | Codex의 SessionStart 훅을 Codex 자신의 신뢰 절차로 한 번 승인해야 합니다. `brief`는 그 훅 안에서만 돌기 때문에, 훅이 없으면 Codex로는 아무것도 가지 않습니다 |
 
 **두 가지 결정적 선택:**
@@ -92,11 +92,11 @@ PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
   마지막 문장이 `assert len(out.encode('utf-8')) <= budget`이고, 출력 직전에
   한 번 더 검사해 실패하면 빈 문자열을 냅니다.
 - **아카이브는 원본 파일 그 자체입니다.** `os.link()`로 하네스 원본에
-  하드링크를 걸고 이벤트당 약 115바이트의 TSV 오프셋 색인만 만듭니다(실측:
-  3.2MB 세션의 275개 이벤트가 31.5KB로 색인됨). 세션 데이터에 추가 디스크가
+  하드링크를 걸고 이벤트당 약 115바이트의 TSV 오프셋 인덱스만 만듭니다(실측:
+  3.2MB 세션의 275개 이벤트가 31.5KB로 인덱싱됨). 세션 데이터에 추가 디스크가
   들지 않고, 원본이 `rm` 되거나 `/clear` 돼도 바이트가 남습니다.
 
-훅으로 주입하지 못하면 `AGENTS.md` 관리 구간(Codex 전용), 그다음
+훅으로 주입하지 못하면 `AGENTS.md` managed block(Codex 전용), 그다음
 `<repo>/.omhc/outbox/`로 떨어집니다.
 [전달 경로가 막히면](docs/install.ko.md#전달-경로가-막히면)을 보십시오.
 
@@ -123,20 +123,20 @@ git 레포가 아닌 프로젝트라면 최상위에서 `touch .omhc-root`를 �
 
 | 명령 | 역할 |
 |---|---|
-| `omhc status [--json]` | 유일한 사람용 대시보드. 아카이브 지연과 [인출률](docs/status.ko.md#pull-rate) 포함 |
-| `omhc log [--last N] [--grep P] [--verb V] [--file P]` | 색인된 이벤트를 한 줄씩. 각 줄은 `show`에 그대로 넘길 수 있는 `<session>#N` 참조로 시작 |
-| `omhc trace <path> [--all] [--last N] [--json]` | `path`를 수정한 색인된 이벤트를 두 하네스 세션에 걸쳐 나열. `--all`은 읽기와 명령 언급까지 포함 |
+| `omhc status [--json]` | 유일한 사람용 대시보드. 아카이브 지연과 [pull rate](docs/status.ko.md#pull-rate) 포함 |
+| `omhc log [--last N] [--grep P] [--verb V] [--file P]` | 인덱싱된 이벤트를 한 줄씩. 각 줄은 `show`에 그대로 넘길 수 있는 `<session>#N` 참조로 시작 |
+| `omhc trace <path> [--all] [--last N] [--json]` | `path`를 수정한 인덱싱된 이벤트를 두 하네스 세션에 걸쳐 나열. `--all`은 읽기와 명령 언급까지 포함 |
 | `omhc show <E1\|#137\|abcdef01#137> [--full]` | **원본 바이트를 오프셋으로 조회.** 맨 `#N`은 가장 최근 전달된 세션 기준 |
 | `omhc note "<text>"` | 다음 핸드오프에 실을 메모. 양쪽 하네스의 에이전트도 부를 수 있음 |
 | `omhc hooks install\|uninstall [--harness ID]` | omhc 자신의 `SessionStart` 훅을 병합하거나 제거 |
-| `omhc clear` | 이 레포에 설치된 표식, outbox 파일, 거부 기록을 지움 |
-| `omhc watch [--stop\|--once]` | 가속기 데몬(선택). 없어도 결과는 같음 |
+| `omhc clear` | 이 레포에 설치된 마커, outbox 파일, 거부 기록을 지움 |
+| `omhc watch [--stop\|--once]` | 선택 사항인 가속용 데몬. 없어도 결과는 같음 |
 | `omhc mark` / `omhc brief --harness X` | 훅이 부름. 세션 시작을 기록하고 핸드오프를 출력 |
 
 끄려면 `OMHC_OFF=1` 또는 `~/.omhc/<repo-key>/off` 파일을 쓰십시오. 헤드리스
 세션(`claude -p`, `codex exec`)은
 [`OMHC_ALLOW_HEADLESS=1`](docs/install.ko.md#헤드리스-세션)을 켜지 않는 한
-핸드오프 원천이 되지 않습니다.
+핸드오프 대상이 되지 않습니다.
 
 ## 이 도구를 쓰지 말아야 할 때
 
@@ -176,6 +176,6 @@ bash tests/smoke.sh                             # 적대적 입력 8종
 `omhc/adapters/<harness>.py`에 `detect`, `list_sessions`, `read_session`,
 `native_resume_hint`, `install_handoff`를 구현해 `@_register`를 붙이고,
 `omhc/adapters/__init__.py`에 import 한 줄을 더하고,
-`tests/fixtures/<harness>/`에 실물 세션 하나를 얼립니다. 적합성 스위트가
+`tests/fixtures/<harness>/`에 실제 세션 하나를 fixture로 넣습니다. conformance suite가
 불변식 22개를 레지스트리 전체에 파라미터화하므로 새 어댑터도 저절로
 테스트됩니다. 세션 훅이 없는 하네스는 그냥 읽기 전용 어댑터가 됩니다.
