@@ -8,7 +8,7 @@ omhc carries working context across coding-agent harnesses (Claude Code ↔ Code
 
 Talk to the user in Korean. Repo comments and commit messages are Korean (`type(scope): 한국어 요약`, body explains *why*); instruction files meant for models (`AGENTS.md`, `CLAUDE.md`, `.claude/`) are English.
 
-README.md (English) and README.ko.md (Korean) carry the same facts — change both together.
+README.md (English) and README.ko.md (Korean) carry the same facts — change both together. The same pairing holds for `docs/<name>.md` / `docs/<name>.ko.md`. The README is the short overview; details live in `docs/` (`handoff`: slot rules and pulling; `install`: Codex settings, delivery fallbacks, uninstall; `status`: what each `omhc status` row judges; `limits`: known limits and measured facts).
 
 ## Commands
 

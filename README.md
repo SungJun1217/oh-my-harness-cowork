@@ -19,56 +19,25 @@
   <img src="assets/handoff-light.svg" width="100%" alt="A Claude Code terminal where a SessionStart hook injects the GOAL/NEXT/FAIL handoff from a prior Codex CLI session">
 </picture>
 
-[Why](#why) ·
 [What you get](#what-you-get) ·
 [How it works](#how-it-works) ·
 [Install](#install) ·
 [Usage](#usage) ·
 [When not to use it](#when-not-to-use-it) ·
-[Extending](#extending) ·
-[Tests](#tests)
+[Limits](#known-limits) ·
+[Development](#development)
 
 </div>
 
-What Claude Code figures out, Codex CLI picks up — and the other way around.
+What Claude Code figures out, Codex CLI picks up, and the other way around.
 Returning to the same harness costs **0 tokens**: native resume is already
-lossless, so omhc has no reason to get involved.
-
-<table>
-<tr>
-<td width="33%" valign="top">
-
-**≤900-byte handoff**
-
-Provenance lives in the slot name, not a footnote — the last statement of
-`mint()` is the `assert` that keeps every handoff under budget.
-
-</td>
-<td width="33%" valign="top">
-
-**Original bytes, hardlinked**
-
-The archive is not a re-serialization. `os.link` keeps the source session
-file itself; `omhc show E1` reads it back by byte offset.
-
-</td>
-<td width="33%" valign="top">
-
-**0 dependencies · 0 LLM calls**
-
-Nothing is sent anywhere. Staying on the same harness burns **0 tokens**
-too — the pipeline short-circuits before it writes anything.
-
-</td>
-</tr>
-</table>
-
-## Why
+lossless, so omhc stays out of it. No dependencies, no LLM calls, nothing is
+sent anywhere.
 
 | | Without omhc | With omhc |
 |---|---|---|
 | First turn right after switching | Starts over with "what does this repo do?" | GOAL/NEXT/FAIL are already sitting in the session-start context |
-| Need more detail | Dig through the other harness's history by hand | `omhc show E1` — reads the hardlinked original bytes back by offset (survives the original being `rm`'d or `/clear`'d, and survives conversation logs that were never committed in the first place) |
+| Need more detail | Dig through the other harness's history by hand | `omhc show E1` reads the hardlinked original bytes back by offset, even after the original is `rm`'d or `/clear`'d |
 
 ## What you get
 
@@ -85,24 +54,26 @@ MORE  (1 fixed later), 6 events hidden
 PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
 ```
 
-This is not a hand-written example — it is the literal output of `mint()` on
-a synthetic session (3 human turns, 2 file edits, 2 failures where 1 later
-resolved), unedited (749/900 bytes). The header's `2h11m` is session length
-(`_duration()`); `20m ago` is time since the last event (`_age()`).
+This is the literal, unedited output of `mint()` on a synthetic session (3
+human turns, 2 file edits, 2 failures where 1 later resolved), 749/900 bytes.
+`2h11m` is the session length; `20m ago` is the time since its last event.
 
 **Provenance is baked into the slot name itself.**
 
 | Slot | Source | Rule |
 |---|---|---|
-| `GOAL` | `author == human`, the session's first human turn | Verbatim only. Never rewritten |
-| `NEXT` | `author == human`, the session's last human turn (empty if there is only one human turn, since that turn is already `GOAL`) | Verbatim only. **Except: empty if that turn is a short approval ("go ahead")** — putting it in `NEXT` would launder a prior agent's proposal into a human instruction |
-| `PLAN?` | The prior agent's last utterance | Only fills when `NEXT` is empty. The single `?` byte is the "unverified claim" label |
-| `FAIL` | A machine-observed failure (`ok=False`) | **"Resolved" means a later success whose first 40 args-characters match — not identical args.** Resolved failures are not reported. Up to 2 are reported, tagged `[E1]`/`[E2]` to link with `omhc show` |
+| `GOAL` | The session's first human turn | Verbatim only, never rewritten |
+| `NEXT` | The session's last human turn (empty if there is only one, since that one is already `GOAL`) | Verbatim only. **Empty if that turn is a short approval ("go ahead")**: putting it in `NEXT` would launder the prior agent's proposal into a human instruction |
+| `PLAN?` | The prior agent's last utterance | Only fills when `NEXT` is empty. The `?` marks an unverified claim |
+| `FAIL` | A machine-observed failure (`ok=False`) | A failure counts as resolved when a later success has the same first 40 characters of args; resolved failures are not reported. Up to 2, tagged `[E1]`/`[E2]` for `omhc show` |
 | `DID` | Machine-observed modified paths | Repo-root-relative, up to 4 |
-| `NOTE` | `omhc note "<text>"` calls — a human or either harness's agent can call it from the command line, and authorship is not tracked | **Unverified free text.** The 2 most recent entries from `~/.omhc/<repo-key>/notes.txt`; each note is stamped when written and notes older than 7 days (the same age limit as the handoff itself) are left out, so an old note can't ride along forever. Pre-stamp lines keep showing |
-| `SAID` | `author == human`, an intermediate human turn | Longest sentences first, not most recent (up to 3) — a requirement sentence is more useful than "how far did we get?" |
-| `MORE` | Tally of dropped slots, resolved failures, hidden events | **Discloses what got hidden.** Dropped slots exist because of the 900-byte budget, but the hidden-event count is unrelated to budget — it is simply a count of events that were neither a human turn nor reported as `FAIL` (even if summarized in `DID`, they are invisible individually) |
-| `PULL` | Generated by omhc (always present) | `omhc log --last 30` is always there; `omhc show E1` is added if a failure is unresolved; `omhc log --file …` is added if the shortest modified path is ≤32 chars. Never dropped |
+| `NOTE` | `omhc note "<text>"`, which a human or either harness's agent can call | **Unverified free text.** The 2 most recent notes; notes older than 7 days are left out |
+| `SAID` | Intermediate human turns | Longest first, not most recent (up to 3): a requirement is more useful than "how far did we get?" |
+| `MORE` | Dropped slots, resolved failures, hidden events | **Discloses what got hidden**, so nothing disappears silently |
+| `PULL` | Generated by omhc | `omhc log --last 30` always; `omhc show E1` when a failure is unresolved; `omhc log --file …` when a modified path is short. Never dropped |
+
+The exact rules for each slot, and how `log`/`show`/`trace` dig into the
+original: [docs/handoff.md](docs/handoff.md).
 
 ## How it works
 
@@ -111,349 +82,63 @@ resolved), unedited (749/900 bytes). The header's `2h11m` is session length
   <img src="assets/flow-light.svg" width="100%" alt="Diagram: a SessionStart hook triggers mark and brief, due() picks the other harness's latest session, a whitelist parser builds Events, mint() renders a handoff under 900 bytes, gate() admits it once per session, and the archive hardlinks the original session with a byte-offset index">
 </picture>
 
-**Claude → Codex still requires Codex's SessionStart hook to be trusted and
-running** — `brief` only runs inside that hook, and without it nothing on the
-Codex side ever gets a chance to inject. **Codex → Claude no longer depends
-on it.** For `due()` to pick a counterpart session, that session's start must
-be in the ledger, and normally only that harness's own hook writes that row —
-but Claude's `mark` now also calls the other adapters' `discover()` and
-backfills any Codex session it finds directly from the rollout files
-(tagged `via:"scan"` in the ledger), so a Codex session lands in the ledger
-even when its own hook was never trusted. The one difference left between the
-two hooks is **whether a trust step exists at all** — the Claude Code hook
-runs as soon as it's in the settings file, but the Codex hook needs a
-one-time approval through Codex's own trust flow (see the warning under
-Install) — and that approval is still the only way to get anything flowing
-in the Claude → Codex direction.
+| Direction | What it needs |
+|---|---|
+| Codex → Claude | Only Claude's hook. Claude's `mark` also scans Codex's rollout files and backfills the Codex session into the ledger (`via:"scan"`), so Codex's own hook doesn't have to run |
+| Claude → Codex | Codex's SessionStart hook, approved once through Codex's own trust flow. `brief` only runs inside that hook, so without it nothing reaches Codex |
 
 **Two decisive choices:**
 
-- **The payload is a fixed 900-byte budget. A hard cap.** The enforcement
-  mechanism is code, not discipline — the **last statement of `mint()` is
-  `assert len(out.encode('utf-8')) <= budget`**, so the function cannot
-  return an oversized string, and the caller re-checks once more right
-  before emitting, falling back to an empty string on failure.
-- **The archive is the original file, verbatim.** Nothing is re-serialized.
-  `os.link()` hardlinks the harness's own session file and adds a TSV
-  offset index of roughly 115 bytes per event. Measured: a 3.2 MB session
-  with 275 events indexes to 31.5 KB (1% of the original). Zero extra disk
-  for the session data, in-progress appends stay visible because it's the
-  same inode, and the bytes survive the original being `rm`'d or `/clear`'d.
+- **The handoff is a hard 900-byte cap, enforced by code.** The last
+  statement of `mint()` is `assert len(out.encode('utf-8')) <= budget`, and
+  the caller checks once more before emitting, falling back to an empty string.
+- **The archive is the original file, verbatim.** `os.link()` hardlinks the
+  harness's own session file and adds a TSV offset index of about 115 bytes
+  per event (measured: a 3.2 MB session with 275 events indexes to 31.5 KB).
+  No extra disk for the session data, and the bytes survive the original
+  being `rm`'d or `/clear`'d.
 
-<details>
-<summary>When the delivery path is blocked</summary>
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/delivery-dark.svg">
-  <img src="assets/delivery-light.svg" width="100%" alt="Delivery fallback chain: if the SessionStart hook is not trusted nothing is delivered; otherwise Path A (install_handoff) is tried, then Path B (AGENTS.md managed block, Codex only, never when shared with Claude Code), then the outbox floor which is never auto-read">
-</picture>
-
-</details>
+When the hook can't inject, omhc falls back to a managed block in `AGENTS.md`
+(Codex only) and then to `<repo>/.omhc/outbox/`. See
+[delivery fallbacks](docs/install.md#delivery-fallbacks).
 
 ## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh
-omhc status          # every check gets PASS/FAIL/---- (+ codex hook, <adapter-id> hooks when detected). Not SKIP
+omhc hooks install   # merges omhc's SessionStart hooks into each detected harness's config
+omhc status          # every check gets PASS/FAIL/----, never SKIP
 ```
-
-For a non-git project, `touch .omhc-root` at its top-level directory — without
-either `.git` or `.omhc-root`, every subdirectory you run omhc from becomes
-its own project.
-
-> [!IMPORTANT]
-> Measured (codex-cli 0.155.1): in a `.omhc-root` project, Codex started in a
-> subfolder does **not** read the ancestor `AGENTS.md` with its default
-> `project_root_markers = [".git"]` — Path B (the AGENTS.md managed block) is
-> then silently ineffective. Add `.omhc-root` to that setting in
-> `~/.codex/config.toml` (keep `.git` too):
-> ```toml
-> project_root_markers = [".git", ".omhc-root"]
-> ```
-> `omhc status`'s `codex root markers` row (see below) checks this for you.
-
-> [!IMPORTANT]
-> Measured (codex-cli 0.156.1): Codex loads `AGENTS.md` head-first, up to
-> `project_doc_max_bytes` (default 32768, one total budget across the whole
-> chain from the repo root down to cwd), cutting mid-line with no notice.
-> Path B always writes its managed block at the **top** of `AGENTS.md` (an
-> existing block found lower down is moved to the top on the next write) so
-> it survives that cutoff even in a large file. If the block itself would
-> still end past the configured `project_doc_max_bytes`, omhc declines to
-> claim Path B and falls through to the outbox instead of writing something
-> Codex can't see — `omhc status`'s `codex agents.md budget` row (see below)
-> reports it.
-
-> [!NOTE]
-> `<repo>/.omhc/outbox/` files are transient. `omhc mark` (run by the
-> SessionStart hook) deletes omhc's own outbox files once they're older than
-> 24 hours; `omhc clear` deletes all of them for the repo immediately. Files
-> that don't match omhc's own naming and header are never touched. Every file
-> drop also tries to register `.omhc/` in `.git/info/exclude` (skipped once
-> it's already registered, or if it's already ignored some other way), the
-> same per-clone mechanism the AGENTS.md managed block uses. When Codex's own SessionStart hook succeeds (Path A),
-> omhc also collapses any leftover AGENTS.md managed block (Path B) from
-> before right away, instead of waiting the usual 24 hours — so a fresh
-> session never reads a stale block alongside the fresh hook handoff. That
-> cleanup is skipped in a repo where `AGENTS.md` is shared with Claude Code
-> (see below) — omhc never writes to a shared `AGENTS.md` at all, whether
-> installing or collapsing. Every
-> handoff file (outbox header, AGENTS.md block marker) carries both a Unix
-> epoch and a human-readable UTC timestamp, so a relative age shown in the
-> body ("3m ago", frozen at mint time) can be checked against the real
-> capture time.
-
-> [!NOTE]
-> Measured (codex-cli 0.156.1): Codex reads `AGENTS.md` **before** its own
-> SessionStart hooks run — the first turn of a session always sees whatever
-> was on disk when the session started, no matter what the hook does to the
-> file afterwards. Only later turns of the *same* session (confirmed on
-> resume) re-check `AGENTS.md`, and only report a diff: "These AGENTS.md
-> instructions replace all previously provided AGENTS.md instructions." plus
-> the new text if it changed, "The previously provided AGENTS.md instructions
-> no longer apply." if the block is gone, nothing if it's unchanged. So a
-> block installed before a given Codex session starts is read only by that
-> session's own `startup` turn (plus, if it's still there, echoed as a diff
-> to its own later turns) — the *next* Codex session that would otherwise
-> read the same stale block never gets the chance: `omhc mark` on this
-> session's own `startup` (never `resume` — the before-hooks read order is
-> only measured for `startup`; never `compact` — same session, no new turn)
-> collapses a block whose capture time is already older than this mark call,
-> instead of waiting the usual 24 hours. This is on top of, not instead of,
-> Path A's own-session collapse and the 24-hour staleness sweep above. A
-> block a concurrent hook in *this same* SessionStart just wrote (Codex runs
-> SessionStart hooks in parallel, measured) is left alone by a small margin
-> on the capture timestamp, and — since that margin narrows but can't close
-> the window between judging a block stale and actually removing it — the
-> removal itself is conditional on the block's capture time still matching
-> what was judged, so a block written in that gap is never lost. As always,
-> nothing is ever touched in a repo where `AGENTS.md` is shared with Claude
-> Code.
-
-This unpacks the latest release into `~/.local/share/omhc/<version>` and
-symlinks `~/.local/bin/omhc` — no pip, no pipx (zero dependencies, so the
-source tree *is* the install). Re-run to update (old versions under
-`~/.local/share/omhc` are pruned automatically, keeping only the one
-`current` points at); pin a version with `| OMHC_VERSION=v0.1.0 sh`.
-
-Uninstall with:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh -s -- --uninstall
-```
-
-This removes only omhc's own `SessionStart` hooks from
-`~/.claude/settings.json` and `~/.codex/hooks.json` — other hooks in the
-same file, or even in the same hook group, are left intact; the JSON is
-just re-serialized (2-space indent) in the process. A `<file>.omhc-bak`
-backup is written first. It then removes `~/.local/bin/omhc` and
-`~/.local/share/omhc`. `~/.omhc` (the archive and ledger) is kept — set
-`OMHC_PURGE=1` to remove that too, including through the pipe:
-`curl -fsSL .../install.sh | OMHC_PURGE=1 sh -s -- --uninstall`. Safe to
-run when nothing is installed, and safe to run twice.
-
-What it doesn't touch:
-- **Codex hook trust.** Trust entries are keyed by group/hook index, so
-  removing omhc's groups can shift the indices of any other Codex
-  `SessionStart` hooks you have — you may need to re-approve those through
-  Codex's own trust flow after uninstalling.
-- **Per-repo leftovers.** An omhc-managed block in a repo's `AGENTS.md`,
-  and `<repo>/.omhc/outbox/`. Run `omhc clear` inside each repo *before*
-  uninstalling if you want those cleaned up too.
-
-<details>
-<summary>From a git checkout instead</summary>
-
-```bash
-git clone git@github.com:SungJun1217/oh-my-harness-cowork.git
-cd oh-my-harness-cowork
-ln -s "$PWD/bin/omhc" ~/.local/bin/omhc
-```
-
-</details>
-
-Wire up the hooks with:
-
-```bash
-omhc hooks install
-```
-
-With no `--harness`, it targets every registered harness that's either
-already detected (`~/.claude/projects`, `~/.codex/sessions` exist) or whose
-config *directory* exists (`~/.claude`, `~/.codex`) — the latter covers the
-common case of installing before either harness has run a first session, so
-there's no `projects`/`sessions` directory yet. If neither exists for a
-harness (e.g. you haven't installed Codex at all), it isn't targeted by
-default; point at it explicitly with `omhc hooks install --harness
-claude-code` (or `--harness codex-cli`). If nothing at all is found, the
-command prints the registered harness ids and exits 1 instead of silently
-doing nothing.
-
-It merges the fragment into that harness's own config
-(`~/.claude/settings.json`, `~/.codex/hooks.json`) — it never overwrites the
-file, only strips any prior omhc hooks first so re-running (e.g. after a
-`hooks/*.json` change) doesn't duplicate them, and leaves an install that
-already passes (`omhc status`'s `<adapter-id> hooks` row is PASS) untouched
-even if it was hand-merged with extra fields or in a different group order.
-It's idempotent: a run with nothing to change writes nothing and makes no
-backup — the first change that does write also normalizes the file's JSON
-formatting (2-space indent). `omhc hooks uninstall [--harness ID]` removes
-only omhc's own `SessionStart` hooks the same way, structurally (parsed as
-argv, not `install.sh --uninstall`'s string regex — the two can diverge on
-unusual commands; see `omhc/hookconf.py`'s module comment for the measured
-cases). Either command backs up the config to `<file>.omhc-bak` first
-whenever it's about to change an existing file.
-
-<details>
-<summary>Merging the fragment files by hand instead</summary>
-
-They live under `~/.local/share/omhc/current/hooks/` (`curl \| sh` install)
-or `hooks/` in the repo (git checkout). Merge the fragment's `hooks` key into
-your own config — don't overwrite it.
-
-| Harness | File | Target |
-|---|---|---|
-| Claude Code | `claude-settings.fragment.json` | `hooks` in `~/.claude/settings.json` |
-| Codex CLI | `codex-hooks.json` | `~/.codex/hooks.json` |
-
-</details>
 
 > [!WARNING]
-> Measured (codex-cli 0.155.1): a hand-dropped `hooks.json` is **not trusted
-> by default, and an untrusted hook is silently skipped with no message** —
-> neither `mark` nor `brief` ever runs on the Codex side, so nothing gets
-> injected into Codex sessions that way (**Claude → Codex**). You must
-> approve it once through Codex's own hook trust flow to fix that direction.
-> **Codex → Claude** still works without it — Claude's own `mark` backfills
-> the Codex session straight from the rollout file. Both fragments use
-> `--wire claude` — `--wire sdk`
-> (top-level `additionalContext`) is rejected by codex-cli 0.155.1 with
-> `hook: SessionStart Failed` and nothing gets injected.
+> Codex silently skips a hook you haven't approved. Approve omhc's hook once
+> through Codex's own hook trust flow, or Claude → Codex delivers nothing
+> (Codex → Claude still works).
 
-Codex also loads hooks from an inline `[hooks]` table in `config.toml`
-(same `hooks.<Event>[].hooks[].command` shape as `hooks.json`, just written
-as TOML array-of-tables — see the official
-[config-advanced docs](https://developers.openai.com/codex/config-advanced#hooks)).
-`omhc hooks install` still only ever writes `hooks.json`, but `omhc status`'s
-`codex-cli hooks` row and the hook path's `install_handoff` both recognize an
-omhc install that lives in `~/.codex/config.toml` instead — if you hand-wrote
-one there, you don't need `hooks.json` too. If both exist and both define an
-omhc `SessionStart` hook, Codex loads both and warns (per the docs); `status`
-shows that as an unjudged `----` row rather than PASS, naming both files.
-Project-level `<repo>/.codex/hooks.json` / `<repo>/.codex/config.toml` only
-count once that project's `.codex/` layer is trusted (`[projects."<path>"]
-trust_level = "trusted"` in `~/.codex/config.toml`) — otherwise omhc ignores
-them.
+For a project that isn't a git repo, run `touch .omhc-root` at its top once.
 
-`omhc status` gives every row one of three labels: **PASS** or **FAIL** for
-checks that were actually judged and can gate the exit code (adapters,
-archive, instruction files, `ledger rejects`, and adapter health rows such as
-`codex hook`), and **`----`** for rows that are informational or not
-judgeable yet (ledger, off switch, pull rate, watcher) — `----` never gates.
-
-The ledger appends one JSON line per session start, and each line must fit
-in a single `write(2)` call (append-only, so no locking is needed — a
-one-syscall write to an `O_APPEND` fd is atomic on POSIX regardless of size,
-which is unrelated to `PIPE_BUF`; that guarantee is about pipes only). Rows
-over that cap are dropped rather than truncated (a truncated `path`/`session`
-would silently point at nothing) and the drop itself is recorded so it's not
-invisible; a retried session that still can't fit is only recorded once, not
-once per `mark`. `ledger rejects` FAILs when this repo had a drop in the last
-7 days that still doesn't fit under the current cap, `----` otherwise; `omhc
-clear` drops this repo's record of it (e.g. after raising the cap). When the
-omhc Codex
-hook is installed, a `codex hook` row is added. It FAILs when the newest
-interactive Codex session for this repo since `hooks.json` last changed never
-ran the hook — the untrusted-hook case — and names that session's originator;
-Claude→Codex is then not delivered, while Codex→Claude still works through
-Claude's `mark` backfill. It shows `----` while it cannot judge yet: no
-interactive Codex session here since `hooks.json` changed (the date is shown),
-only headless `codex exec` sessions (they never count — open an interactive
-`codex` here once), or an unknown error.
-
-For a repo whose root is marked by `.omhc-root` (not `.git`, and with no `.git`
-in any ancestor directory either — Codex's own default already reaches down
-from there), a `codex root markers` row checks whether
-`~/.codex/config.toml`'s `project_root_markers` includes `.omhc-root` — see
-the box above. It never gates: this setting only matters for Path B (the
-AGENTS.md fallback), so it PASSes when the marker is there and otherwise shows
-`----` with the exact line to add — plus, when the omhc Codex hook isn't
-installed, an explicit note that Path B is currently your only channel to
-Codex. `----` also covers a config file that's missing, unreadable, or that
-can't be parsed (never written by omhc), and a key found only inside a
-`[section]` (TOML tables scope keys — it must be at the top level).
-
-Whenever an omhc-managed block is currently installed in `AGENTS.md`, a
-`codex agents.md budget` row checks its actual end offset (bytes) against
-`~/.codex/config.toml`'s `project_doc_max_bytes` (default 32768 if unset or
-unreadable). It FAILs (and gates) when the block ends past that limit — Codex
-would never see it — naming the offset and the limit; `----` when no block
-is installed. Path B itself never writes a block it already knows would fail
-this check: it declines (falling through to the outbox) instead, and logs
-the reason to `guard.log`.
-
-For every detected harness, status also adds a `<adapter-id> hooks` row
-(e.g. `claude-code hooks`, `codex-cli hooks`) that checks whether omhc's
-SessionStart hooks are actually merged into that harness's own config, not
-just that the harness directory exists. Matching is structural (parsed as
-argv, not a byte-for-byte string compare), so an absolute path, `~`,
-`${HOME}`, a quoted command, or a bare `omhc` found on `PATH` all still
-count as installed. It FAILs (and gates) when the config file is missing
-(pointing at `omhc hooks install`) or unparseable, when the `mark`/`brief`
-commands aren't there in the order and with the flags the shipped fragment
-expects (a stale `--wire sdk`, a missing `mark`, `brief` before `mark`, …
-also pointing at `omhc hooks install`), or when the hook's binary can't be
-found or isn't executable. It PASSes once the installed commands match the
-shipped fragment structurally and the binary is executable.
-
-### Repos that share AGENTS.md with Claude Code
-
-> [!IMPORTANT]
-> The recommended layout keeps `AGENTS.md` as the harness-neutral source,
-> with `CLAUDE.md` as a real file starting with `@AGENTS.md` followed by
-> Claude-specific content (this repo uses exactly that structure). Making
-> `CLAUDE.md` a symlink to `AGENTS.md` counts as sharing too — either way,
-> `AGENTS.md` itself must never be the symlink.
-
-In such repos, omhc never writes to `AGENTS.md`. Codex's managed block
-(Path B) would otherwise be read verbatim in Claude Code sessions too,
-leaking the handoff, and writing through the symlink would mutate the
-shared, tracked source file. Handoffs to Codex go through Codex's own
-SessionStart hook (Path A) instead — if that hook doesn't run, Path B and
-the outbox don't step in either, because the `brief` call on the Codex side
-never happens. So **Codex does not auto-read the outbox directory**, and you
-must install the Codex hook from the table above (and trust it through
-Codex's own flow). The `instruction files` row in `omhc status` reflects
-this layout.
+- Codex settings, repos that share `AGENTS.md` with Claude Code, installing
+  from a checkout, merging hooks by hand, uninstalling:
+  [docs/install.md](docs/install.md)
+- What each `omhc status` row checks: [docs/status.md](docs/status.md)
 
 ## Usage
 
 | Command | Role |
 |---|---|
-| `omhc status [--json]` | The one human dashboard. Includes archive lag (`lag_bytes`, `tail=…B`) and pull rate |
-| `omhc log [--last N] [--grep P] [--verb V] [--file P]` | Indexed events, one per line. Each line starts with a `<session>#N` ref you can paste straight into `show` |
-| `omhc trace <path> [--all] [--last N] [--json]` | File → session reverse index (sessionwiki `trace` prior art): every indexed event that touched `path`, across both harnesses' sessions, oldest first (newest last, like `log`), each line tagged with harness and a `show`-able ref. Defaults to `modified` only; `--all` adds `inspected`/`ran` mentions. A path/suffix match that's ambiguous across distinct files is reported (with candidates), never guessed. Only covers sessions that were delivered or seen by `watch` — an untouched file just means "not indexed yet", not "never edited"; a session indexed only by `watch` (no ledger `start` row yet) shows `?` for harness |
-| `omhc show <E1\|#137\|abcdef01#137> [--full]` | **Looks up the original bytes by offset** (tier (b) entry point). Bare `#N` resolves against the most recently delivered session (same rule `log`'s pull accounting uses); `<prefix>#N` names the session explicitly — an ambiguous prefix lists the candidates |
-| `omhc note "<text>"` | Leave a note. Either harness's agent can call it from the plain command line |
+| `omhc status [--json]` | The one human dashboard, including archive lag and [pull rate](docs/status.md#pull-rate) |
+| `omhc log [--last N] [--grep P] [--verb V] [--file P]` | Indexed events, one per line, each starting with a `<session>#N` ref you can paste into `show` |
+| `omhc trace <path> [--all] [--last N] [--json]` | Every indexed event that modified `path`, across both harnesses' sessions. `--all` adds reads and command mentions |
+| `omhc show <E1\|#137\|abcdef01#137> [--full]` | **Reads the original bytes back by offset.** Bare `#N` means the most recently delivered session |
+| `omhc note "<text>"` | Leaves a note for the next handoff. Either harness's agent can call it |
+| `omhc hooks install\|uninstall [--harness ID]` | Merges or strips omhc's own `SessionStart` hooks |
+| `omhc clear` | Removes this repo's installed markers, outbox files and reject records |
+| `omhc watch [--stop\|--once]` | Optional accelerator daemon; results are identical without it |
+| `omhc mark` / `omhc brief --harness X` | Called by the hook: record the session start, then print the handoff |
 
-**Pull rate** ("pulled X of N recent injections") is the one number for
-judging whether omhc's overhead is worth it: X is how many of the last N
-(`PULL_RATE_WINDOW`, 20) delivered sessions for this repo were actually dug
-into via `omhc show`, `omhc log`, or `omhc trace` (each session counts once, no
-matter how many times it's pulled) — a human running `omhc log` by hand counts too, not
-just an agent. The window is over the most recent deliveries in append order
-(matched by session id), not the whole history — otherwise a repo used for a
-long time would show a rate that keeps drifting down as old, no-longer-pulled
-deliveries pile up in a denominator that never shrinks.
-
-Turn it off: `OMHC_OFF=1`, or an `~/.omhc/<repo-key>/off` file.
-
-By default, headless sessions (`claude -p`, `codex exec`, app-server clients) and
-Codex subagent threads are never handoff sources. To treat headless sessions as real
-ones in a sandbox, export `OMHC_ALLOW_HEADLESS=1` for the receiving launch: eligibility
-is judged when the receiving session starts, so it also admits headless sessions that
-ran before you set it. Exporting it once for the whole run is simplest. Subagents and
-sidechains stay excluded even then.
+Turn it off with `OMHC_OFF=1` or an `~/.omhc/<repo-key>/off` file. Headless
+sessions (`claude -p`, `codex exec`) are never handoff sources unless you set
+[`OMHC_ALLOW_HEADLESS=1`](docs/install.md#headless-sessions).
 
 ## When not to use it
 
@@ -463,327 +148,38 @@ sidechains stay excluded even then.
 > down to preserving thinking blocks.
 
 omhc is **strictly worse** there, because it's a summary. That's why the
-pipeline short-circuits and writes nothing when `from == to`.
+pipeline short-circuits and writes nothing when `from == to`. omhc earns its
+keep **when the vendor changes**: cross-vendor resume is impossible in
+principle, because thinking-block signatures are verified against the system
+prompt and preceding messages.
 
-omhc earns its keep **when the vendor changes**. Cross-vendor resume is
-**impossible in principle** — thinking-block signatures are verified
-against the system prompt and preceding messages.
+## Known limits
 
-## Extending
+- [An untrusted Codex hook turns off Claude → Codex entirely](docs/limits.md#an-untrusted-codex-hook-turns-off-claude-to-codex)
+- [Codex 0.144–0.148 sessions carry no command facts](docs/limits.md#codex-0144-to-0148-sessions-carry-no-command-facts)
+- [A Claude Code fork needs a turn of its own before it's handed off](docs/limits.md#a-claude-code-fork-needs-a-turn-of-its-own)
+- [The on-disk formats are not an official contract](docs/limits.md#the-on-disk-formats-are-not-an-official-contract)
+- [Non-git projects need a marker](docs/limits.md#non-git-projects-need-a-marker)
+- [Concurrent use is out of scope for v1](docs/limits.md#concurrent-use-is-out-of-scope-for-v1)
 
-```bash
-python3 -m unittest discover -s tests -t . -q   # ~12s, never launches a harness
-bash tests/smoke.sh                             # 8 adversarial inputs
-```
+The measured facts behind the design are in
+[docs/limits.md](docs/limits.md#measured-facts).
 
-v1 ships exactly 2 adapters. Adding a third costs **one file + one
-fixture**:
-
-1. Implement the 5 methods (`detect`, `list_sessions`, `read_session`,
-   `native_resume_hint`, `install_handoff`) in `omhc/adapters/<harness>.py`,
-   decorated with `@_register`
-2. Add `from . import <harness>` at the bottom of `omhc/adapters/__init__.py`
-3. Freeze one real session under `tests/fixtures/<harness>/`
-
-No core changes. Reading and writing are independent capabilities, so a
-harness with no session hook is normally **read-only, not broken**. If
-`brief` runs for that harness but there's no injection path (or it fails),
-the universal floor `<repo>/.omhc/outbox/` catches it — if `brief` itself
-never runs (no hook installed, or an untrusted one), even the outbox
-receives nothing.
-
-## Tests
+## Development
 
 ```bash
 python3 -m unittest discover -s tests -t . -q   # ~12s, never launches a harness
 bash tests/smoke.sh                             # 8 adversarial inputs
 ```
 
-The conformance suite (`tests/conformance/test_suite.py`) parameterizes 22
-invariants over `REGISTRY` — **adding an adapter grows the test count for
-free.**
-
-About 60 tests are skipped without fixtures (`tests/fixtures/`, never
-committed). Generate them from real sessions on your own machine with
+About 60 tests skip without fixtures. Fixtures are real conversations and are
+never committed; generate them on your own machine with
 `python3 tests/harvest.py [--force]`.
 
-<details>
-<summary>More: known limitations, measured facts, delivery fallback diagram, less-used commands</summary>
-
-### Known limitations
-
-- **Codex 0.144–0.148 sessions carry no command facts.**
-  <details>
-  <summary>Details</summary>
-
-  The Codex mapping is measured against 194 real rollouts (codex-cli
-  0.141–0.155.1), which fall into three eras. 0.141–0.142 record shell runs as
-  `exec_command` function calls with plain-text exit status. 0.149 and later
-  record them as `CommandExecution` items. In 0.144–0.148 the shell call exists
-  only inside JavaScript source that the adapter deliberately does not parse
-  (whitelist, fail-closed), so those sessions read with edits but no `ran`
-  events. Unknown record types are still counted as `unparsed`.
-
-  </details>
-
-- **An untrusted Codex hook still turns off Claude → Codex entirely.**
-  <details>
-  <summary>Details</summary>
-
-  Measured (codex-cli 0.155.1): an untrusted `hooks.json` is silently
-  skipped, and neither `mark` nor `brief` ever runs on the Codex side.
-  Because `deliver()` (Path B included) only runs inside a `brief` call, an
-  untrusted hook means Claude → Codex isn't caught by the `AGENTS.md`
-  managed block or the outbox either — it just never turns on. Path B/outbox
-  only open when `brief` actually runs but `install_handoff` fails —
-  typically a missing omhc hook in `~/.codex/hooks.json`, though other
-  exceptions (e.g. a write failure under `~/.omhc`) take the same path, such
-  as calling `omhc brief --harness codex-cli` manually.
-
-  Codex → Claude no longer needs that hook: Claude's own `mark` calls the
-  Codex adapter's `discover()` and backfills the Codex session's ledger row
-  (`via:"scan"`) directly from the rollout file whenever it's newer than
-  anything already ledgered for that harness in this repo, up to 5 sessions
-  per `mark` call. `omhc status`'s `codex hook` row ignores those `scan` rows
-  on purpose — counting them would hide the fact that the hook itself never
-  ran. **Known gap (#22, harmless in the default config):** sessions beyond
-  those 5 (or beyond `discover()`'s own hook-path time budget) are never
-  backfilled later either — the next `mark` call's watermark is already the
-  newest one just picked, so anything older permanently fails the "newer
-  than what's ledgered" check. This is harmless because `due()` only ever
-  needs the single newest *eligible* foreign session, and `discover()`
-  applies the same headless filter (`allow_headless()`) that `brief`'s
-  eligibility check does — so what gets backfilled and what `due()` wants
-  are normally the same set. It only breaks if `OMHC_ALLOW_HEADLESS` differs
-  between the `mark` that ran the backfill and the later `brief` call: an
-  interactive session sitting behind more than 5 newer headless ones could
-  then be missing from the ledger entirely. Not fixed — an uncommon
-  configuration change to hit in practice.
-
-  `session_meta.timestamp` is read once from a rollout's first line and
-  never updated — `codex exec resume` (measured: it appends to the same
-  rollout, no new `session_meta`) doesn't move it, so a resumed session's
-  start epoch stays exactly what it was, and neither the first-line start
-  time nor an `already_delivered` session id can tell the backfill path
-  that a resume happened. When the Codex hook *is* trusted, that's fine —
-  SessionStart fires with `source:"resume"`, `mark` records a fresh start
-  and a `reopen` line in `delivered.tsv` (`source:"compact"` never
-  reopens). When the hook is **not** trusted (the default, unverified
-  Codex config), fixing this needs a change-detection signal other than
-  session-start epoch — invariant 6 still rules out last-record timestamp
-  or mtime as an *ordering* source, but file **size** only detects "this
-  file grew", not "when": `mark`'s backfill now also stats the ledger's
-  last known size per foreign session (no re-scan, no date-dir window, so
-  it still works for sessions the 14-day `discover()` window can no longer
-  see) and, if it grew, reads only the new tail via the adapter's optional
-  `read_session_since(ref, offset)` (Codex: snaps to the next line
-  boundary) to check whether that tail actually contains a new human
-  turn — agent-only growth (tool calls, `turn_aborted`, `task_complete`)
-  just updates the size baseline and does not re-surface the session.
-  Reading the tail still costs roughly what a full read costs per byte
-  (measured: ~22µs/KB), so it stops as early as possible: `stop_at_human_turn`
-  returns the moment a human turn is found (measured: 0.18ms even on a
-  45MB rollout when the turn is near the read start) and a `max_bytes`
-  cap bounds the pathological case — a large tail with *no* human turn at
-  all — to a fixed worst case (measured: ~17ms for a 1MB cap regardless of
-  how much bigger the actual tail is) well inside the hook budget. A
-  capped read doesn't advance the size baseline past what it actually
-  read, so the unread remainder gets picked up on the next `mark` instead
-  of being silently skipped. The reported `end_offset` (used as the next
-  baseline, instead of the raw stat size) is always snapped to the last
-  complete line actually read — including for that very first baseline:
-  stat'ing a file mid-write can catch it mid-record, and using that raw
-  byte count as the cutoff would make a subsequent read skip the
-  remainder of that exact record, permanently losing whatever human turn
-  was being written at that instant. That snap looks backward at most
-  64KB for a newline; a single JSONL record longer than that (unmeasured,
-  believed rare) falls back to the previous known-good baseline when one
-  exists, so the worst case is re-reading a span. **Known limit:** with no
-  previous baseline it keeps the raw size — using `0` instead would make the
-  next read start from byte 0, find the session's *original* human turn and
-  hand the old content off again (reproduced in review) — so a >64KB human
-  record caught mid-write on a session's very first observation can be missed. The same reasoning applies to
-  `stop_at_human_turn`: a line that already parses as a complete human
-  turn but hasn't had its trailing newline written yet is not counted as
-  a match — counting it would advance the baseline right up to (but not
-  past) that line, so the very next `mark`, once the newline lands, would
-  find "new" growth starting at the same unterminated line and hand off
-  the same turn a second time.
-
-  A resumed session found this way still lands in the ledger through
-  **append order** (a fresh `start` row, `grew:1`), the same ordering rule
-  `due()` always used; the row's epoch is `mark`'s own clock, so
-  `due.MAX_AGE_SECONDS` never filters it out for being old. A session that
-  loses to a newer one in the same interval isn't blocked forever either,
-  regardless of how that newer session's start row got into the ledger:
-  if it came from the backfill scan, the losing session's baseline is
-  rebaselined past it in that same `mark` call (before anything has had a
-  chance to grow, minimizing the ambiguous window below); if the newer
-  session's own trusted hook wrote its start row directly — invisible to
-  the backfill scan, since that session isn't a stranger to the ledger
-  anymore — the next reactivation pass does the same rebaseline lazily,
-  whether or not the losing session happened to grow in that pass. Either
-  way, growth past that newer row is judged fresh again; it just doesn't
-  retroactively un-supersede the interval it lost. This also covers a
-  case that never had a fix before: a live-continue where the human keeps
-  typing in an already-delivered Codex session A and then switches
-  straight to a new Claude session, with no Codex SessionStart at all —
-  the growth check runs from *any* `mark`, including the receiving
-  harness's, so it needs no hook on A's side either.
-
-  **Remaining limit:** the underlying ordering is still ledger append
-  order, so if a brand-new session and a resumed/continued one both grow
-  within the *same* interval — between the newer session's start row
-  landing and the next time the older session is rebaselined (at most one
-  `mark` call later) — that growth is inherently ambiguous (size alone
-  can't tell whether it happened before or after) and stays absorbed; the
-  newer *start* wins for that interval (the older one's next growth,
-  after that interval, is judged fresh again — see above). And this is
-  Codex→Claude only, because the growth check only runs for adapters that
-  implement `read_session_since` — the Claude adapter doesn't yet, so a
-  live-continue *into a Claude session* (someone keeps typing in an
-  already-delivered Claude session, then switches to a new Codex one)
-  isn't detected until it is.
-
-  **`reopen` is a hint, not a guarantee (#27).** `codex exec resume <id> ""`
-  fires `source:"resume"` and leaves a `reopen` line, but the rollout only
-  gains a user record with `"text": ""` — no human turn. Concurrently, Codex
-  fires its SessionStart hooks in parallel, so `mark` and `brief` can race:
-  `brief` can deliver a session in the same second `mark`'s growth check
-  reactivates it from a turn `brief` had already read, appending `reopen`
-  *after* the delivery. Either way, `due()` would hand the session back
-  to `brief` with nothing new to say. So `brief.compute` also records, on
-  every delivery, the byte offset just past what it read (a 5th
-  tab-separated column in `delivered.tsv`; readers that only look at the
-  first two columns are unaffected, and lines without it fall back to
-  today's unconditional behavior). Before redelivering a reopened session,
-  it requires at least one `author=="human"`, `verb=="said"` event with a
-  non-empty `text` at or past that offset — otherwise it returns empty
-  without touching the gate or `delivered.tsv`, exactly like the "nothing
-  to send" path. `--dry-run` runs the same check. `mark`'s `reopen` write is
-  unchanged — it is still the only signal that makes `due()` reconsider a
-  delivered session; `brief` is what decides whether there is actually
-  something new to send.
-
-  </details>
-
-- **A Claude Code fork (`/branch`, `--fork-session`, background `/fork`)
-  needs a turn of its own before it's eligible (#34).**
-  <details>
-  <summary>Details</summary>
-
-  A fork starts SessionStart with `source:"fork"` (`"resume"` before
-  2.1.214), gets a brand-new session id, and its transcript opens with the
-  parent's current message chain copied in (each copied record keeps its
-  original `uuid`/`timestamp`/`type`/`message` but gets `sessionId`,
-  `parentUuid`, `isSidechain:false`, `sessionKind:undefined`, and a new
-  `forkedFrom:{sessionId, messageUuid}` field; a `{"type":
-  "history-suppression","cause":"fork_inherit"}` record may be prepended).
-  Treated as a plain new session, that means if the parent had already been
-  handed off to the other harness and the fork never gets a human turn of
-  its own, the next handoff to that harness would deliver the parent's
-  GOAL/NEXT a second time under the fork's new id — `mark`'s per-session
-  `reopen`/offset guard (#27) doesn't apply because that id never had a
-  `delivered.tsv` row to begin with.
-
-  Fixed in the Claude adapter's `classify()` (used by `list_sessions`,
-  `ref_for_path`, and `brief`'s eligibility check): a forked transcript is
-  eligible only once it has at least one `author=="human"` turn that
-  **isn't** a copied record (no `forkedFrom` key) — i.e. something typed in
-  the fork itself. Detection is cheap on the common case: a transcript is
-  only even considered a fork if `forkedFrom`/`fork_inherit` shows up in
-  its first few lines, and the scan for "does the fork have its own turn
-  yet" stops at the first record past the copied run. The 50 ms time cap
-  runs over the whole scan (including the copied run, which is a cheap
-  per-line substring check); the 8 MB byte cap only counts bytes **past**
-  the copied run (the own tail) — counting the copied run against the
-  byte budget too was a bug caught in review: any fork of a parent bigger
-  than 8 MB always failed open and got redelivered (repro: this repo's own
-  6.9 MB session rewritten as a fork, duplicated to 12.6 MB, delivered its
-  428-byte handoff again). Hitting either cap fails open to eligible (the
-  old behavior). Measured (synthetic, copy-only i.e. no own turn to find):
-  6.3 MB ~7 ms, 12.6 MB ~13 ms, 25.1 MB ~26 ms, 30 MB run to EOF ~32 ms; a
-  realistic 2 MB copied run with a new turn resolves in ~2 ms. Any
-  unexpected record shape in the own tail (`message` not a dict, a `text`
-  block whose `text` isn't a string, …) is caught per-line and also fails
-  open, rather than raising out of `classify()`/`list_sessions()` and
-  losing every Claude ref for that repo. `ref_for_path` (called by
-  `brief`) and `brief.eligible`'s own `classify()` call would otherwise
-  scan the same file twice per brief; a small per-process cache keyed by
-  `(path, size, mtime_ns)` on the classify result avoids the repeat scan
-  and self-invalidates the moment the file grows (a new turn arrives).
-  `mark` doesn't special-case `source:"fork"` — it's a new session id, so a
-  plain start row is correct as-is; only `resume` reopens a delivered one.
-
-  </details>
-
-- **The on-disk formats are not an official contract.**
-  <details>
-  <summary>Details</summary>
-
-  Claude Code's on-disk schema is undocumented and changed in
-  backward-incompatible ways throughout 2026 (even the official
-  `SessionStore` declares entries "opaque"). Mitigated with whitelist
-  parsing, fail-open behavior, and degradation reporting in `status` — but
-  designed assuming it will break. That's why the archive is a pointer.
-
-  </details>
-
-- **Non-git projects need a marker.** The repo root is the nearest ancestor
-  holding `.git` *or* `.omhc-root`. Without either, every subdirectory you run
-  omhc from becomes its own project (its own key, its own state under
-  `~/.omhc/`). If your project isn't a git repo, run `touch .omhc-root` at
-  its top once. `omhc` itself refuses to run at `/` (`status` shows `FAIL
-  root`; the hook path stays silent, per invariant 2) — `$HOME` is fine.
-
-- **Concurrent use is out of scope for v1.**
-  <details>
-  <summary>Details</summary>
-
-  The seam is a single function, `omhc/due.py::due()`. v2 changes its
-  return type to `List[Watermark]` and adds `stale.py` as a second consumer
-  of the same stream. v1 already records the foundation it needs (an
-  untruncated `paths` column plus byte-offset ordering).
-
-  </details>
-
-- **Fixtures are never committed.**
-  <details>
-  <summary>Details</summary>
-
-  They contain real conversation content. Generate them on your own
-  machine with `python3 tests/harvest.py`.
-
-  </details>
-
-### Measured facts (design rationale)
-
-| Fact | Value |
-|---|---|
-| Share of a session file that is actual conversation | Claude Code 8%, Codex 0.15% |
-| Interactive (`entrypoint=cli`) sessions among the top 31 | **1** (the other 30 are `sdk-py`) |
-| Real human turns extracted from 798 records | **11** (of 95 `user` records, 67 are `tool_result` and 7 are slash-command envelopes) |
-| Times `SessionStart` fired within one session | **6** → a once-per-session gate is required |
-| Record index where `cwd` first appears | **3** (not 0, and entirely absent in 222 of 798 records) |
-| Points where timestamps go backwards | **254** (up to 52 ms) → cannot be used as an ordering source |
-| Size of the `skill_listing` body / markers it contains | 29,958 chars / **0** → marker detection alone cannot catch it |
-| Intersection of the two harnesses' tool vocabularies | **empty set** (`Read/Edit/Bash` vs. `shell/apply_patch`) |
-
-### Delivery fallback diagram
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/delivery-dark.svg">
-  <img src="assets/delivery-light.svg" width="100%" alt="Delivery fallback chain: if the SessionStart hook is not trusted nothing is delivered; otherwise Path A (install_handoff) is tried, then Path B (AGENTS.md managed block, Codex only, never when shared with Claude Code), then the outbox floor which is never auto-read">
-</picture>
-
-### Less-used commands
-
-| Command | Role |
-|---|---|
-| `omhc mark --harness X` | Records session start (called by the hook) |
-| `omhc brief --harness X [--wire claude\|cursor\|sdk]` | Prints the handoff (called by the hook) |
-| `omhc clear` | Removes installed markers |
-| `omhc watch [--stop\|--once]` | Optional accelerator daemon (results are identical without it) |
-| `omhc hooks install\|uninstall [--harness ID]` | Merges/strips omhc's own `SessionStart` hooks (see Install) |
-
-</details>
+A new harness costs **one file and one fixture**: implement `detect`,
+`list_sessions`, `read_session`, `native_resume_hint` and `install_handoff` in
+`omhc/adapters/<harness>.py` with `@_register`, add one import line to
+`omhc/adapters/__init__.py`, and freeze one real session under
+`tests/fixtures/<harness>/`. The conformance suite parameterizes 22 invariants
+over the registry, so the new adapter is tested for free. A harness with no
+session hook is simply read-only.

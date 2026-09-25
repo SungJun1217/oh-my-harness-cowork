@@ -13,10 +13,10 @@ or deleting repo files, no git writes. If you need scratch files, put them under
 
 Only the parts relevant to the task — do not read everything.
 
-- `README.md` (Korean) — the two core decisions (900-byte hard cap; archive = hardlink to the original), slot semantics, measured facts, known limitations
+- `README.md` — the two core decisions (900-byte hard cap; archive = hardlink to the original). Details: `docs/handoff.md` (slot semantics), `docs/limits.md` (known limitations, measured facts), `docs/install.md` (Codex measurements, delivery fallbacks), `docs/status.md` (status rows)
 - Code comments — they carry the design rationale, usually citing a measured fact. Read them as-is (Korean).
 
-The original design spec was removed from the tree. If you need its deeper rationale, recover it from git history: `git log --oneline -- docs/` then `git show <commit>:docs/superpowers/specs/2026-09-22-omhc-design.md`. Treat it as historical — current code and README win where they differ.
+The original design spec was removed from the tree. If you need its deeper rationale, recover it from git history: `git log --oneline -- docs/` then `git show <commit>:docs/superpowers/specs/2026-09-22-omhc-design.md`. Treat it as historical — current code, README and `docs/` win where they differ.
 
 ## Settled decisions (not up for debate)
 
