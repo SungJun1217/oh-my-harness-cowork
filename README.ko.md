@@ -578,6 +578,53 @@ bash tests/smoke.sh                             # 적대적 입력 8종
 
   </details>
 
+- **Claude Code 포크(`/branch`, `--fork-session`, 백그라운드 `/fork`)는 자기
+  턴이 생기기 전까지는 적격이 아닙니다(#34).**
+  <details>
+  <summary>자세히</summary>
+
+  포크는 SessionStart 를 `source:"fork"` 로 시작하고(2.1.214 이전은
+  `"resume"`), 새 session_id 를 받으며, 트랜스크립트는 부모의 현재 메시지
+  사슬을 복사한 채로 열립니다(복사된 레코드는 원본의 `uuid`/`timestamp`/
+  `type`/`message` 는 그대로 두고 `sessionId`, `parentUuid`,
+  `isSidechain:false`, `sessionKind:undefined` 를 덮어쓰고 새
+  `forkedFrom:{sessionId, messageUuid}` 를 얹습니다. `{"type":
+  "history-suppression","cause":"fork_inherit"}` 레코드가 맨 앞에 붙을 수도
+  있습니다). 이걸 평범한 새 세션으로 취급하면, 부모가 이미 상대 하네스로
+  전달됐고 포크에 자기 턴이 하나도 없을 때 다음 핸드오프가 부모의 GOAL/NEXT
+  를 포크의 새 id 아래 또 한 번 내보냅니다 — `mark` 의 세션별 reopen/offset
+  가드(#27)는 그 id 에 애초에 `delivered.tsv` 행이 없어서 적용되지 않습니다.
+
+  Claude 어댑터의 `classify()`(`list_sessions`, `ref_for_path`, `brief` 의
+  적격성 판정이 함께 쓰는 지점)에서 고쳤습니다 — 포크된 트랜스크립트는
+  `forkedFrom` 이 없는 `author=="human"` 턴, 즉 포크 자신이 새로 타이핑한
+  턴이 하나라도 있어야 적격입니다. 흔한 경우는 값싸게 처리합니다 — 앞 몇
+  줄에 `forkedFrom`/`fork_inherit` 이 보여야만 포크로 취급하고, "포크 자신의
+  턴이 있는가" 스캔은 복사 구간이 끝나는 첫 레코드에서 멈춥니다. 50ms 시간
+  상한은 전체 스캔(복사 구간 포함 — 줄당 값싼 substring 검사일 뿐이라
+  가볍습니다)에 걸리고, 8MB 바이트 상한은 복사 구간을 **벗어난 뒤**(own
+  tail) 바이트만 셉니다 — 복사 구간 바이트까지 상한에 넣는 것은 리뷰에서
+  잡힌 결함이었습니다: 부모가 8MB 만 넘어도 own tail 을 보기도 전에 항상
+  fail-open 돼서(이 레포의 실제 6.9MB 세션을 포크로 다시 써 12.6MB 로
+  복제한 픽스처로 재현: 428바이트 핸드오프가 또 나갔습니다) 정작 고치려던
+  버그가 안 고쳐졌습니다. 어느 상한이든 걸리면 예전 동작(적격)으로 엽니다.
+  실측(synthetic, 새 턴을 못 찾는 복사-전용 케이스): 6.3MB ~7ms, 12.6MB
+  ~13ms, 25.1MB ~26ms, 30MB(끝까지 못 찾음) ~32ms, 새 턴이 있는 현실적인
+  2MB 복사 구간은 ~2ms 에 끝납니다. own tail 의 예상 밖 레코드 모양
+  (`message` 가 dict 가 아니거나 `text` 블록의 `text` 가 문자열이 아닌 등)은
+  한 줄 단위로 잡아 마찬가지로 fail-open 합니다 — `classify()`/
+  `list_sessions()` 밖으로 예외가 새서 그 레포의 Claude ref 를 전부 잃는
+  것(watch 가 그렇게 됩니다)보다 판정 하나를 포기하는 쪽이 쌉니다.
+  `ref_for_path`(브리핑이 부름)와 `brief.eligible` 자신의 `classify()` 호출이
+  같은 파일을 브리핑 한 번에 두 번 스캔하던 것은, classify 결과를
+  `(path, size, mtime_ns)` 로 키를 잡는 프로세스당 작은 캐시로 피합니다 —
+  파일이 자라(새 턴이 생기면) 키가 바뀌므로 캐시가 스스로 무효화됩니다.
+  `mark` 는 `source:"fork"` 를 따로 다루지 않습니다 — 새 session_id 이므로
+  평범한 start 행이 맞고, 전달된 세션을 다시 여는 것은 여전히 `resume`
+  뿐입니다.
+
+  </details>
+
 - **원본 포맷은 공식 계약이 아닙니다.**
   <details>
   <summary>자세히</summary>

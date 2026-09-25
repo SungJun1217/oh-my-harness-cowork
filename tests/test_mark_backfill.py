@@ -399,6 +399,31 @@ class TestResumeReopensDelivery(unittest.TestCase):
         self.assertIsNone(
             due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
 
+    def test_fork_after_delivery_does_not_reopen(self):
+        """source:"fork" 는 새 session_id 로 오므로 cmd_mark 는 그저 평범한
+        start 행을 남긴다(#34) — resume 처럼 이미 전달된 세션을 reopen 하지
+        않는다. Claude 쪽 fork 적격성은 어댑터의 classify() 가 판정한다."""
+        now = time.time()
+        self._deliver(now, "필드 경로부터 다시 확인해줘")
+        code, out = self.h.mark(harness="codex-cli", session_id="cx1", source="fork")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertIsNone(
+            due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
+
+    def test_claude_receiving_side_with_source_fork_is_unaffected(self):
+        """cmd_mark 의 source 분기는 harness 를 가리지 않는다 — Claude 자신의
+        포크가 SessionStart 를 source:"fork" 로 낼 때도 그저 새 start 행
+        하나일 뿐, resume 취급으로 새지 않는다."""
+        now = time.time()
+        code, out = self.h.mark(harness="claude-code", session_id="fork1", source="fork")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        starts = [r for r in rows if r.get("harness") == "claude-code"
+                 and r.get("session") == "fork1" and r.get("event") == "start"]
+        self.assertEqual(len(starts), 1)
+
     def test_resume_of_a_never_delivered_session_is_unchanged(self):
         now = time.time()
         self.h.plant("cx1", now - 600)
