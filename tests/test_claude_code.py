@@ -4,9 +4,10 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 from omhc import adapter as A
-from omhc import guard
+from omhc import brief, due, guard, ledger, locate
 from omhc.adapters import claude_code as CC
 
 from . import _repo
@@ -148,6 +149,299 @@ class TestHeadlessOverride(unittest.TestCase):
             self._plant(home, REPO, entrypoint="cli", sidechain=True)
             os.environ["OMHC_ALLOW_HEADLESS"] = "1"
             self.assertEqual(CC.ClaudeCodeAdapter(home=home).list_sessions(REPO), [])
+
+
+def _write_jsonl(path: str, rows) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _copied(row: dict, *, fork_id="fork1", parent_id="parent1", uuid="u1") -> dict:
+    """/branch, --fork-session 등이 복사한 레코드의 모양(#34, 분석 근거).
+    uuid/parentUuid/timestamp/type/message 는 원본 그대로고 나머지를 덮어쓴다."""
+    row = dict(row)
+    row["sessionId"] = fork_id
+    row["isSidechain"] = False
+    row["sessionKind"] = None
+    row["forkedFrom"] = {"sessionId": parent_id, "messageUuid": uuid}
+    return row
+
+
+_TS = "2026-09-25T00:00:00.000Z"
+
+
+class TestForkClassify(unittest.TestCase):
+    """#34: 포크는 부모의 사슬을 복사해 새 session_id 로 시작한다. 포크 자신의
+    사람 턴이 없으면 이미 전달된 부모 턴을 또 전달하게 되므로 적격이 아니다."""
+
+    def test_fork_with_no_own_turn_is_not_eligible(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "f.jsonl")
+            _write_jsonl(path, [
+                {"type": "history-suppression", "cause": "fork_inherit"},
+                _copied({"type": "user", "cwd": REPO, "timestamp": _TS,
+                        "message": {"content": "부모의 목표"}}, uuid="u1"),
+                _copied({"type": "assistant", "cwd": REPO, "timestamp": _TS,
+                        "message": {"content": [{"type": "text", "text": "부모의 답"}]}},
+                       uuid="u2"),
+            ])
+            self.assertFalse(CC.ClaudeCodeAdapter().classify(path))
+
+    def test_fork_with_its_own_human_turn_is_eligible(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "f.jsonl")
+            _write_jsonl(path, [
+                {"type": "history-suppression", "cause": "fork_inherit"},
+                _copied({"type": "user", "cwd": REPO, "timestamp": _TS,
+                        "message": {"content": "부모의 목표"}}, uuid="u1"),
+                {"type": "user", "cwd": REPO, "timestamp": _TS, "sessionId": "fork1",
+                 "message": {"content": "포크 자신의 새 지시"}},
+            ])
+            self.assertTrue(CC.ClaudeCodeAdapter().classify(path))
+
+    def test_fork_with_only_new_assistant_records_is_not_eligible(self):
+        """새 구간이 있어도 사람의 말이 아니면 여전히 적격이 아니다."""
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "f.jsonl")
+            _write_jsonl(path, [
+                _copied({"type": "user", "cwd": REPO, "timestamp": _TS,
+                        "message": {"content": "부모의 목표"}}, uuid="u1"),
+                {"type": "assistant", "cwd": REPO, "timestamp": _TS, "sessionId": "fork1",
+                 "message": {"content": [{"type": "text", "text": "포크가 혼자 계속함"}]}},
+            ])
+            self.assertFalse(CC.ClaudeCodeAdapter().classify(path))
+
+    def test_non_fork_session_is_unaffected(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "f.jsonl")
+            _write_jsonl(path, [
+                {"type": "user", "cwd": REPO, "timestamp": _TS,
+                 "message": {"content": "평범한 세션의 첫 말"}},
+            ])
+            self.assertTrue(CC.ClaudeCodeAdapter().classify(path))
+
+    def test_bound_hit_fails_open_to_eligible(self):
+        """own tail(복사 구간을 벗어난 뒤)이 상한을 넘도록 크면(사람 턴을 못
+        찾으면) 예전 동작으로 연다 — 판정 포기가 세션을 영영 못 여는 것보다
+        싸다. 복사 구간 자체의 바이트는 상한에 넣지 않으므로(리뷰 지적) own
+        tail 을 상한보다 크게 채워야 한다."""
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "f.jsonl")
+            rows = [_copied({"type": "user", "cwd": REPO, "timestamp": _TS,
+                            "message": {"content": "부모의 목표"}}, uuid="u1")]
+            rows += [{"type": "assistant", "cwd": REPO, "timestamp": _TS,
+                      "sessionId": "fork1",
+                      "message": {"content": [{"type": "text", "text": "x" * 200}]}}
+                     for _ in range(50)]
+            _write_jsonl(path, rows)
+            old_limit = CC._FORK_SCAN_BYTE_LIMIT
+            CC._FORK_SCAN_BYTE_LIMIT = 256
+            try:
+                self.assertTrue(CC.ClaudeCodeAdapter().classify(path))
+            finally:
+                CC._FORK_SCAN_BYTE_LIMIT = old_limit
+
+    def test_time_bound_hit_fails_open_to_eligible(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "f.jsonl")
+            _write_jsonl(path, [
+                {"type": "history-suppression", "cause": "fork_inherit"},
+                _copied({"type": "user", "cwd": REPO, "timestamp": _TS,
+                        "message": {"content": "부모의 목표"}}, uuid="u1"),
+            ])
+            old_limit = CC._FORK_SCAN_TIME_LIMIT
+            CC._FORK_SCAN_TIME_LIMIT = -1
+            try:
+                self.assertTrue(CC.ClaudeCodeAdapter().classify(path))
+            finally:
+                CC._FORK_SCAN_TIME_LIMIT = old_limit
+
+    def test_list_sessions_excludes_a_fork_with_no_own_turn(self):
+        with tempfile.TemporaryDirectory() as home:
+            directory = os.path.join(home, ".claude", "projects", CC.claude_slug(REPO))
+            os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, "fork1.jsonl")
+            _write_jsonl(path, [
+                _copied({"type": "user", "cwd": REPO, "timestamp": _TS,
+                        "message": {"content": "부모의 목표"}}, uuid="u1"),
+            ])
+            self.assertEqual(CC.ClaudeCodeAdapter(home=home).list_sessions(REPO), [])
+
+    def test_message_as_a_string_in_the_own_tail_fails_open_not_raises(self):
+        """리뷰 재현: own tail 의 user 레코드가 message 를 문자열로 갖고 있으면
+        `message.get("content")` 가 AttributeError 를 낸다 — classify() 밖으로
+        새면 watch 가 그 레포의 Claude ref 를 전부 잃는다."""
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "f.jsonl")
+            _write_jsonl(path, [
+                _copied({"type": "user", "cwd": REPO, "timestamp": _TS,
+                        "message": {"content": "부모의 목표"}}, uuid="u1"),
+                {"type": "user", "cwd": REPO, "timestamp": _TS, "sessionId": "fork1",
+                 "message": "그냥 문자열"},
+            ])
+            self.assertTrue(CC.ClaudeCodeAdapter().classify(path))
+
+    def test_non_string_text_block_in_the_own_tail_fails_open_not_raises(self):
+        """리뷰 재현: text 블록의 text 가 문자열이 아니면(예: 5) `_text_of` 의
+        "".join 이 TypeError 를 낸다."""
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "f.jsonl")
+            _write_jsonl(path, [
+                _copied({"type": "user", "cwd": REPO, "timestamp": _TS,
+                        "message": {"content": "부모의 목표"}}, uuid="u1"),
+                {"type": "user", "cwd": REPO, "timestamp": _TS, "sessionId": "fork1",
+                 "message": {"content": [{"type": "text", "text": 5}]}},
+            ])
+            self.assertTrue(CC.ClaudeCodeAdapter().classify(path))
+
+    def test_guard_dropped_own_turn_does_not_make_a_fork_eligible(self):
+        """envelope 전용·tool_result 전용·합성 인터럽트 문자열은 read_session
+        도 사람의 말로 세지 않는다 — 포크의 own tail 에 이런 레코드만 있으면
+        여전히 적격이 아니어야 한다."""
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "f.jsonl")
+            _write_jsonl(path, [
+                _copied({"type": "user", "cwd": REPO, "timestamp": _TS,
+                        "message": {"content": "부모의 목표"}}, uuid="u1"),
+                {"type": "user", "cwd": REPO, "timestamp": _TS, "sessionId": "fork1",
+                 "message": {"content": "<local-command-stdout>echo hi</local-command-stdout>"}},
+                {"type": "user", "cwd": REPO, "timestamp": _TS, "sessionId": "fork1",
+                 "message": {"content": [
+                     {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}},
+                {"type": "user", "cwd": REPO, "timestamp": _TS, "sessionId": "fork1",
+                 "message": {"content": "[Request interrupted by user]"}},
+            ])
+            self.assertFalse(CC.ClaudeCodeAdapter().classify(path))
+
+    def test_a_deeply_nested_line_does_not_raise(self):
+        """json 이 RecursionError 를 내는 줄도 깨진 줄처럼 건너뛴다(리뷰)."""
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "f.jsonl")
+            _write_jsonl(path, [
+                _copied({"type": "user", "cwd": REPO, "timestamp": _TS,
+                        "message": {"content": "부모의 목표"}}, uuid="u1"),
+            ])
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write("[" * 200000 + "\n")
+            self.assertFalse(CC.ClaudeCodeAdapter().classify(path))
+
+    def test_cache_key_includes_the_headless_override(self):
+        """OMHC_ALLOW_HEADLESS 가 판정을 바꾸므로 캐시가 옛 판정을 돌려주면 안 된다."""
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            _write_jsonl(path, [{"type": "user", "cwd": REPO, "timestamp": _TS,
+                                 "entrypoint": "sdk-cli", "message": {"content": "hi"}}])
+            adapter = CC.ClaudeCodeAdapter()
+            with unittest.mock.patch.dict(os.environ, {"OMHC_ALLOW_HEADLESS": ""}):
+                self.assertFalse(adapter.classify(path))
+            with unittest.mock.patch.dict(os.environ, {"OMHC_ALLOW_HEADLESS": "1"}):
+                self.assertTrue(adapter.classify(path))
+
+    def test_classify_result_is_cached_per_path_size_and_mtime(self):
+        """리뷰 지적: ref_for_path 가 한 번, brief.eligible 이 다시 한 번
+        adapter.classify(mark.path) 를 부를 수 있다 — 두 번째 호출은 파일을
+        다시 스캔하지 않아야 한다. 파일이 자라면(size/mtime 이 바뀌면) 캐시가
+        무효화돼 다시 스캔해야 한다."""
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "f.jsonl")
+            _write_jsonl(path, [
+                _copied({"type": "user", "cwd": REPO, "timestamp": _TS,
+                        "message": {"content": "부모의 목표"}}, uuid="u1"),
+            ])
+            calls = []
+            real = CC._forked_lacks_own_turn
+
+            def counting(p):
+                calls.append(p)
+                return real(p)
+
+            adapter = CC.ClaudeCodeAdapter()
+            with unittest.mock.patch.object(CC, "_forked_lacks_own_turn", counting):
+                self.assertFalse(adapter.classify(path))
+                self.assertFalse(adapter.classify(path))
+                self.assertEqual(len(calls), 1)
+
+                with open(path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"type": "user", "cwd": REPO, "timestamp": _TS,
+                                        "sessionId": "fork1",
+                                        "message": {"content": "새 지시"}}) + "\n")
+                self.assertTrue(adapter.classify(path))
+                self.assertEqual(len(calls), 2)
+
+
+NOW = 1758500000.0
+
+
+class TestForkBrief(unittest.TestCase):
+    """#34 end-to-end: 부모가 이미 codex-cli 로 전달된 뒤 그 세션이 포크되면,
+    포크 자신의 새 턴이 없는 한 아무것도 다시 나가면 안 된다."""
+
+    def setUp(self):
+        self.t = _repo.TempRepo()
+        self.addCleanup(self.t.close)
+        self.home = self.t.home
+        self.root = self.t.root
+        self.key = self.t.key
+        self.state = self.t.state
+        self.directory = os.path.join(self.home, ".claude", "projects",
+                                      CC.claude_slug(self.root))
+        os.makedirs(self.directory, exist_ok=True)
+
+    def _plant(self, session_id, rows, epoch):
+        path = os.path.join(self.directory, session_id + ".jsonl")
+        _write_jsonl(path, rows)
+        ledger.append({"repo": self.key, "harness": "claude-code",
+                       "session": session_id, "event": "start",
+                       "epoch": epoch, "path": path, "cwd": self.root},
+                      home=self.home)
+        return path
+
+    def _deliver_parent_to_codex(self):
+        path = self._plant("parent1", [
+            {"type": "user", "cwd": self.root, "timestamp": _TS,
+             "message": {"content": "부모의 목표: 필드 경로부터 다시 확인해줘"}},
+        ], NOW - 1200)
+        wm = due.Watermark(repo_key=self.key, harness="claude-code",
+                           session_id="parent1", path=path, event="start",
+                           epoch=NOW - 1200)
+        due.mark_delivered(self.state, wm, to_harness="codex-cli", epoch=NOW - 1100)
+        return path
+
+    def test_fork_with_no_own_turn_delivers_nothing_and_leaves_delivered_unchanged(self):
+        self._deliver_parent_to_codex()
+        delivered_path = os.path.join(self.state, due.DELIVERED_NAME)
+        with open(delivered_path, encoding="utf-8") as fh:
+            before = fh.read()
+        self._plant("fork1", [
+            {"type": "history-suppression", "cause": "fork_inherit"},
+            _copied({"type": "user", "cwd": self.root, "timestamp": _TS,
+                    "message": {"content": "부모의 목표: 필드 경로부터 다시 확인해줘"}},
+                   fork_id="fork1", parent_id="parent1", uuid="u1"),
+        ], NOW - 600)
+        body = brief.compute(my_harness="codex-cli", my_session_id="cxnow",
+                             repo_root=self.root, home=self.home, now=NOW)
+        self.assertEqual(body, "")
+        with open(delivered_path, encoding="utf-8") as fh:
+            after = fh.read()
+        self.assertEqual(before, after)
+        self.assertFalse(due.already_delivered(self.state, "fork1", "codex-cli"))
+
+    def test_fork_with_a_new_human_turn_inherits_goal_and_carries_the_new_turn_as_next(self):
+        self._deliver_parent_to_codex()
+        self._plant("fork1", [
+            {"type": "history-suppression", "cause": "fork_inherit"},
+            _copied({"type": "user", "cwd": self.root, "timestamp": _TS,
+                    "message": {"content": "부모의 목표: 필드 경로부터 다시 확인해줘"}},
+                   fork_id="fork1", parent_id="parent1", uuid="u1"),
+            {"type": "user", "cwd": self.root, "timestamp": _TS, "sessionId": "fork1",
+             "message": {"content": "포크에서 새로 시킨 일: 로그를 확인해줘"}},
+        ], NOW - 600)
+        body = brief.compute(my_harness="codex-cli", my_session_id="cxnow",
+                             repo_root=self.root, home=self.home, now=NOW)
+        self.assertIn("필드 경로부터 다시 확인해줘", body)
+        self.assertIn("포크에서 새로 시킨 일", body)
+        self.assertTrue(due.already_delivered(self.state, "fork1", "codex-cli"))
 
 
 @unittest.skipUnless(have_fixtures, MISSING)

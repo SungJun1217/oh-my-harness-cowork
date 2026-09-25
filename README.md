@@ -620,6 +620,56 @@ committed). Generate them from real sessions on your own machine with
 
   </details>
 
+- **A Claude Code fork (`/branch`, `--fork-session`, background `/fork`)
+  needs a turn of its own before it's eligible (#34).**
+  <details>
+  <summary>Details</summary>
+
+  A fork starts SessionStart with `source:"fork"` (`"resume"` before
+  2.1.214), gets a brand-new session id, and its transcript opens with the
+  parent's current message chain copied in (each copied record keeps its
+  original `uuid`/`timestamp`/`type`/`message` but gets `sessionId`,
+  `parentUuid`, `isSidechain:false`, `sessionKind:undefined`, and a new
+  `forkedFrom:{sessionId, messageUuid}` field; a `{"type":
+  "history-suppression","cause":"fork_inherit"}` record may be prepended).
+  Treated as a plain new session, that means if the parent had already been
+  handed off to the other harness and the fork never gets a human turn of
+  its own, the next handoff to that harness would deliver the parent's
+  GOAL/NEXT a second time under the fork's new id — `mark`'s per-session
+  `reopen`/offset guard (#27) doesn't apply because that id never had a
+  `delivered.tsv` row to begin with.
+
+  Fixed in the Claude adapter's `classify()` (used by `list_sessions`,
+  `ref_for_path`, and `brief`'s eligibility check): a forked transcript is
+  eligible only once it has at least one `author=="human"` turn that
+  **isn't** a copied record (no `forkedFrom` key) — i.e. something typed in
+  the fork itself. Detection is cheap on the common case: a transcript is
+  only even considered a fork if `forkedFrom`/`fork_inherit` shows up in
+  its first few lines, and the scan for "does the fork have its own turn
+  yet" stops at the first record past the copied run. The 50 ms time cap
+  runs over the whole scan (including the copied run, which is a cheap
+  per-line substring check); the 8 MB byte cap only counts bytes **past**
+  the copied run (the own tail) — counting the copied run against the
+  byte budget too was a bug caught in review: any fork of a parent bigger
+  than 8 MB always failed open and got redelivered (repro: this repo's own
+  6.9 MB session rewritten as a fork, duplicated to 12.6 MB, delivered its
+  428-byte handoff again). Hitting either cap fails open to eligible (the
+  old behavior). Measured (synthetic, copy-only i.e. no own turn to find):
+  6.3 MB ~7 ms, 12.6 MB ~13 ms, 25.1 MB ~26 ms, 30 MB run to EOF ~32 ms; a
+  realistic 2 MB copied run with a new turn resolves in ~2 ms. Any
+  unexpected record shape in the own tail (`message` not a dict, a `text`
+  block whose `text` isn't a string, …) is caught per-line and also fails
+  open, rather than raising out of `classify()`/`list_sessions()` and
+  losing every Claude ref for that repo. `ref_for_path` (called by
+  `brief`) and `brief.eligible`'s own `classify()` call would otherwise
+  scan the same file twice per brief; a small per-process cache keyed by
+  `(path, size, mtime_ns)` on the classify result avoids the repeat scan
+  and self-invalidates the moment the file grows (a new turn arrives).
+  `mark` doesn't special-case `source:"fork"` — it's a new session id, so a
+  plain start row is correct as-is; only `resume` reopens a delivered one.
+
+  </details>
+
 - **The on-disk formats are not an official contract.**
   <details>
   <summary>Details</summary>
