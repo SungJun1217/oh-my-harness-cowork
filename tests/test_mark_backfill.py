@@ -87,7 +87,7 @@ class TestEndToEnd(unittest.TestCase):
         now = time.time()
         self.h.plant("cx1", now - 600)
         self.h.mark()
-        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.harness, "codex-cli")
         self.assertEqual(got.session_id, "cx1")
@@ -114,7 +114,7 @@ class TestEndToEnd(unittest.TestCase):
         self.h.plant("cx-old", now - 500)  # older than the ledger's cx-new
         self.h.mark()
         self.assertEqual(self.h.scan_rows(), [])
-        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertEqual(got.session_id, "cx-new")
 
     def test_a_newer_unledgered_session_is_appended_after_the_ledgered_one(self):
@@ -127,7 +127,7 @@ class TestEndToEnd(unittest.TestCase):
         rows = self.h.scan_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["session"], "cx-new")
-        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertEqual(got.session_id, "cx-new")
 
     def test_six_session_starts_append_the_same_session_only_once(self):
@@ -213,7 +213,7 @@ class TestEndToEnd(unittest.TestCase):
             self.h.plant("cx{}".format(i), now - 1000 + i)
         self.h.mark()
         newest = "cx{}".format(total - 1)
-        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, newest)
         rows = self.h.scan_rows()
@@ -315,12 +315,12 @@ class TestEndToEnd(unittest.TestCase):
         now = time.time()
         self.h.plant("cx1", now - 600)
         self.h.mark()
-        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
         # Even if mark runs again (refires), an already-delivered session doesn't reappear.
         self.h.mark()
-        self.assertIsNone(due.due(self.h.key, "claude-code", "me1", now, home=self.h.home))
+        self.assertIsNone(due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home))
 
     def test_status_codex_hook_still_fails_with_only_scan_rows(self):
         """If a via:scan row created by backfill disguised itself as evidence
@@ -367,11 +367,11 @@ class TestResumeReopensDelivery(unittest.TestCase):
 
         path = self.h.plant("cx1", now - 600, human=human)
         self.h.mark()
-        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
         self.assertIsNone(
-            due.due(self.h.key, "claude-code", "me1", now, home=self.h.home))
+            due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home))
         return brief, path
 
     def _resume_with_new_turn(self, path, text):
@@ -386,7 +386,7 @@ class TestResumeReopensDelivery(unittest.TestCase):
         _, path = self._deliver(now, "필드 경로부터 다시 확인해줘")
         self._resume_with_new_turn(path, "이제 두 번째 턴도 반영해줘")
         self.h.mark(harness="codex-cli", session_id="cx1", source="resume")
-        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "cx1")
 
@@ -404,7 +404,7 @@ class TestResumeReopensDelivery(unittest.TestCase):
         self._deliver(now, "필드 경로부터 다시 확인해줘")
         self.h.mark(harness="codex-cli", session_id="cx1", source="compact")
         self.assertIsNone(
-            due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
+            due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home))
 
     def test_fork_after_delivery_does_not_reopen(self):
         """source:"fork" arrives with a new session_id, so cmd_mark just
@@ -417,7 +417,7 @@ class TestResumeReopensDelivery(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out, "")
         self.assertIsNone(
-            due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
+            due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home))
 
     def test_claude_receiving_side_with_source_fork_is_unaffected(self):
         """cmd_mark's source branch doesn't distinguish harnesses — even when
@@ -436,7 +436,7 @@ class TestResumeReopensDelivery(unittest.TestCase):
         now = time.time()
         self.h.plant("cx1", now - 600)
         self.h.mark(harness="codex-cli", session_id="cx1", source="resume")
-        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "cx1")
 
@@ -467,11 +467,11 @@ class TestReactivateGrownSessions(unittest.TestCase):
     def _deliver(self, now, human):
         path = self.h.plant("cx1", now - 600, human=human)
         self.h.mark()  # backfill leaves the baseline size in the ledger
-        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
         self.assertIsNone(
-            due.due(self.h.key, "claude-code", "me1", now, home=self.h.home))
+            due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home))
         return path
 
     def _grew_rows(self, session="cx1"):
@@ -487,7 +487,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self._append_human_turn(path, "이제 두 번째 턴도 반영해줘")
         self.h.mark()  # a plain mark with no source — mimics an untrusted hook
         self.assertEqual(len(self._grew_rows()), 1)
-        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "cx1")
 
@@ -515,7 +515,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(big[:70000])  # writing past 64KB — no newline yet
         self.h.mark()
-        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
         with open(path, "a", encoding="utf-8") as fh:
@@ -523,7 +523,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self.h.mark()
         self.assertEqual(self._grew_rows(), [])
         self.assertIsNone(
-            due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
+            due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home))
 
     def test_growth_without_a_human_turn_is_not_reactivated(self):
         """Growth with only agent soliloquy (shell execution) appended is not
@@ -534,7 +534,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self.h.mark()
         self.assertEqual(self._grew_rows(), [])
         self.assertIsNone(
-            due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
+            due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home))
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         seen = [r for r in rows if r.get("harness") == "codex-cli"
                and r.get("session") == "cx1" and r.get("event") == "seen"]
@@ -570,7 +570,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
 
         self.h.mark()  # now complete — must be caught as a resume
         self.assertEqual(len(self._grew_rows()), 1)
-        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "cx1")
 
@@ -579,11 +579,11 @@ class TestReactivateGrownSessions(unittest.TestCase):
         now = time.time()
         self.h.plant("cx1", now - 600)
         self.h.mark()
-        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
         self.h.mark()
-        self.assertIsNone(due.due(self.h.key, "claude-code", "me1", now, home=self.h.home))
+        self.assertIsNone(due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home))
         self.assertEqual(self._grew_rows(), [])
 
     def test_a_newer_session_in_the_same_interval_wins_over_a_grown_older_one(self):
@@ -597,7 +597,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
 
         self.h.mark()  # backfill(B) and reactivate(A) candidates overlap within one call
         self.assertEqual(self._grew_rows(), [], "A must not be reactivated in the call that fills in B")
-        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "cx-b")
 
@@ -605,7 +605,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         # another session's start row after the baseline).
         self.h.mark()
         self.assertEqual(self._grew_rows(), [])
-        got = due.due(self.h.key, "claude-code", "me3", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me3", now, home=self.h.home)
         self.assertEqual(got.session_id, "cx-b")
 
     def test_a_grows_again_after_b_is_delivered_and_is_reactivated(self):
@@ -620,7 +620,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self.h.plant("cx-b", now - 100, human="B 세션 첫 턴")
 
         self.h.mark()  # backfill(B) also moves A's baseline past B at this moment
-        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertEqual(got.session_id, "cx-b")
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
 
@@ -630,7 +630,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self._append_human_turn(path_a, "B 이후의 진짜 재개 턴")
         self.h.mark()  # baseline is past B, so this growth gets a fresh verdict right away
         self.assertEqual(len(self._grew_rows()), 1)
-        got2 = due.due(self.h.key, "claude-code", "me3", now, home=self.h.home)
+        got2 = due.due_one(self.h.key, "claude-code", "me3", now, home=self.h.home)
         self.assertIsNotNone(got2)
         self.assertEqual(got2.session_id, "cx1")
 
@@ -646,7 +646,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self.h.plant("cx-b", now - 100, human="B 세션 첫 턴")
 
         self.h.mark()  # backfill(B) — A hasn't grown yet at this moment
-        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertEqual(got.session_id, "cx-b")
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
 
@@ -654,7 +654,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         for _ in range(3):
             self.h.mark()
         self.assertEqual(len(self._grew_rows()), 1)
-        got2 = due.due(self.h.key, "claude-code", "me3", now, home=self.h.home)
+        got2 = due.due_one(self.h.key, "claude-code", "me3", now, home=self.h.home)
         self.assertIsNotNone(got2)
         self.assertEqual(got2.session_id, "cx1")
 
@@ -674,7 +674,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self.h.mark(harness="codex-cli", session_id="cx-b")
 
         self.h.mark()  # Claude mark — learns about B, lazily moves A's baseline
-        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "cx-b")
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
@@ -684,7 +684,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         for _ in range(3):
             self.h.mark()
         self.assertEqual(len(self._grew_rows()), 1)
-        got2 = due.due(self.h.key, "claude-code", "me3", now, home=self.h.home)
+        got2 = due.due_one(self.h.key, "claude-code", "me3", now, home=self.h.home)
         self.assertIsNotNone(got2)
         self.assertEqual(got2.session_id, "cx1")
 
@@ -739,7 +739,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
 
                 code, _ = h.mark()
                 self.assertEqual(code, 0)
-                got = due.due(h.key, "claude-code", "me-old", now, home=h.home)
+                got = due.due_one(h.key, "claude-code", "me-old", now, home=h.home)
                 self.assertIsNotNone(got)
                 self.assertEqual(got.session_id, sid)
 
@@ -763,7 +763,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
                and r.get("event") == "seen"]
         self.assertEqual(seen, [])
         self.assertIsNone(
-            due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
+            due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home))
 
     def test_a_garbage_size_field_does_not_break_mark(self):
         now = time.time()
@@ -909,7 +909,7 @@ class TestRebaseMarker(unittest.TestCase):
 
         # After B (new-b) is delivered, if A's (=sids[0]) human turn
         # continues, it's still reactivated.
-        got_b = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        got_b = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got_b)
         self.assertEqual(got_b.session_id, "new-b")
         due.mark_delivered(self.h.state, got_b, to_harness="claude-code", epoch=now)
@@ -923,7 +923,7 @@ class TestRebaseMarker(unittest.TestCase):
             fh.write(json.dumps(_repo.codex_user_row("B 이후 A 의 재개 턴", ordinal=90),
                                 ensure_ascii=False) + "\n")
         self.h.mark()
-        got = due.due(self.h.key, "claude-code", "me3", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me3", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, reactivated_sid)
 
@@ -1056,7 +1056,7 @@ class TestRebaseMarker(unittest.TestCase):
         after_reentry = time.time()
         self.h.plant("new-c", after_reentry + 10, human="C 세션 첫 턴")
         self.h.mark()
-        got = due.due(self.h.key, "claude-code", "me-final", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me-final", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "new-c")
 
@@ -1102,7 +1102,7 @@ class TestRebaseMarker(unittest.TestCase):
                          [], "must not write a marker without an exhaustive check")
 
         self.h.mark()  # a normal round — a-stale's pre-growth should be absorbed, not treated as a resume
-        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "new-b")
 
@@ -1121,7 +1121,7 @@ class TestRebaseMarker(unittest.TestCase):
         self.assertEqual([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT],
                          [], "must not write a marker without an exhaustive check")
 
-        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "new-b")
 
@@ -1150,7 +1150,7 @@ class TestRebaseMarker(unittest.TestCase):
                          [], "must not write a marker when a-stale could not be checked")
 
         self.h.mark()  # stat is back to normal — a-stale's pre-growth is absorbed
-        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "new-b")
 
@@ -1171,7 +1171,7 @@ class TestLiveContinueWithoutASessionStart(unittest.TestCase):
         now = time.time()
         path = self.h.plant("cx1", now - 600, human="첫 턴")  # first turn
         self.h.mark(session_id="me1")
-        got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
 
@@ -1185,7 +1185,7 @@ class TestLiveContinueWithoutASessionStart(unittest.TestCase):
         # Only the new Claude session's SessionStart fires.
         code, _ = self.h.mark(session_id="me2")
         self.assertEqual(code, 0)
-        got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
+        got = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "cx1")
 

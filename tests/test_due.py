@@ -27,15 +27,15 @@ class TestDue(unittest.TestCase):
         ledger.append(row, home=self.home)
 
     def test_missing_ledger_yields_none(self):
-        self.assertIsNone(due.due(REPO_KEY, "claude-code", "s1", 100.0, home=self.home))
+        self.assertIsNone(due.due_one(REPO_KEY, "claude-code", "s1", 100.0, home=self.home))
 
     def test_only_my_own_harness_yields_none(self):
         self.start("claude-code", "s1", 10.0)
-        self.assertIsNone(due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home))
+        self.assertIsNone(due.due_one(REPO_KEY, "claude-code", "s2", 100.0, home=self.home))
 
     def test_foreign_harness_yields_a_watermark(self):
         self.start("codex-cli", "cx1", 10.0)
-        got = due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
+        got = due.due_one(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.harness, "codex-cli")
         self.assertEqual(got.session_id, "cx1")
@@ -43,24 +43,24 @@ class TestDue(unittest.TestCase):
 
     def test_my_own_session_is_never_the_source(self):
         self.start("codex-cli", "same", 10.0)
-        self.assertIsNone(due.due(REPO_KEY, "codex-cli", "same", 100.0, home=self.home))
+        self.assertIsNone(due.due_one(REPO_KEY, "codex-cli", "same", 100.0, home=self.home))
 
     def test_other_repo_is_ignored(self):
         ledger.append({"repo": "other-repo", "harness": "codex-cli", "session": "x",
                        "event": "start", "epoch": 10.0}, home=self.home)
-        self.assertIsNone(due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home))
+        self.assertIsNone(due.due_one(REPO_KEY, "claude-code", "s2", 100.0, home=self.home))
 
     def test_already_delivered_yields_none(self):
         self.start("codex-cli", "cx1", 10.0)
-        got = due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
+        got = due.due_one(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
         due.mark_delivered(self.state, got, to_harness="claude-code", epoch=100.0)
-        self.assertIsNone(due.due(REPO_KEY, "claude-code", "s2", 101.0, home=self.home))
+        self.assertIsNone(due.due_one(REPO_KEY, "claude-code", "s2", 101.0, home=self.home))
 
     def test_delivered_to_one_harness_is_still_due_for_another(self):
         self.start("codex-cli", "cx1", 10.0)
-        got = due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
+        got = due.due_one(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
         due.mark_delivered(self.state, got, to_harness="claude-code", epoch=100.0)
-        again = due.due(REPO_KEY, "gajae-code", "g1", 101.0, home=self.home)
+        again = due.due_one(REPO_KEY, "gajae-code", "g1", 101.0, home=self.home)
         self.assertIsNotNone(again)
 
     def test_an_ineligible_row_is_skipped_for_the_one_before_it(self):
@@ -71,13 +71,13 @@ class TestDue(unittest.TestCase):
         real session before it."""
         self.start("codex-cli", "cx1", 10.0)
         self.start("claude-code", "sdk1", 50.0)
-        got = due.due(REPO_KEY, "gajae-code", "g1", 100.0, home=self.home,
+        got = due.due_one(REPO_KEY, "gajae-code", "g1", 100.0, home=self.home,
                       eligible=lambda mark: mark.session_id != "sdk1")
         self.assertEqual(got.session_id, "cx1")
 
     def test_nothing_eligible_yields_none(self):
         self.start("codex-cli", "cx1", 10.0)
-        self.assertIsNone(due.due(REPO_KEY, "claude-code", "s2", 100.0,
+        self.assertIsNone(due.due_one(REPO_KEY, "claude-code", "s2", 100.0,
                                   home=self.home, eligible=lambda mark: False))
 
     def test_eligibility_is_not_asked_for_delivered_or_stale_rows(self):
@@ -85,7 +85,7 @@ class TestDue(unittest.TestCase):
         expensive since it opens a file, and the row before it is even older."""
         asked = []
         self.start("codex-cli", "cx1", 10.0)
-        self.assertIsNone(due.due(
+        self.assertIsNone(due.due_one(
             REPO_KEY, "claude-code", "s2", 10.0 + due.MAX_AGE_SECONDS + 1,
             home=self.home, eligible=lambda mark: asked.append(mark) or True))
         self.assertEqual(asked, [])
@@ -95,14 +95,14 @@ class TestDue(unittest.TestCase):
         row was frozen at mark time and couldn't be revived even by turning
         OMHC_ALLOW_HEADLESS on later."""
         self.start("codex-cli", "cx1", 10.0, interactive=False)
-        got = due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home,
+        got = due.due_one(REPO_KEY, "claude-code", "s2", 100.0, home=self.home,
                       eligible=lambda mark: True)
         self.assertEqual(got.session_id, "cx1")
 
     def test_a_row_without_a_verdict_is_treated_as_interactive(self):
         """With no record, treat it as a human session — better than silently losing it."""
         self.start("claude-code", "old-row", 50.0)
-        got = due.due(REPO_KEY, "codex-cli", "cx9", 100.0, home=self.home)
+        got = due.due_one(REPO_KEY, "codex-cli", "cx9", 100.0, home=self.home)
         self.assertEqual(got.session_id, "old-row")
 
     def test_due_holds_no_harness_vocabulary(self):
@@ -127,7 +127,7 @@ class TestDue(unittest.TestCase):
     def test_newest_foreign_session_wins(self):
         self.start("codex-cli", "old", 10.0)
         self.start("codex-cli", "new", 20.0)
-        got = due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
+        got = due.due_one(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
         self.assertEqual(got.session_id, "new")
 
     def test_off_switch_env_disables_everything(self):
@@ -135,7 +135,7 @@ class TestDue(unittest.TestCase):
         os.environ["OMHC_OFF"] = "1"
         try:
             self.assertIsNone(
-                due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
+                due.due_one(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
             )
         finally:
             del os.environ["OMHC_OFF"]
@@ -144,22 +144,95 @@ class TestDue(unittest.TestCase):
         self.start("codex-cli", "cx1", 10.0)
         os.makedirs(self.state, exist_ok=True)
         open(os.path.join(self.state, "off"), "w").close()
-        self.assertIsNone(due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home))
+        self.assertIsNone(due.due_one(REPO_KEY, "claude-code", "s2", 100.0, home=self.home))
 
     def test_watermark_is_a_namedtuple_with_the_seam_fields(self):
         self.start("codex-cli", "cx1", 10.0)
-        got = due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
+        got = due.due_one(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
         self.assertEqual(
             got._fields,
             ("repo_key", "harness", "session_id", "path", "event", "epoch"),
         )
 
-    def test_due_returns_a_single_watermark_in_v1(self):
-        """v2 changes the return type to List[Watermark]. This one function is that seam."""
+    def test_due_one_returns_a_single_watermark_not_a_list(self):
+        """v1 callers only ever want the newest one — due_one keeps that shape."""
+        self.start("codex-cli", "a", 10.0)
+        self.start("gajae-code", "b", 20.0)
+        got = due.due_one(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
+        self.assertFalse(isinstance(got, list))
+
+    def test_due_returns_a_list_in_v2(self):
+        """v2 phase 1 (#41) is done: due() itself now returns a list."""
         self.start("codex-cli", "a", 10.0)
         self.start("gajae-code", "b", 20.0)
         got = due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
-        self.assertFalse(isinstance(got, list))
+        self.assertIsInstance(got, list)
+        self.assertEqual([m.session_id for m in got], ["b", "a"])
+
+    def test_due_is_capped_at_max_sessions_newest_first(self):
+        total = due.MAX_SESSIONS + 2
+        for i in range(total):
+            self.start("codex-cli", "s{}".format(i), 10.0 + i)
+        got = due.due(REPO_KEY, "claude-code", "sX", 1000.0, home=self.home)
+        expected = ["s{}".format(total - 1 - i) for i in range(due.MAX_SESSIONS)]
+        self.assertEqual([m.session_id for m in got], expected)
+
+    def test_due_stops_at_the_first_already_delivered_session(self):
+        self.start("codex-cli", "old1", 10.0)
+        self.start("codex-cli", "old2", 20.0)
+        self.start("codex-cli", "new1", 30.0)
+        wm = due.due_one(REPO_KEY, "claude-code", "sX", 100.0, home=self.home)
+        due.mark_delivered(self.state, wm, to_harness="claude-code", epoch=100.0)
+        got = due.due(REPO_KEY, "claude-code", "sY", 200.0, home=self.home)
+        self.assertEqual([m.session_id for m in got], [])
+
+    def test_due_stops_the_list_at_a_too_old_session(self):
+        self.start("codex-cli", "old", 10.0)
+        self.start("codex-cli", "new", 10.0 + due.MAX_AGE_SECONDS + 100)
+        got = due.due(REPO_KEY, "claude-code", "sX",
+                     10.0 + due.MAX_AGE_SECONDS + 200, home=self.home)
+        self.assertEqual([m.session_id for m in got], ["new"])
+
+    def test_ineligible_rows_are_skipped_within_the_list(self):
+        self.start("codex-cli", "sub1", 10.0)
+        self.start("codex-cli", "real1", 20.0)
+        got = due.due(REPO_KEY, "claude-code", "sX", 100.0, home=self.home,
+                     eligible=lambda mark: mark.session_id != "sub1")
+        self.assertEqual([m.session_id for m in got], ["real1"])
+
+    def test_a_reopened_delivered_session_is_included_but_always_ends_the_list(self):
+        """R and S undelivered, S delivered, S reopened -> [S], never [S, R] —
+        walking past a reopened session would revive a session v1 deliberately
+        never sent."""
+        self.start("codex-cli", "R", 10.0)
+        self.start("codex-cli", "S", 20.0)
+        wm_s = due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id="S",
+                             path="/p/S", event="start", epoch=20.0)
+        due.mark_delivered(self.state, wm_s, to_harness="claude-code", epoch=25.0)
+        due.mark_reopened(self.state, "S", "codex-cli", 30.0)
+        got = due.due(REPO_KEY, "claude-code", "sX", 100.0, home=self.home)
+        self.assertEqual([m.session_id for m in got], ["S"])
+
+    def test_a_session_with_several_start_rows_appears_only_once(self):
+        """The ledger can hold several `start` rows for the same session
+        (resume, _reactivate_grown_sessions, a late compact) — S(older),
+        T(newer), then a resume row re-appends S's session id (review
+        finding 1). Only the first (newest) occurrence must survive."""
+        self.start("codex-cli", "S", 10.0)
+        self.start("codex-cli", "T", 20.0)
+        self.start("codex-cli", "S", 30.0)  # a resumed S appends another start row
+        got = due.due(REPO_KEY, "claude-code", "sX", 100.0, home=self.home)
+        self.assertEqual([m.session_id for m in got], ["S", "T"])
+
+    def test_ever_delivered_ignores_reopen(self):
+        wm = due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id="cx1",
+                           path="/p", event="start", epoch=10.0)
+        self.assertFalse(due.ever_delivered(self.state, "cx1", "claude-code"))
+        due.mark_delivered(self.state, wm, to_harness="claude-code", epoch=20.0)
+        due.mark_reopened(self.state, "cx1", "codex-cli", 30.0)
+        # already_delivered() is False again after reopen, but ever_delivered stays True.
+        self.assertFalse(due.already_delivered(self.state, "cx1", "claude-code"))
+        self.assertTrue(due.ever_delivered(self.state, "cx1", "claude-code"))
 
 
 class TestGate(unittest.TestCase):

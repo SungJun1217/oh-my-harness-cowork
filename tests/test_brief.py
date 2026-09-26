@@ -636,6 +636,226 @@ class TestReopenRedeliveryGuard(unittest.TestCase):
         self.assertEqual(again, "")
 
 
+class TestMultiSessionHandoff(unittest.TestCase):
+    """v2 phase 1 (#41): every eligible undelivered session gets listed,
+    newest first — the newest keeps the full slot layout, the rest become
+    ALSO lines."""
+
+    def setUp(self):
+        self.h = Harness()
+
+    def tearDown(self):
+        self.h.close()
+
+    def _plant(self, session_id, human, when, **kw):
+        return self.h.t.plant_codex(session_id=session_id, human=human,
+                                    ledger_home=self.h.home, when=when, **kw)
+
+    def test_every_listed_session_is_pinned_indexed_and_head_is_delivered_last(self):
+        self._plant("cx-r", "R 세션의 사람 말", NOW - 100)
+        self._plant("cx-s", "S 세션의 사람 말", NOW)
+        body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("S 세션의 사람 말", body)
+        self.assertIn("ALSO", body)
+        self.assertIn("R 세션의 사람 말", body)
+
+        for sid in ("cx-r", "cx-s"):
+            pinned = os.path.join(self.h.state, "pinned", sid, "source.jsonl")
+            idx = os.path.join(self.h.state, "index", sid + ".idx")
+            self.assertTrue(os.path.exists(pinned), sid)
+            self.assertTrue(os.path.exists(idx), sid)
+
+        self.assertEqual(due.last_delivered(self.h.state), "cx-s")
+        with open(os.path.join(self.h.state, due.DELIVERED_NAME), encoding="utf-8") as fh:
+            lines = [l for l in fh if l.strip()]
+        self.assertTrue(lines[-1].startswith("cx-s\t"), lines)
+        self.assertIn("also", lines[0])
+
+    def test_show_resolves_an_also_sessions_tag_to_its_own_bytes(self):
+        from omhc import cli, index
+
+        self._plant("cx-r", "R 세션의 사람 말", NOW - 100, shell_turns=1, failing_shell=True)
+        self._plant("cx-s", "S 세션의 사람 말", NOW)
+        body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("FAIL", body)
+
+        refs = index.read_refs(self.h.state)
+        also_tag = next(tag for tag, e in refs.items() if e["session_id"] == "cx-r")
+        out = io.StringIO()
+        cwd = os.getcwd()
+        os.chdir(self.h.repo_root)
+        try:
+            code = cli.cmd_show(cli.build_parser().parse_args(["show", also_tag]),
+                                home=self.h.home, out=out)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(code, 0)
+        self.assertIn("pytest", out.getvalue())
+
+    def test_per_session_guard_skips_a_phantom_reopen_while_others_still_go(self):
+        from tests._repo import append_codex_user_turn
+
+        path_a = self._plant("cx-a", "A 세션의 사람 말", NOW - 200)
+        first = brief.compute(my_harness="claude-code", my_session_id="me1",
+                              repo_root=self.h.repo_root, home=self.h.home, now=NOW - 200)
+        self.assertTrue(first)
+        due.mark_reopened(self.h.state, "cx-a", "codex-cli", NOW - 50)
+        append_codex_user_turn(path_a, "", ordinal=90)  # phantom: empty-prompt resume
+
+        self._plant("cx-b", "B 세션의 사람 말", NOW)
+        body = brief.compute(my_harness="claude-code", my_session_id="me2",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("B 세션의 사람 말", body)
+        self.assertNotIn("A 세션의 사람 말", body)
+
+    def test_an_older_sessions_read_failure_does_not_block_the_main_handoff(self):
+        from omhc.adapters import codex_cli
+
+        self._plant("cx-r", "R 세션의 사람 말", NOW - 100)
+        self._plant("cx-s", "S 세션의 사람 말", NOW)
+        real_read = codex_cli.CodexCliAdapter.read_session
+
+        def flaky(self, ref):
+            if ref.session_id == "cx-r":
+                raise RuntimeError("boom")
+            return real_read(self, ref)
+
+        with mock.patch.object(codex_cli.CodexCliAdapter, "read_session", flaky):
+            body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                                 repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("S 세션의 사람 말", body)
+        self.assertNotIn("R 세션의 사람 말", body)
+
+    def test_time_budget_exceeded_drops_older_sessions_without_marking_them_delivered(self):
+        self._plant("cx-r", "R 세션의 사람 말", NOW - 100)
+        self._plant("cx-s", "S 세션의 사람 말", NOW)
+        with mock.patch.object(brief, "OLDER_SESSION_TIME_BUDGET", -1.0):
+            body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                                 repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("S 세션의 사람 말", body)
+        self.assertNotIn("ALSO", body)
+        self.assertFalse(due.already_delivered(self.h.state, "cx-r", "claude-code"))
+
+    def test_a_session_with_multiple_start_rows_is_not_listed_twice(self):
+        """Review finding 1: a resumed session leaves a second `start` row in
+        the ledger (cmd_mark on source:"resume", _reactivate_grown_sessions,
+        or a late compact) — it must not appear as both the head and its own
+        ALSO line, double-tagged and double-delivered."""
+        path_s = self._plant("cx-s", "S 세션의 사람 말", NOW - 300,
+                             shell_turns=1, failing_shell=True)
+        self._plant("cx-t", "T 세션의 사람 말", NOW - 200)
+        ledger.append({"repo": self.h.key, "harness": "codex-cli", "session": "cx-s",
+                       "event": "start", "epoch": NOW - 100, "path": path_s,
+                       "cwd": self.h.repo_root}, home=self.h.home)
+        body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertEqual(body.count("ALSO"), 1)
+        self.assertNotIn("[E2]", body)
+        with open(os.path.join(self.h.state, due.DELIVERED_NAME), encoding="utf-8") as fh:
+            lines = [l for l in fh if l.strip()]
+        self.assertEqual(len(lines), 2, lines)
+
+    def test_an_unread_older_session_is_disclosed_and_never_retried(self):
+        """Review finding 2: brief.py's own comment used to say a skipped
+        older session "stays a candidate next time" — it doesn't, because
+        due() never revives a session older than the one that gets
+        delivered as head. It must at least say so via MORE."""
+        self._plant("cx-r", "R 세션의 사람 말", NOW - 100)
+        self._plant("cx-s", "S 세션의 사람 말", NOW)
+        with mock.patch.object(brief, "OLDER_SESSION_TIME_BUDGET", -1.0):
+            body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                                 repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("1 session unread", body)
+        # And it stays unreachable — not "a candidate next time".
+        got = due.due(self.h.key, "claude-code", "me2", NOW + 10, home=self.h.home)
+        self.assertEqual([m.session_id for m in got], [])
+
+    def test_a_read_failure_stops_the_list_rather_than_skipping_to_an_older_session(self):
+        """Review finding 2: a read failure on an older session must not let
+        an even-older one take its place in the list — that would surface a
+        gap in the middle with no way to disclose it."""
+        from omhc.adapters import codex_cli
+
+        self._plant("cx-r", "R 세션의 사람 말", NOW - 200)
+        self._plant("cx-t", "T 세션의 사람 말", NOW - 100)
+        self._plant("cx-u", "U 세션의 사람 말", NOW)
+        real_read = codex_cli.CodexCliAdapter.read_session
+
+        def flaky(self, ref):
+            if ref.session_id == "cx-t":
+                raise RuntimeError("boom")
+            return real_read(self, ref)
+
+        with mock.patch.object(codex_cli.CodexCliAdapter, "read_session", flaky):
+            body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                                 repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("U 세션의 사람 말", body)
+        self.assertNotIn("T 세션의 사람 말", body)
+        self.assertNotIn("R 세션의 사람 말", body)
+        self.assertIn("2 sessions unread", body)
+
+    def test_a_no_human_older_session_is_filtered_and_not_delivered(self):
+        """Review finding 3: an older session with nothing verbatim-human
+        said gets no ALSO line, no failure tag, and is not marked delivered."""
+        self._plant("cx-o", "O 말", NOW - 300, shell_turns=1, failing_shell=True)
+        self._plant("cx-m", "", NOW - 200, shell_turns=1, failing_shell=True)
+        self._plant("cx-s", "S 말", NOW)
+        body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("S 말", body)
+        self.assertIn("O 말", body)
+        self.assertIn("[E1]", body)
+        self.assertNotIn("[E2]", body)
+        with open(os.path.join(self.h.state, due.DELIVERED_NAME), encoding="utf-8") as fh:
+            delivered_sessions = [l.split("\t")[0] for l in fh if l.strip()]
+        self.assertNotIn("cx-m", delivered_sessions)
+        self.assertIn("cx-o", delivered_sessions)
+        self.assertIn("cx-s", delivered_sessions)
+
+    def test_record_read_updates_even_when_the_head_is_a_phantom_reopen(self):
+        """Review finding 4: v1 recorded the read right after reading, before
+        the #27 guard could reject it — `status`'s last-read row must keep
+        updating even when the only candidate turns out to be a phantom."""
+        from tests._repo import append_codex_user_turn
+
+        path_a = self._plant("cx-a", "A 세션의 사람 말", NOW - 200)
+        first = brief.compute(my_harness="claude-code", my_session_id="me1",
+                              repo_root=self.h.repo_root, home=self.h.home, now=NOW - 200)
+        self.assertTrue(first)
+        due.mark_reopened(self.h.state, "cx-a", "codex-cli", NOW - 50)
+        append_codex_user_turn(path_a, "", ordinal=90)  # phantom: empty-prompt resume
+
+        body = brief.compute(my_harness="claude-code", my_session_id="me2",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertEqual(body, "")
+        summary = brief.read_last_read(self.h.state)
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["session"], "cx-a")
+
+    def test_dry_run_does_not_log_an_older_sessions_read_failure(self):
+        """Review finding 5: a dry-run preview must leave guard.log untouched,
+        same as every other dry-run write-nothing guarantee (#17)."""
+        from omhc.adapters import codex_cli
+
+        self._plant("cx-r", "R 세션의 사람 말", NOW - 100)
+        self._plant("cx-s", "S 세션의 사람 말", NOW)
+        real_read = codex_cli.CodexCliAdapter.read_session
+
+        def flaky(self, ref):
+            if ref.session_id == "cx-r":
+                raise RuntimeError("boom")
+            return real_read(self, ref)
+
+        with mock.patch.object(codex_cli.CodexCliAdapter, "read_session", flaky):
+            brief.compute(my_harness="claude-code", my_session_id="me1",
+                          repo_root=self.h.repo_root, home=self.h.home, now=NOW,
+                          dry_run=True)
+        guard_log = os.path.join(locate.omhc_root(self.h.home), brief.GUARD_LOG)
+        self.assertFalse(os.path.exists(guard_log))
+
+
 class TestDeliver(unittest.TestCase):
     def setUp(self):
         self.h = Harness()
@@ -944,3 +1164,73 @@ class TestLastRead(unittest.TestCase):
         with open(os.path.join(state, brief.LAST_READ_NAME), "w") as fh:
             fh.write("{not json")
         self.assertIsNone(brief.read_last_read(state))
+
+
+class TestCalledFromHook(unittest.TestCase):
+    """#38: only a real hook payload proves the hook's stdout is being read."""
+
+    def test_a_hook_payload_has_a_session_id_and_a_source(self):
+        self.assertTrue(brief._called_from_hook({"session_id": "s", "source": "startup"}, "s"))
+        self.assertTrue(brief._called_from_hook(
+            {"session_id": "s", "hook_event_name": "SessionStart"}, "s"))
+
+    def test_a_hand_piped_payload_is_not_a_hook(self):
+        self.assertFalse(brief._called_from_hook({"cwd": "/r"}, ""))
+        self.assertFalse(brief._called_from_hook({}, ""))
+        self.assertFalse(brief._called_from_hook({"session_id": "s"}, "s"))
+
+    def test_emit_passes_it_through_to_delivery(self):
+        h = Harness()
+        self.addCleanup(h.close)
+        h.plant_codex_session()
+        seen = []
+        real = deliver.deliver
+
+        def spy(bundle, **kw):
+            seen.append(bundle.from_hook)
+            return real(bundle, **kw)
+
+        with mock.patch.object(brief.deliver, "deliver", side_effect=spy):
+            brief.emit(harness="claude-code", home=h.home, now=NOW, out=io.StringIO(),
+                       stdin_text=json.dumps({"cwd": h.repo_root, "session_id": "me1",
+                                              "source": "startup"}))
+        self.assertEqual(seen, [True])
+
+
+class TestManualCallHint(unittest.TestCase):
+    """#39: a hand-run brief without a session id says why nothing happened."""
+
+    def setUp(self):
+        self.h = Harness()
+        self.addCleanup(self.h.close)
+        self.h.plant_codex_session()
+
+    def _emit(self, **kw):
+        out, err = io.StringIO(), io.StringIO()
+        code = brief.emit(harness="claude-code", home=self.h.home, now=NOW,
+                          out=out, err=err, as_text=True, **kw)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_no_session_id_prints_a_hint_to_stderr_and_nothing_to_stdout(self):
+        code, out, err = self._emit(stdin_text="")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertIn("--dry-run", err)
+        self.assertIn("--force", err)
+
+    def test_the_hint_consumes_nothing(self):
+        self._emit(stdin_text=json.dumps({"cwd": self.h.repo_root}))
+        code, out, err = self._emit(
+            stdin_text=json.dumps({"cwd": self.h.repo_root, "session_id": "me1",
+                                   "source": "startup"}))
+        self.assertTrue(out.startswith("[omhc]"), "the manual call must not use up the delivery")
+        self.assertEqual(err, "")
+
+    def test_dry_run_and_force_are_not_interrupted(self):
+        manual = json.dumps({"cwd": self.h.repo_root})
+        _code, out, err = self._emit(stdin_text=manual, dry_run=True)
+        self.assertTrue(out.startswith("[omhc]"))
+        self.assertEqual(err, "")
+        _code, out, err = self._emit(stdin_text=manual, force=True)
+        self.assertTrue(out.startswith("[omhc]"))
+        self.assertEqual(err, "")

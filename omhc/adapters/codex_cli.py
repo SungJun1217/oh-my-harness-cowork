@@ -1130,7 +1130,11 @@ class CodexCliAdapter:
         ).format(toml_path, detail, toml_path)
 
     def install_handoff(self, bundle: HandoffBundle) -> InstallReceipt:
-        if not self.hook_is_installed(bundle.repo_root):
+        # #38: when brief runs inside the hook, the hook's stdout already
+        # delivered the handoff. Judging by the config alone missed hooks it
+        # can't parse (a wrapper script) and also wrote Path B, so Codex got
+        # the handoff twice and the next session read the stale block.
+        if not bundle.from_hook and not self.hook_is_installed(bundle.repo_root):
             raise NoInjectionChannel(
                 "no omhc SessionStart hook at {}; the artifact would be written but "
                 "never read".format(self.hooks_path())

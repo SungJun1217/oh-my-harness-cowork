@@ -22,7 +22,7 @@ The original design spec was removed from the tree. If you need its deeper ratio
 
 - Practical personal tool, not a product: rough UX and hardcoded paths are acceptable. The only success criterion is "does my day actually get easier".
 - Two-tier fidelity: (a) a small structured handoff injected at session start, plus (b) the raw archive for deep lookup. (a) alone is not acceptable.
-- Always-on automatic capture that survives Ctrl-C, auto-compaction, and crashes — done as lazy back-collection at the next session start (Codex has no end/compact hooks).
+- Always-on automatic capture that survives Ctrl-C, auto-compaction, and crashes — done as lazy back-collection at the next session start. (Codex 0.156.1 does have SessionEnd/PreCompact/Stop hooks now, but Ctrl-C and crashes still skip them, so back-collection stays the mechanism.)
 - v1 is sequential use only. Concurrency is v2; the seam is `omhc/due.py::due()`, and v2 must be an extension, not a rewrite.
 - Adapter extensibility is a requirement, but v1 implements only Claude Code and Codex CLI.
 - The daemon (`watch`) is an accelerator only; correctness never depends on it.
