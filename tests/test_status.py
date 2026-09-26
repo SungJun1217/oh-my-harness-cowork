@@ -68,6 +68,46 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(word, "----")
         self.assertIn("nothing handed off", detail)
 
+    def _write_last_read(self, **fields):
+        summary = {"harness": "codex-cli", "session": "01a0c9f4-06aa", "events": 117,
+                   "unparsed": 0, "skipped": 402, "skipped_types": 12,
+                   "epoch": 1758500000}
+        summary.update(fields)
+        os.makedirs(self.t.state, exist_ok=True)
+        with open(os.path.join(self.t.state, "last_read.json"), "w") as fh:
+            json.dump(summary, fh)
+
+    def test_last_read_row_says_nothing_read_yet_on_a_fresh_repo(self):
+        code, text = self.run_status()
+        self.assertEqual(code, 0)
+        word, detail = _find_row(text, "last read")
+        self.assertEqual(word, "----")
+        self.assertIn("nothing read yet", detail)
+
+    def test_last_read_row_shows_the_counts_and_never_gates(self):
+        self._write_last_read()
+        code, text = self.run_status()
+        self.assertEqual(code, 0)
+        word, detail = _find_row(text, "last read")
+        self.assertEqual(word, "----")
+        self.assertIn("codex-cli 01a0c9f4: 117 events, 0 unparsed lines", detail)
+        self.assertIn("402 records of 12 types skipped", detail)
+        self.assertNotIn("format may have changed", detail)
+
+    def test_zero_events_from_a_non_empty_session_points_at_a_format_change(self):
+        self._write_last_read(events=0)
+        code, text = self.run_status()
+        self.assertEqual(code, 0, "an empty session is legitimate, so this row must not gate")
+        _word, detail = _find_row(text, "last read")
+        self.assertIn("format may have changed", detail)
+
+    def test_last_read_is_in_the_json_output(self):
+        self._write_last_read()
+        _code, data = self.run_status_json()
+        self.assertEqual(data["last_read"]["events"], 117)
+        rows = {r["label"]: r for r in data["rows"]}
+        self.assertIsNone(rows["last read"]["verdict"])
+
     def test_injections_without_pins_fail_the_archive_row(self):
         os.makedirs(self.t.state, exist_ok=True)
         with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",

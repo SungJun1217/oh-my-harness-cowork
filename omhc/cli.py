@@ -1384,9 +1384,29 @@ def _status_json_empty() -> dict:
         "recent_injections": 0, "recent_pulls": 0,
         "off": False, "watcher_pid": None,
         "instruction_files": {"shared": None, "stale_block": False},
+        "last_read": None,
         "health": [],
         "rows": [],
     }
+
+
+def _last_read_detail(summary: Optional[dict]) -> str:
+    """One line for status's `last read` row (#37)."""
+    if not summary:
+        return "nothing read yet — brief records each session it reads"
+    try:
+        events = int(summary.get("events", 0))
+        skipped = int(summary.get("skipped", 0))
+        detail = "{} {}: {} events, {} unparsed lines, {} records of {} types skipped ({})".format(
+            summary.get("harness", "?"), str(summary.get("session", "?"))[:8], events,
+            int(summary.get("unparsed", 0)), skipped, int(summary.get("skipped_types", 0)),
+            time.strftime("%Y-%m-%d %H:%M", time.localtime(float(summary.get("epoch", 0)))))
+    except (TypeError, ValueError):
+        return "unreadable summary"
+    if events == 0 and skipped:
+        detail += (" — no events from a non-empty session; if it had turns, the session"
+                   " format may have changed (use the 'Harness format change' issue form)")
+    return detail
 
 
 def cmd_status(args, *, home=None, out=sys.stdout) -> int:
@@ -1618,6 +1638,12 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         archive_detail = "nothing handed off to this repo yet"
     checks.append(("archive", archive_verdict, archive_detail))
 
+    # #37: invariant 7's "report degradation in status". Informational only —
+    # a session started and closed with no turn legitimately yields 0 events,
+    # so this can't gate; it makes a thinning handoff visible instead.
+    last_read = brief.read_last_read(state)
+    checks.append(("last read", None, _last_read_detail(last_read)))
+
     off_reason = due.off_reason(state)
     checks.append(("off switch", None,
                    "on" if off_reason is None else "off ({})".format(off_reason)))
@@ -1667,6 +1693,7 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
             "recent_injections": recent_injections, "recent_pulls": recent_pulls,
             "off": due.is_off(state), "watcher_pid": watcher,
             "instruction_files": {"shared": shared, "stale_block": leaked},
+            "last_read": last_read,
             "health": [{"label": label, "ok": ok, "detail": detail}
                        for label, ok, detail in health_rows],
             "rows": [{"label": label, "verdict": _verdict_json(verdict), "detail": detail}
