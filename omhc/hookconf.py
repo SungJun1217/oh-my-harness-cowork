@@ -1,8 +1,8 @@
-"""훅 설치 상태 판정 + 설치/제거. 벤더 이름을 모른다 — 두 하네스가 같은
-스키마를 쓴다: `hooks.<Event>[].hooks[].command`.
+"""Judges hook install state + installs/uninstalls. Vendor-neutral — both
+harnesses share the same schema: `hooks.<Event>[].hooks[].command`.
 
-`omhc hooks install|uninstall` 과 `omhc status` 의 `<adapter-id> hooks` 행이
-여기 하나를 공유한다.
+`omhc hooks install|uninstall` and `omhc status`'s `<adapter-id> hooks` row
+share this one module.
 """
 from __future__ import annotations
 
@@ -17,34 +17,37 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from . import fsio
 
-# install.sh(strip_omhc_hooks, OMHC_CMD)는 **문자열** 정규식으로 omhc 훅을
-# 찾는다 — omhc 가 설치돼 있지 않은(또는 그 전) 상태에서도 돌아야 해서 이
-# 모듈을 부르지 못하고, 손으로 병합한 hooks.SessionStart 그룹에서 "지울
-# 대상"을 넓게 잡아도 안전한 삭제 전용 작업이기 때문이다. 여기(구조 판정)는
-# 반대 방향의 실수(진짜로 도는 훅을 아니라고 하거나, 우연히 "omhc brief"라는
-# 글자가 들어간 사용자 훅을 설치/제거로 착각하는 것)가 더 위험해서 argv 를
-# 구조적으로 판정한다.
+# install.sh (strip_omhc_hooks, OMHC_CMD) finds omhc hooks with a **string**
+# regex — it has to run before omhc is installed (or without it installed at
+# all), so it can't call this module, and it's a delete-only operation, so
+# casting a wide net over what counts as "to remove" in a hand-merged
+# hooks.SessionStart group is safe. Here (structural judgment) the opposite
+# mistake is riskier — calling a genuinely running hook "not installed", or
+# mistaking a user hook that happens to contain the string "omhc brief" for
+# an install/uninstall target — so argv is judged structurally instead.
 #
-# 두 판정은 실측으로 갈라지는 게 확인된 경우가 있고(tests/test_hooks_cmd.py
-# 의 TestInstallShParity 가 일치하는 입력만 고정한다), 하나로 합치지 않는다:
-#   - install.sh 가 더 넓게 지운다: `cd ~ && omhc brief …`(전체 명령의
-#     argv[0] 는 "cd"지만 문자열에 "omhc brief"가 들어 있다), `/usr/bin/env
-#     omhc mark …`(argv[0] 는 "env") 모두 install.sh 는 지우지만, 여기는
-#     argv[0] 의 basename 이 "omhc" 가 아니므로 손대지 않는다.
-#   - 여기가 더 넓게 인식한다: `'omhc' 'mark' --harness x`(토큰마다 따옴표)
-#     는 shlex 로 풀면 `omhc mark --harness x` 와 같아 여기는 설치로 인정하지만,
-#     install.sh 의 정규식(`omhc["']?\s+(mark|brief)`)은 "omhc" 바로 뒤
-#     선택적 따옴표 하나만 허용하고 그다음 공백 뒤에는 "mark"/"brief" 리터럴을
-#     기대하므로 `'mark`(따옴표로 시작)에는 매칭되지 않는다.
+# The two judgments are known to diverge on measured cases
+# (tests/test_hooks_cmd.py's TestInstallShParity pins only the inputs where
+# they agree), and are deliberately not merged into one:
+#   - install.sh removes more broadly: both `cd ~ && omhc brief …` (the whole
+#     command's argv[0] is "cd" but the string contains "omhc brief") and
+#     `/usr/bin/env omhc mark …` (argv[0] is "env") get removed by install.sh,
+#     but this module leaves them alone since argv[0]'s basename isn't "omhc".
+#   - this module recognizes more broadly: `'omhc' 'mark' --harness x` (each
+#     token quoted) becomes `omhc mark --harness x` once shlex splits it, so
+#     this module counts it as installed, but install.sh's regex
+#     (`omhc["']?\s+(mark|brief)`) only allows one optional quote right after
+#     "omhc" and then expects the literal "mark"/"brief" after a space, so it
+#     doesn't match `'mark` (which starts with a quote).
 _HOME_RE = re.compile(r"\$\{HOME\}|\$HOME\b")
 
 
 class HookConfigError(Exception):
-    """merge/strip 이 fail-closed 하려고 던지는 예외. 손대지 않았다는 뜻이다."""
+    """Exception merge/strip raise to fail closed. Means nothing was touched."""
 
 
 class HookConfig(NamedTuple):
-    """어댑터의 선택 메서드 `hook_config()` 가 돌려주는 레코드."""
+    """Record returned by the adapter's optional `hook_config()` method."""
 
     config_path: str
     fragment_name: str
@@ -52,44 +55,47 @@ class HookConfig(NamedTuple):
 
 
 class OmhcCall(NamedTuple):
-    """SessionStart 훅 명령 하나를 구조적으로 판정한 결과."""
+    """Result of structurally judging one SessionStart hook command."""
 
     argv: Tuple[str, ...]
     sub: str  # "mark" | "brief"
-    flags: Dict[str, str]  # {"--harness": "claude-code", ...} — 순서 무관 집합으로 비교한다.
+    flags: Dict[str, str]  # {"--harness": "claude-code", ...} — compared as an order-independent set.
 
 
 def fragments_dir() -> str:
-    """조각이 실제로 설치된 디렉터리.
+    """The directory where fragments are actually installed.
 
-    이 모듈 자신의 realpath 기준 `../hooks` 다 — git 체크아웃(`<repo>/hooks`)과
-    curl 설치(`~/.local/share/omhc/current/hooks`) 모두에서 성립한다. `bin/omhc`
-    가 심링크를 readlink -f 로 먼저 풀고 그 부모를 sys.path 에 꽂으므로, 이
-    모듈의 __file__ 도 항상 실물 위치를 가리킨다.
+    `../hooks` relative to this module's own realpath — holds for both a git
+    checkout (`<repo>/hooks`) and a curl install
+    (`~/.local/share/omhc/current/hooks`). `bin/omhc` resolves a symlink with
+    readlink -f first and puts its parent on sys.path, so this module's
+    __file__ always points at the real location too.
     """
     pkg_dir = os.path.dirname(os.path.realpath(__file__))
     return os.path.join(os.path.dirname(pkg_dir), "hooks")
 
 
 def load_fragment(name: str) -> Dict[str, list]:
-    """조각 파일에서 `hooks` 키만 돌려준다. `_comment` 등 나머지는 사람용이다."""
+    """Returns only the `hooks` key from a fragment file. `_comment` and the
+    rest are for humans."""
     path = os.path.join(fragments_dir(), name)
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)["hooks"]
 
 
 class _Entry(NamedTuple):
-    """`event` 아래 command 훅 하나 — 판정에 필요한 그룹/훅 필드까지 들고 있다."""
+    """One command hook under `event` — also carries the group/hook fields
+    needed for judgment."""
 
     command: str
-    matcher: object  # 그룹의 matcher. 없으면 None.
-    type: object  # 훅의 type. 없으면 None.
+    matcher: object  # the group's matcher. None if absent.
+    type: object  # the hook's type. None if absent.
 
 
 def _extract_entries(hooks_by_event, event: str = "SessionStart") -> List[_Entry]:
-    """`event` 아래 그룹들의 command 훅을 순서대로 펼친다. 다른 이벤트는
-    본 적도 없다는 듯 무시한다 — "omhc done" 같은 사용자 훅이 다른 이벤트에
-    있어도 이 판정에 걸리면 안 된다."""
+    """Flattens the command hooks under `event`'s groups, in order. Other
+    events are ignored as if never seen — a user hook like "omhc done" on a
+    different event must not trip this judgment."""
     out: List[_Entry] = []
     if not isinstance(hooks_by_event, dict):
         return out
@@ -107,17 +113,19 @@ _SIMPLE_MATCHER_RE = re.compile(r"^[a-zA-Z0-9_|]+$")
 
 
 def _matcher_runs_at_startup(matcher) -> bool:
-    """그룹의 matcher 가 세션 시작(SessionStart 의 "startup")에도 걸리는가.
+    """Does the group's matcher also fire at session start (SessionStart's
+    "startup")?
 
-    Claude Code 2.1.281(바이너리 안의 함수) 실측을 그대로 거울에 비춘다 —
-    Codex 의 정확한 의미론은 확인된 바 없고, 지금은 같은 스키마를 쓴다고
-    가정한다: 비었거나 "*" 면 전부 매칭. `^[a-zA-Z0-9_|]+$` 를 만족하는
-    "단순" matcher(예: `startup|resume|clear|compact`)는 정규식으로 쓰지
-    않고 "|" 로 쪼개 "startup" 과 정확히 같은 항목이 있는지만 본다 — 그래서
-    "start" 하나만 있는 단순 matcher는 "startup" 과 문자열이 달라 안 걸린다.
-    그 외는 `new RegExp(m).test(source)`(고정 없는 부분 검색)이므로
-    `re.search`(fullmatch 아님)로 흉내 낸다. 정규식으로 못 읽는 문자열은
-    안 도는 쪽(False)이다.
+    Mirrors a measurement of Claude Code 2.1.281 (a function inside the
+    binary) as-is — Codex's exact semantics haven't been confirmed, and for
+    now we assume the same schema: empty or "*" matches everything. A
+    "simple" matcher satisfying `^[a-zA-Z0-9_|]+$` (e.g.
+    `startup|resume|clear|compact`) isn't used as a regex — it's split on "|"
+    and checked for an exact "startup" entry, so a simple matcher with just
+    "start" doesn't fire (the string differs from "startup"). Anything else
+    behaves like `new RegExp(m).test(source)` (unanchored substring search),
+    mimicked here with `re.search` (not fullmatch). A string the regex engine
+    can't read doesn't fire (False).
     """
     if matcher is None or matcher == "" or matcher == "*":
         return True
@@ -143,16 +151,18 @@ def _not_runnable_reason(entry: "_Entry") -> str:
 
 
 def _parse_call(command: str) -> Optional[OmhcCall]:
-    """command 문자열을 argv 로 쪼개고, omhc mark/brief 호출이면 구조를 돌려준다.
+    """Splits a command string into argv, and returns its structure if it's
+    an omhc mark/brief call.
 
-    argv[0] 의 basename 이 정확히 "omhc"여야 한다 — 절대경로/`~`/`${HOME}`/
-    PATH 상의 bare `omhc` 는 전부 이 조건을 만족하지만, `echo 'omhc brief'`
-    처럼 명령어 자체가 다른 것(첫 토큰이 omhc 가 아닌 것)은 걸리지 않는다.
+    argv[0]'s basename must be exactly "omhc" — an absolute path, `~`,
+    `${HOME}`, or a bare `omhc` on PATH all satisfy this, but something like
+    `echo 'omhc brief'` (where the command itself is different — the first
+    token isn't omhc) doesn't match.
     """
     try:
         argv = shlex.split(command)
     except ValueError:
-        return None  # 따옴표가 안 맞는 등 셸로도 못 쪼개는 문자열은 omhc 명령이 아니다.
+        return None  # unbalanced quotes etc. — not even shell-splittable, so not an omhc command.
     if not argv:
         return None
     if os.path.basename(argv[0]) != "omhc":
@@ -165,7 +175,7 @@ def _parse_call(command: str) -> Optional[OmhcCall]:
     while i < len(rest):
         tok = rest[i]
         if tok.startswith("--") and "=" in tok:
-            # argparse 가 받는 --harness=claude-code 형태. 값은 첫 = 뒤 전부다.
+            # argparse's --harness=claude-code form. The value is everything after the first =.
             key, value = tok.split("=", 1)
             flags[key] = value
             i += 1
@@ -173,10 +183,12 @@ def _parse_call(command: str) -> Optional[OmhcCall]:
             flags[tok] = rest[i + 1]
             i += 2
         else:
-            # 값 없는 플래그(다음 토큰도 "--"로 시작하거나 마지막 토큰이다)/
-            # 잉여 토큰은 조용히 건너뛴다 — 비교는 아는 키만 본다. 다음 토큰을
-            # 무조건 값으로 삼으면 `--text --harness codex-cli` 에서 "--harness"
-            # 가 --text 의 값으로 먹혀 진짜 --harness 를 잃어버린다.
+            # A valueless flag (next token also starts with "--", or this is
+            # the last token) / a leftover token — skip it quietly, since
+            # comparison only looks at known keys. Treating the next token as
+            # the value unconditionally would let `--text --harness
+            # codex-cli` swallow "--harness" as --text's value and lose the
+            # real --harness.
             i += 1
     return OmhcCall(argv=tuple(argv), sub=argv[1], flags=flags)
 
@@ -193,20 +205,23 @@ def _omhc_calls(entries: List["_Entry"], *, runnable_only: bool = False) -> List
 
 
 def _resolve_binary(argv0: str, home: str) -> Optional[str]:
-    """argv[0] 을 실행 가능한 절대경로로 푼다. 못 찾으면 None.
+    """Resolves argv[0] to an executable absolute path. None if not found.
 
-    `$HOME`/`${HOME}`/선두 `~` 는 모두 (실행 시점 os.environ 이 아니라) 주어진
-    `home` 인자로 치환한다 — 이 검사가 실제 사용자 $HOME 과 다른 홈(테스트의
-    임시 홈 등)을 흉내 낼 수 있어야 한다. `~otheruser` 같은 드문 꼴만
-    os.path.expanduser(실행 프로세스의 실제 환경을 본다)에 맡긴다. 슬래시가
-    없는 bare 이름은 PATH 조회(shutil.which, 실행 시점과 같은 실제 PATH)로
-    찾는다 — 그건 이 검사가 흉내 낼 대상이 아니라 실제로 있어야 하는 것이다.
+    `$HOME`/`${HOME}`/a leading `~` are all substituted with the given `home`
+    argument (not the real os.environ at run time) — this check needs to be
+    able to simulate a home other than the real user's $HOME (e.g. a test's
+    temp home). Only the rare `~otheruser` form is left to
+    os.path.expanduser (which sees the real running process's environment).
+    A bare name with no slash is looked up on PATH (shutil.which, the real
+    PATH at run time) — that's not something this check should simulate, it's
+    something that actually has to exist.
     """
-    token = _HOME_RE.sub(lambda _m: home, argv0)  # home 을 치환 템플릿으로 읽지 않게
+    token = _HOME_RE.sub(lambda _m: home, argv0)  # avoid re.sub reading home as a substitution template
     if token == "~" or token.startswith("~/"):
-        # os.path.expanduser 는 실행 프로세스의 실제 $HOME(os.environ)을 본다 —
-        # 그러면 이 함수가 흉내 내려는 `home` 인자와 갈라진다. `~` 는 직접
-        # 치환한다. `~otheruser` 같은 드문 꼴만 expanduser 에 맡긴다.
+        # os.path.expanduser looks at the running process's real $HOME
+        # (os.environ) — that would diverge from the `home` argument this
+        # function is trying to simulate. Substitute `~` directly. Only the
+        # rare `~otheruser` form is left to expanduser.
         token = home.rstrip("/") + token[1:]
     else:
         token = os.path.expanduser(token)
@@ -235,15 +250,16 @@ def _diff_reason(shipped: List[OmhcCall], installed: List[OmhcCall]) -> str:
                 for k in keys if want.flags.get(k) != got.flags.get(k)
             ]
             return "{}: {}".format(want.sub, "; ".join(parts))
-    return "commands differ"  # 도달하면 안 되지만(위에서 다 같으면 애초에 안 불린다) 방어적으로 둔다.
+    return "commands differ"  # shouldn't be reached (if everything above matched this wouldn't be called), kept defensively.
 
 
 def inspect(config_path: str, fragment: Dict[str, list], home: str) -> Tuple[bool, str]:
-    """설치 상태를 판정한다. 절대 던지지 않는다 — 호출자(cmd_status)가 감싸지만
-    이 함수 자체도 진단 도구이므로 스스로 fail-closed 하게 짠다.
+    """Judges install state. Never raises — the caller (cmd_status) wraps it,
+    but this function is a diagnostic tool in its own right so it's written
+    to fail closed on its own.
 
-    `fragment` 는 `load_fragment()` 가 돌려주는, 그 하네스가 *지금* 배포하는
-    조각의 `hooks` 값이다.
+    `fragment` is the `hooks` value from `load_fragment()`, i.e. the fragment
+    that harness currently ships.
     """
     try:
         with open(config_path, encoding="utf-8") as fh:
@@ -264,12 +280,13 @@ def inspect(config_path: str, fragment: Dict[str, list], home: str) -> Tuple[boo
 
 
 def inspect_toml(config_path: str, fragment: Dict[str, list], home: str) -> Tuple[bool, str]:
-    """`inspect()` 의 TOML 판(공식 문서: config.toml 의 인라인 `[[hooks.<Event>]]`
-    도 hooks.json 과 같은 `hooks.<Event>[].hooks[]` 구조로 로드된다). 3.9 엔
-    tomllib 이 없으므로 `parse_toml_hooks` 로 이 구조 하나만 뽑아 같은 판정
-    함수(`_judge`)에 넘긴다 — 비교 로직을 두 벌 두지 않는다. 절대 던지지
-    않는다: 실패는 전부 "not installed"(설치 안 됨과 파싱 불가를 구분하지
-    않는다, has_runnable_call 과 같은 원칙)."""
+    """The TOML counterpart of `inspect()` (per the official docs, config.toml's
+    inline `[[hooks.<Event>]]` loads into the same `hooks.<Event>[].hooks[]`
+    structure as hooks.json). 3.9 has no tomllib, so `parse_toml_hooks` picks
+    out just this one structure and hands it to the same judgment function
+    (`_judge`) — no second copy of the comparison logic. Never raises:
+    every failure becomes "not installed" (doesn't distinguish "not
+    installed" from "unparsable", same principle as has_runnable_call)."""
     try:
         with open(config_path, encoding="utf-8-sig", errors="replace") as fh:
             text = fh.read()
@@ -278,9 +295,10 @@ def inspect_toml(config_path: str, fragment: Dict[str, list], home: str) -> Tupl
     try:
         hooks_by_event = parse_toml_hooks(text)
     except Exception:
-        # parse_toml_hooks 는 제 몸을 fail-open 하게 짰지만(never raise 를
-        # 목표로), 이 함수 자신도 훅 경로 근처(status/install)에서 불리므로
-        # 한 번 더 감싼다 — 방어의 마지막 층.
+        # parse_toml_hooks is written to fail open on its own (aiming to
+        # never raise), but this function is also called near the hook path
+        # (status/install), so it's wrapped once more — the last layer of
+        # defense.
         return False, "cannot parse {}".format(config_path)
     if not hooks_by_event:
         return False, "not installed in {} — run `omhc hooks install`".format(config_path)
@@ -289,10 +307,11 @@ def inspect_toml(config_path: str, fragment: Dict[str, list], home: str) -> Tupl
 
 def _judge(hooks_by_event, fragment: Dict[str, list], home: str,
            config_path: str) -> Tuple[bool, str]:
-    """`inspect`/`inspect_toml` 공유 — 설치된 hooks.SessionStart 모양을 배포
-    조각과 비교한다. 소스가 JSON 이든(위) TOML 이든(parse_toml_hooks) 같은
-    `{event: [{"matcher":…, "hooks":[{"type":…, "command":…}]}]}` 모양이면
-    똑같이 판정한다."""
+    """Shared by `inspect`/`inspect_toml` — compares the installed
+    hooks.SessionStart shape against the shipped fragment. Whether the
+    source is JSON (above) or TOML (parse_toml_hooks), the same
+    `{event: [{"matcher":…, "hooks":[{"type":…, "command":…}]}]}` shape gets
+    judged identically."""
     installed_entries = _extract_entries(hooks_by_event)
     installed_omhc_any = _omhc_calls(installed_entries)
     if not installed_omhc_any:
@@ -300,10 +319,11 @@ def _judge(hooks_by_event, fragment: Dict[str, list], home: str,
 
     installed_omhc = _omhc_calls(installed_entries, runnable_only=True)
     if not installed_omhc:
-        # omhc 호출은 있는데(위에서 확인) 세션 시작 시점에는 하나도 안 돈다 —
-        # matcher 가 좁혀놨거나 command 가 아닌 type 이어서다. "PASS 인데 안
-        # 도는" 설치가 merge() 의 "이미 PASS 면 손대지 않는다" 경로에 걸려
-        # 영영 고쳐지지 않는 걸 막는다.
+        # There are omhc calls (confirmed above), but none of them ever run
+        # at session start — either the matcher narrowed it down, or the type
+        # isn't "command". This keeps a "PASS but never runs" install from
+        # hitting merge()'s "already PASS, leave it alone" path and staying
+        # broken forever.
         reason = None
         for entry in installed_entries:
             if _parse_call(entry.command) is not None and not _runnable_at_startup(entry):
@@ -314,10 +334,11 @@ def _judge(hooks_by_event, fragment: Dict[str, list], home: str,
 
     shipped_entries = _extract_entries(fragment)
     shipped_any = _omhc_calls(shipped_entries)
-    # runnable 호출만 비교하면, 실제로는 안 도는 여분의 omhc 그룹(예: matcher
-    # "resume" 에 낀 두 번째 brief)이 있어도 PASS 로 보일 수 있다 — merge()
-    # 의 "PASS 면 이미 중복이 없다" 는 전제가 깨진다. 그래서 전체(안 도는
-    # 것까지) 개수도 shipped 를 넘지 않는지 따로 본다(#20 리뷰).
+    # Comparing only runnable calls could still show PASS with an extra omhc
+    # group that never actually runs (e.g. a second brief pinned to matcher
+    # "resume") — breaking merge()'s assumption that "PASS means no
+    # duplicates yet". So counts including non-runnable ones are separately
+    # checked not to exceed shipped (#20 review).
     installed_counts = collections.Counter(c.sub for c in installed_omhc_any)
     shipped_counts = collections.Counter(c.sub for c in shipped_any)
     if any(installed_counts[s] > shipped_counts[s] for s in installed_counts):
@@ -341,13 +362,13 @@ def _judge(hooks_by_event, fragment: Dict[str, list], home: str,
 
 
 def has_runnable_call(config_path: str, sub: str, flags: Optional[Dict[str, str]] = None) -> bool:
-    """`config_path` 의 SessionStart 에 `sub`(예: "brief")를 부르는, 세션 시작
-    시점에 실제로 도는 omhc 호출이 있는가. `flags` 가 주어지면 그 키=값도
-    맞아야 한다(예: `{"--harness": "codex-cli"}`).
+    """Does `config_path`'s SessionStart have an omhc call to `sub` (e.g.
+    "brief") that actually runs at session start? If `flags` is given, that
+    key=value must match too (e.g. `{"--harness": "codex-cli"}`).
 
-    훅 경로(install_handoff → hook_is_installed)에서 쓴다 — 절대 던지지
-    않는다: 실패는 전부 False 다(설치 안 됨과 구분 못 하지만, 구분해서 얻는
-    이득보다 훅 경로가 절대 안 죽어야 한다는 쪽이 우선이다, 불변식 2).
+    Used on the hook path (install_handoff -> hook_is_installed) — never
+    raises: every failure is False (indistinguishable from "not installed",
+    but the hook path never dying wins over that distinction — invariant 2).
     """
     try:
         with open(config_path, encoding="utf-8") as fh:
@@ -367,8 +388,8 @@ def has_runnable_call(config_path: str, sub: str, flags: Optional[Dict[str, str]
 
 def has_runnable_call_toml(config_path: str, sub: str,
                           flags: Optional[Dict[str, str]] = None) -> bool:
-    """`has_runnable_call` 의 TOML 판 — config.toml 의 인라인 `[[hooks.<Event>]]`
-    를 본다(#32). 절대 던지지 않는다: 실패는 전부 False."""
+    """The TOML counterpart of `has_runnable_call` — looks at config.toml's
+    inline `[[hooks.<Event>]]` (#32). Never raises: every failure is False."""
     try:
         with open(config_path, encoding="utf-8-sig", errors="replace") as fh:
             text = fh.read()
@@ -386,10 +407,10 @@ def has_runnable_call_toml(config_path: str, sub: str,
         return False
 
 
-# --- TOML 헤더 스캐너 + 인라인 [hooks] ------------------------------------
+# --- TOML header scanner + inline [hooks] ------------------------------------
 
-# 이 모듈이 아는 TOML 스키마는 딱 하나 — `hooks.<Event>[].hooks[].command`
-# 가 array-of-tables 로 펼쳐진 모양이다:
+# This module knows exactly one TOML schema — `hooks.<Event>[].hooks[].command`
+# expanded as array-of-tables:
 #   [[hooks.PreToolUse]]
 #   matcher = "^Bash$"
 #
@@ -398,45 +419,51 @@ def has_runnable_call_toml(config_path: str, sub: str,
 #   command = '...'
 #   timeout = 30
 #   statusMessage = "..."
-# 어느 하네스가 이 TOML 인라인 표현을 쓰든(3.9 엔 tomllib 이 없으므로 전체
-# TOML 을 파싱하지 않는다) 여기 하나로 판정한다 — 하네스 이름은 모른다.
+# Whichever harness uses this TOML inline representation, it's judged by this
+# one module (3.9 has no tomllib, so the whole TOML doc is never parsed) —
+# no harness name involved.
 
-# 문자열·주석·배열/문자열 안의 대괄호를 건너뛰며 최상위(줄 맨 앞, 배열 깊이
-# 0) 헤더만 찾는다. `toml_header_lines` 가 문서 전체에서 전부(첫 것뿐 아니라)
-# 문서 순서대로 낸다 — 이 모듈의 인라인 [hooks] 판정과, 어댑터가 자기만의
-# 단일 키 하나만 뽑을 때(예: 특정 최상위 키가 첫 헤더 앞에 있는지) 둘 다
-# 이 스캐너 하나를 공유한다.
+# Finds only top-level headers (at line start, at array depth 0), skipping
+# strings/comments/brackets inside arrays or strings. `toml_header_lines`
+# yields all of them across the document (not just the first), in document
+# order — both this module's inline [hooks] judgment and an adapter picking
+# out just its own single top-level key (e.g. checking whether a particular
+# key comes before the first header) share this one scanner.
 _TOML_STRING_OR_BRACKET_RE = re.compile(
     r'"""|\'\'\'|"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\'|#[^\n]*|[\[\]]')
 
-# 헤더 한 줄: `[a.b.c]` 또는 `[[a.b.c]]`. 안쪽에 문자열이 있어도(예:
-# `[projects."/a/b"]`) 여기서는 dotted key 만 대충 뽑는다 — hooks.<Event>
-# 패턴은 항상 bare key 라 정밀 parsing 이 필요 없고, 다른 헤더(예: projects)
-# 는 이 파서의 관심사가 아니므로(패턴에 안 걸려 조용히 무시된다) 정확도가
-# 떨어져도 안전하다.
+# One header line: `[a.b.c]` or `[[a.b.c]]`. Even if a string appears inside
+# (e.g. `[projects."/a/b"]`), this only roughly extracts the dotted key —
+# the hooks.<Event> pattern is always a bare key, so no precise parsing is
+# needed, and other headers (e.g. projects) aren't this parser's concern
+# (they simply fail to match and get silently ignored), so lower accuracy
+# there is safe.
 _TOML_HEADER_RE = re.compile(r'^[ \t]*(\[{1,2})([^\]]*)\]{1,2}[ \t\r]*(?:#.*)?$')
 
-# 본문의 `key = "value"` 한 줄(문자열 값만 인식한다 — matcher/type/command
-# 는 실측(위 예시)상 전부 문자열이고, timeout(정수)·statusMessage 는 여기서
-# 관심사가 아니다). bare/quoted 키, basic/literal 문자열 값 모두 받는다.
+# One `key = "value"` body line (recognizes only string values — matcher/
+# type/command are all strings per the measured example above, and
+# timeout (int)/statusMessage aren't this module's concern). Accepts bare/
+# quoted keys and basic/literal string values alike.
 _TOML_KV_RE = re.compile(
     r'^[ \t]*([\w-]+|"[^"\\\n]*"|\'[^\'\n]*\')[ \t]*=[ \t]*'
     r'("(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\')[ \t\r]*(?:#.*)?$')
 
-# parse_toml_hooks 의 두 target 모양이 받아들이는 키 — group(=[[hooks.<E>]])
-# 은 matcher 만, hook(=[[hooks.<E>.hooks]])은 type/command 만. "hooks" 같은
-# group 의 내부 키를 본문 key=value 로 덮어쓰면(예: `hooks = "oops"`) 다음
-# `[[hooks.<E>.hooks]]` 가 그 리스트에 append 하려다 죽는다(리뷰 #2) — 그래서
-# `key in target` 대신 이 허용목록으로 가른다.
+# The keys parse_toml_hooks's two target shapes accept — a group
+# (=[[hooks.<E>]]) only takes matcher, a hook (=[[hooks.<E>.hooks]]) only
+# type/command. If a group's internal key like "hooks" got overwritten by a
+# body key=value (e.g. `hooks = "oops"`), the next `[[hooks.<E>.hooks]]`
+# would die trying to append to that list (review #2) — so this allowlist is
+# used to gate it instead of `key in target`.
 _TOML_GROUP_KEYS = frozenset({"matcher"})
 _TOML_HOOK_KEYS = frozenset({"type", "command"})
 
 
 def toml_header_lines(text: str):
-    """최상위(줄 맨 앞, 문자열/배열 밖) `[...]`/`[[...]]` 헤더가 있는 줄의
-    (bracket_pos, line_end) 오프셋을 문서 순서대로 낸다. `bracket_pos` 는
-    그 줄의 `[` 자체가 시작하는 위치(줄 시작이 아니다 — 선행 공백을 뺀다),
-    `line_end` 는 그 줄 개행 앞까지."""
+    """Yields (bracket_pos, line_end) offsets, in document order, for lines
+    with a top-level (line start, outside a string/array) `[...]`/`[[...]]`
+    header. `bracket_pos` is where that line's `[` itself starts (not the
+    line start — leading whitespace is excluded), `line_end` is up to just
+    before that line's newline."""
     out = []
     depth = 0
     in_multi = None
@@ -487,23 +514,25 @@ def toml_header_lines(text: str):
 
 
 def parse_toml_hooks(text: str) -> Dict[str, list]:
-    """config.toml 텍스트에서 인라인 `[hooks]` 테이블만 뽑아 hooks.json 과
-    같은 `{event: [{"matcher":…, "hooks":[{"type":…, "command":…}]}]}` 모양
-    으로 돌려준다. 그 밖의 모든 TOML(`[projects...]`, `[model]` 등)은 이
-    파서의 관심사가 아니다 — 헤더가 hooks.<Event> / hooks.<Event>.hooks
-    패턴에 안 걸리면 조용히 건너뛴다.
+    """Picks only the inline `[hooks]` table out of config.toml text and
+    returns it in the same shape as hooks.json:
+    `{event: [{"matcher":…, "hooks":[{"type":…, "command":…}]}]}`. All other
+    TOML (`[projects...]`, `[model]`, etc.) isn't this parser's concern —
+    headers that don't match the hooks.<Event> / hooks.<Event>.hooks pattern
+    are silently skipped.
 
-    `[hooks]` 가 전혀 없으면(진짜 없거나, 못 알아보는 모양이거나) 빈 dict를
-    돌려준다 — has_runnable_call_toml/inspect_toml 양쪽 다 "빈 dict = 설치
-    안 됨" 으로 취급하므로 fail-open 이 저절로 된다. 절대 던지지 않는다."""
+    If `[hooks]` is absent entirely (genuinely missing, or an unrecognized
+    shape), returns an empty dict — both has_runnable_call_toml/inspect_toml
+    treat "empty dict = not installed", so failing open falls out naturally.
+    Never raises."""
     hooks_by_event: Dict[str, list] = {}
-    groups_by_event: Dict[str, dict] = {}  # event -> 가장 최근 그룹(문서 순서상 마지막)
+    groups_by_event: Dict[str, dict] = {}  # event -> most recent group (last in document order)
     headers = toml_header_lines(text)
 
     def _read_body(body_start: int, body_end: int, target, allowed_keys) -> None:
-        """[header_end, next_header_start) 구간에서 `allowed_keys` 에 있는
-        키만 `target` 에 얹는다. `target` 이 None 이면(관심 없는 헤더 아래)
-        아무것도 하지 않는다."""
+        """Within [header_end, next_header_start), lays only the keys in
+        `allowed_keys` onto `target`. Does nothing if `target` is None (under
+        a header we don't care about)."""
         if target is None:
             return
         for line in text[body_start:body_end].split("\n"):
@@ -545,7 +574,7 @@ def parse_toml_hooks(text: str) -> Dict[str, list]:
                 group["hooks"].append(hook)
                 target = hook
                 allowed_keys = _TOML_HOOK_KEYS
-            # else: 부모 그룹 없이 나온 hooks 테이블 — 고아, 버린다(target=None).
+            # else: a hooks table with no parent group — an orphan, dropped (target=None).
         _read_body(body_start, body_end, target, allowed_keys)
 
     return hooks_by_event
@@ -555,9 +584,10 @@ def parse_toml_hooks(text: str) -> Dict[str, list]:
 
 
 def _load(config_path: str) -> dict:
-    """설정 객체를 읽는다. 파일이 없으면 빈 dict(``{}``) — merge 가 그 위에
-    새로 만들 수 있어야 한다(Codex 는 원래 hooks.json 이 없다). 그 밖의
-    모든 실패는 fail-closed 하게 던진다 — 절반만 읽고 계속 진행하지 않는다."""
+    """Reads the config object. If the file doesn't exist, an empty dict
+    (``{}``) — merge needs to be able to build fresh on top of it (Codex
+    doesn't ship a hooks.json to begin with). Every other failure raises to
+    fail closed — it never proceeds having read only half of it."""
     try:
         with open(config_path, "rb") as fh:
             raw = fh.read()
@@ -577,14 +607,15 @@ def _load(config_path: str) -> dict:
 
 
 def _strip_hooks(conf: dict) -> dict:
-    """`conf`(전체 설정 객체)의 사본에서 hooks.SessionStart 의 omhc mark/brief
-    훅만 지운다. install.sh 의 문자열 정규식과 달리 `_parse_call` 로 구조적으로
-    판정한다 — 지우는 쪽 실수(진짜 도는 훅을 못 지우거나, `echo 'omhc brief'`
-    같은 남의 훅을 지우는 것)가 여기서도 여전히 위험하기 때문이다.
+    """Removes only omhc's own mark/brief hooks from hooks.SessionStart, in a
+    copy of `conf` (the full config object). Unlike install.sh's string
+    regex, this judges structurally with `_parse_call` — the same mistake
+    (failing to remove a genuinely running hook, or removing someone else's
+    hook like `echo 'omhc brief'`) is just as dangerous here.
 
-    모양이 기대를 벗어나면(hooks 가 객체가 아니다 등) install.sh 의 uninstall
-    경로와 같은 원칙으로 fail-closed 한다 — 못 알아보는 기계적 형태를 그대로
-    두거나 고쳐 쓰지 않는다.
+    If the shape is unexpected (e.g. hooks isn't an object), fails closed by
+    the same principle as install.sh's uninstall path — it neither leaves nor
+    rewrites an unrecognized mechanical shape.
     """
     conf = copy.deepcopy(conf)
     hooks = conf.get("hooks")
@@ -612,10 +643,11 @@ def _strip_hooks(conf: dict) -> dict:
                     and _parse_call(h["command"]) is not None)
         ]
         if len(kept_hooks) == len(original_hooks):
-            # 이 그룹에서는 아무것도 지우지 않았다 — 원래 비어 있던 그룹이라도
-            # (install.sh 와 마찬가지로) 손대지 않고 그대로 둔다. 건드리지
-            # 않은 빈 그룹까지 드롭하면, omhc 훅이 하나도 없는 설정에서도
-            # strip() 이 "바뀌었다"고 잘못 보고한다(#7 리뷰 4).
+            # Nothing was removed from this group — leave it untouched even
+            # if it was originally empty (matching install.sh). Dropping an
+            # untouched empty group would make strip() wrongly report
+            # "changed" even on a config with no omhc hooks at all (#7
+            # review 4).
             kept_groups.append(group)
             continue
         removed_any = True
@@ -623,45 +655,48 @@ def _strip_hooks(conf: dict) -> dict:
             new_group = dict(group)
             new_group["hooks"] = kept_hooks
             kept_groups.append(new_group)
-        # else: 이 그룹은 omhc 훅만 있었고 지워서 비었다 — 그룹째 드롭한다.
+        # else: this group had only omhc hooks and is now empty — drop the whole group.
 
     if not removed_any:
-        return conf  # SessionStart 자체도 원래 모습 그대로(빈 배열이었어도) 남긴다.
+        return conf  # leave SessionStart itself exactly as it was (even if it was an empty array).
 
     if kept_groups:
         hooks["SessionStart"] = kept_groups
     else:
         del hooks["SessionStart"]
     if not hooks:
-        # hooks 가 SessionStart 하나만 들고 있었다면 이제 빈 객체다 — 남겨두면
-        # 아무 것도 설치한 적 없는 설정에 `{"hooks": {}}` 만 흔적으로 남는다.
+        # If hooks only held SessionStart, it's now an empty object — leaving
+        # it would leave `{"hooks": {}}` as a stray artifact in a config that
+        # never installed anything.
         del conf["hooks"]
     return conf
 
 
 def _write_if_changed(config_path: str, original: dict, updated: dict) -> bool:
-    """`updated` 가 `original` 과 같으면(idempotent) 아무것도 안 쓴다 — Codex
-    health 행이 hooks.json 의 mtime 에 기대므로 그 보장이 여기서 무너지면
-    안 된다. 다르면 기존 파일을 `.omhc-bak` 로 백업(있을 때만)하고 원자적으로
-    갈아끼운다."""
+    """If `updated` equals `original` (idempotent), writes nothing — the
+    Codex health row depends on hooks.json's mtime, and that guarantee must
+    not break here. If they differ, backs up the existing file to
+    `.omhc-bak` (if one exists) and swaps it in atomically."""
     if updated == original:
         return False
     real_target = os.path.realpath(config_path)
     if os.path.exists(real_target):
         if not os.access(real_target, os.W_OK):
-            # 실측: 0444 설정 파일은 그냥 os.replace 로도 갈아끼워질 수 있다
-            # (디렉터리 쓰기 권한만 있으면 rename 은 파일 자체의 모드를 안 본다)
-            # — 하지만 사람이 일부러 잠가 둔 파일을 조용히 덮어쓰면 안 되므로
-            # 여기서 명시적으로 거부한다(#7 리뷰 5).
+            # Measured: a 0444 config file can still be swapped in via plain
+            # os.replace (rename only needs directory write permission, it
+            # doesn't check the file's own mode) — but a file a human
+            # deliberately locked shouldn't be silently overwritten, so this
+            # explicitly refuses (#7 review 5).
             raise HookConfigError(
                 "{} is read-only; refusing to overwrite it silently — "
                 "chmod it writable first if you want omhc to manage it".format(real_target))
         backup = config_path + ".omhc-bak"
-        # 이전 실행이 남긴 백업이 0444 로 남아 있으면(원본이 그 시점에
-        # 읽기 전용이었다면) copy2 의 open(dst, "wb") 이 EACCES 로 터진다 —
-        # 백업은 매번 최신 원본을 가리키면 되므로 먼저 지운다(#7 리뷰 5).
+        # If a backup left by a previous run is still 0444 (because the
+        # original was read-only at that time), copy2's open(dst, "wb") dies
+        # with EACCES — the backup only needs to point at the latest
+        # original each time, so it's deleted first (#7 review 5).
         fsio.unlink_quiet(backup)
-        shutil.copy2(config_path, backup)  # 권한 비트도 원본과 같게
+        shutil.copy2(config_path, backup)  # keep the permission bits matching the original too
     try:
         text = json.dumps(updated, indent=2, ensure_ascii=False) + "\n"
         text.encode("utf-8")
@@ -672,29 +707,33 @@ def _write_if_changed(config_path: str, original: dict, updated: dict) -> bool:
 
 
 def strip(config_path: str) -> bool:
-    """`config_path` 의 hooks.SessionStart 에서 omhc 자신의 훅만 제거한다.
-    바뀐 게 있으면 True, 없으면(원래 omhc 훅이 없었다) False."""
+    """Removes only omhc's own hooks from `config_path`'s hooks.SessionStart.
+    True if something changed, False if there was no omhc hook to begin
+    with."""
     original = _load(config_path)
     updated = _strip_hooks(original)
     return _write_if_changed(config_path, original, updated)
 
 
 def merge(config_path: str, fragment: Dict[str, list], home: str) -> bool:
-    """`config_path` 에 `fragment`(=`load_fragment()` 가 돌려주는 `hooks` 값)를
-    병합한다. 먼저 `strip` 해 중복을 막은 뒤 fragment 의 SessionStart 그룹을
-    이어 붙인다 — `hooks/*.json` 의 명령이 바뀌었을 때(예: `--wire sdk` →
-    `claude`) 옛 명령 옆에 새 명령이 덧붙어 brief 가 두 번 돌지 않게 한다.
+    """Merges `fragment` (=the `hooks` value from `load_fragment()`) into
+    `config_path`. First `strip`s to prevent duplicates, then appends
+    fragment's SessionStart groups — so when a `hooks/*.json` command
+    changes (e.g. `--wire sdk` -> `claude`), the new command lands next to
+    the old one instead of making brief run twice.
 
-    이미 `inspect()` 가 PASS 하는 설치는 손대지 않는다 — 사람이 손으로
-    병합하면서 omhc 그룹 앞뒤에 자기 그룹을 두거나, omhc 훅에 `timeout`/
-    `matcher` 같은 필드를 얹거나, 순서를 바꿔도 여전히 유효한 설치일 수
-    있다. 여기서 다시 쓰면 구조가 재배치되고 그런 필드가 지워지며, 무엇보다
-    `hooks.json` 의 mtime 이 바뀐다 — omhc 의 codex hook 판정이 그 mtime 을
-    기준으로 삼아 "아직 판정 불가" 로 돌아가고, 내용이 바뀐 hooks.json 을
-    Codex 가 다시 신뢰하게 할 수도 있다(미검증). 이미 돌고 있는 설치를
-    재정렬만으로 그렇게 만들면 안 된다(#7 리뷰 3). `inspect()` 는 모든 SessionStart 그룹의 omhc
-    호출을 순서·개수·플래그까지 배포된 조각과 정확히 비교하므로, PASS 라면
-    중복 omhc 호출도 이미 없다는 뜻이다."""
+    Leaves an install alone if `inspect()` already PASSes it — a person who
+    hand-merged their own groups around the omhc group, added fields like
+    `timeout`/`matcher` to the omhc hooks, or reordered things may still have
+    a valid install. Rewriting here would rearrange the structure, drop
+    those fields, and — worst of all — change hooks.json's mtime: omhc's
+    Codex hook judgment uses that mtime as a baseline and would fall back to
+    "can't judge yet", and it might make Codex re-trust a hooks.json whose
+    content changed (unverified). A mere reorder of an already-working
+    install shouldn't cause that (#7 review 3). `inspect()` compares every
+    SessionStart group's omhc calls against the shipped fragment down to
+    order, count, and flags, so a PASS already means there are no duplicate
+    omhc calls."""
     ok, _detail = inspect(config_path, fragment, home)
     if ok:
         return False

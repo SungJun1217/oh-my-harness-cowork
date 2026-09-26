@@ -1,9 +1,10 @@
-# v* 태그를 푸시하면 sdist/wheel 을 만들어 GitHub Release 에 붙인다. 태그와
-# omhc.__version__ 이 다르면 실패한다.
+# Pushing a v* tag builds the sdist/wheel and attaches them to a GitHub Release. Fails
+# if the tag and omhc.__version__ differ.
 #
-# 노트는 chore(release) 커밋 본문을 쓴다. PR 없이 develop/main 에 직접 푸시하므로
-# --generate-notes 는 "Full Changelog" 한 줄만 만든다. 릴리스 커밋 본문이 이미
-# 변경 목록이다. 본문을 못 찾으면 예전처럼 자동 생성으로 떨어진다.
+# The notes are the chore(release) commit body. We push straight to develop/main
+# without PRs, so --generate-notes only produces a one-line "Full Changelog"; the
+# release commit body already is the change list. If no body is found, it falls
+# back to the generated notes as before.
 name: release
 
 on:
@@ -19,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # 릴리스 커밋과 직전 태그를 찾으려면 전체 기록과 태그가 필요하다.
+          # Finding the release commit and the previous tag needs full history and tags.
           fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
@@ -39,7 +40,7 @@ jobs:
       - name: release notes
         run: |
           v=${GITHUB_REF_NAME#v}
-          # 점을 이스케이프하고 끝을 고정해야 0.1.1 이 0.1.13 에 걸리지 않는다.
+          # Escape the dots and anchor the end so 0.1.1 does not match 0.1.13.
           body=$(git log -1 --format=%b --grep="^chore(release): ${v//./\\.}\$" "$GITHUB_REF_NAME" | sed '/^Co-Authored-By:/d')
           prev=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
           {

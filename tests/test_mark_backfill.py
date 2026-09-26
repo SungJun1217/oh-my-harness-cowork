@@ -1,6 +1,7 @@
-"""`omhc mark` 의 원장 백필. 신뢰되지 않은 Codex 훅 때문에 그 세션이 원장에
-전혀 없어도, Claude 쪽 mark 가 discover() 로 찾아 채워 넣어 due() 가 여전히
-Codex→Claude 를 볼 수 있게 한다. due() 자체는 손대지 않는다.
+"""`omhc mark`'s ledger backfill. Even when the untrusted Codex hook leaves
+that session entirely out of the ledger, Claude-side mark finds and fills it
+in via discover() so due() can still see Codex→Claude. due() itself is
+untouched.
 """
 from __future__ import annotations
 
@@ -55,8 +56,8 @@ class Harness:
         return code, out.getvalue()
 
     def scan_rows(self, harness="codex-cli"):
-        # #28: rebase 마커도 via=="scan" 이지만 session 이 없다 — 이 헬퍼는
-        # 항상 "특정 세션에 대한" 스캔 행을 의미했으므로 마커는 제외한다.
+        # #28: a rebase marker is also via=="scan" but has no session — this
+        # helper has always meant a scan row "for a specific session", so exclude markers.
         rows = ledger.read(repo_key=self.key, home=self.home)
         return [r for r in rows if r.get("harness") == harness and r.get("via") == "scan"
                and r.get("session")]
@@ -73,7 +74,7 @@ class TestEndToEnd(unittest.TestCase):
         self.addCleanup(self.h.close)
 
     def test_claude_mark_backfills_an_unledgered_codex_session(self):
-        """Codex 훅이 신뢹되지 않아 원장에 없는 세션도 discover() 로 채워진다."""
+        """Even a session missing from the ledger because the Codex hook isn't trusted gets filled in via discover()."""
         now = time.time()
         self.h.plant("cx1", now - 600)
         code, _ = self.h.mark()
@@ -103,13 +104,14 @@ class TestEndToEnd(unittest.TestCase):
         self.assertIn("리더를 붙여서", body)
 
     def test_older_unledgered_session_never_overrides_a_newer_ledgered_one(self):
-        """due() 는 원장 append 순서로 "가장 최근"을 고른다. 오래된 세션이
-        나중에 붙으면 최신으로 오인된다 — 그래서 더 오래된 것은 걸러야 한다."""
+        """due() picks the "most recent" by ledger append order. If an
+        older session gets appended later, it would be mistaken for the
+        newest — so an older one must be filtered out."""
         now = time.time()
         ledger.append({"repo": self.h.key, "harness": "codex-cli", "session": "cx-new",
                       "event": "start", "epoch": now - 100, "path": "/nope",
                       "cwd": self.h.root}, home=self.h.home)
-        self.h.plant("cx-old", now - 500)  # 원장의 cx-new 보다 오래됐다
+        self.h.plant("cx-old", now - 500)  # older than the ledger's cx-new
         self.h.mark()
         self.assertEqual(self.h.scan_rows(), [])
         got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
@@ -129,7 +131,7 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(got.session_id, "cx-new")
 
     def test_six_session_starts_append_the_same_session_only_once(self):
-        """SessionStart 가 한 세션에서 6번 발동한 실측을 흉내낸다."""
+        """Mimics the measured case of SessionStart firing 6 times in one session."""
         now = time.time()
         self.h.plant("cx1", now - 600)
         for _ in range(6):
@@ -137,9 +139,10 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(len(self.h.scan_rows()), 1)
 
     def test_mark_still_exits_0_with_empty_stdout_when_its_own_row_is_refused(self):
-        """#22: transcript_path 가 상한을 못 맞추는 극단(예: PATH_MAX 급 경로)
-        에서도 훅 경로(mark)는 절대 던지지 않고 빈 stdout·exit 0 이어야 한다
-        (invariant 2). 거부는 눈에 보이는 곳(ledger.rejected)에만 남는다."""
+        """#22: even in an extreme where transcript_path can't meet the cap
+        (e.g. a PATH_MAX-scale path), the hook path (mark) must never raise
+        — empty stdout, exit 0 (invariant 2). The refusal only leaves a
+        trace somewhere visible (ledger.rejected)."""
         from omhc import ledger
 
         payload = {"cwd": self.h.root, "session_id": "me1",
@@ -200,9 +203,10 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(len(self.h.scan_rows()), cli.BACKFILL_CAP)
 
     def test_cap_exceeded_still_delivers_the_newest_session(self):
-        """리뷰 결함: 오름차순으로 걷다 cap 에서 끊으면 가장 오래된 5개가
-        남는다. due() 는 원장의 마지막 것을 고르므로, 8개 중 5개만 담을 때
-        cx7(최신) 대신 cx4 가 나오면 안 된다."""
+        """Review defect: walking in ascending order and cutting off at the
+        cap leaves the oldest 5 behind. due() picks the last one in the
+        ledger, so when only 5 of 8 fit, cx4 must not come out instead of
+        cx7 (the newest)."""
         now = time.time()
         total = cli.BACKFILL_CAP + 3
         for i in range(total):
@@ -218,30 +222,32 @@ class TestEndToEnd(unittest.TestCase):
         self.assertNotIn(oldest, {r["session"] for r in rows})
 
     def test_two_sessions_starting_in_the_same_whole_second_both_land(self):
-        """#22: session_meta.timestamp 는 초 단위다. 첫 mark 가 세션 하나를
-        채워 그 epoch 가 newest_start 가 된 뒤, 같은 초에 시작한 **다른**
-        세션이 두 번째 mark 에서 `<=` 비교에 걸려 사라지면 안 된다 — id 가
-        다르면 이미 아는 세션이 아니다."""
+        """#22: session_meta.timestamp is second-granularity. After the first
+        mark fills in one session and its epoch becomes newest_start, a
+        **different** session that started in the same second must not
+        disappear from the `<=` comparison in the second mark — a different
+        id is not an already-known session."""
         now = time.time()
         same_second = now - 500
         self.h.plant("cx-a", same_second)
         self.h.mark()
         self.assertEqual([r["session"] for r in self.h.scan_rows()], ["cx-a"])
 
-        self.h.plant("cx-b", same_second + 0.4)  # 같은 초 → 같은 ISO 문자열
+        self.h.plant("cx-b", same_second + 0.4)  # same second -> same ISO string
         self.h.mark()
         sessions = {r["session"] for r in self.h.scan_rows()}
         self.assertEqual(sessions, {"cx-a", "cx-b"})
 
     def test_sessions_from_a_nested_child_repo_are_not_backfilled(self):
-        """Claude 가 `.git` 없는 부모 디렉터리에서 열리면, discover() 의
-        equal-or-descendant 판정이 그 아래 **자기 `.git`을 가진 자식** 레포의
-        세션까지 통과시킨다(중첩 워크트리·서브모듈과 같은 모양). 그 세션을
-        부모의 repo 키로 원장에 적으면 다른 레포의 GOAL 이 새어든다 — repo 키가
-        다르면 걸러야 한다."""
+        """If Claude opens in a parent directory with no `.git`, discover()'s
+        equal-or-descendant judgment also passes through sessions of a
+        **child** repo below it that has its own `.git` (the same shape as a
+        nested worktree or submodule). Writing that session to the ledger
+        under the parent's repo key would leak another repo's GOAL — it
+        must be filtered out when the repo keys differ."""
         now = time.time()
-        outer = os.path.dirname(self.h.t.repo)  # repo 의 부모. .git 없음
-        self.h.plant("cx-child", now - 600)  # cwd 는 기본값(child repo, self.h.root)
+        outer = os.path.dirname(self.h.t.repo)  # repo's parent. No .git
+        self.h.plant("cx-child", now - 600)  # cwd defaults to the child repo, self.h.root
 
         stdin = json.dumps({"cwd": outer, "session_id": "me1"})
         args = cli.build_parser().parse_args(
@@ -256,8 +262,8 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(leaked, [], rows)
 
     def test_backfill_accepts_a_subdirectory_session_under_an_omhc_root_parent(self):
-        """#12: git 이 아닌 프로젝트도 `.omhc-root` 마커로 서브디렉터리 세션을
-        같은 레포로 백필한다."""
+        """#12: even a non-git project backfills a subdirectory session into
+        the same repo via the `.omhc-root` marker."""
         with tempfile.TemporaryDirectory() as tmp:
             root = os.path.join(tmp, "proj")
             sub = os.path.join(root, "sub")
@@ -312,13 +318,14 @@ class TestEndToEnd(unittest.TestCase):
         got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
-        # 다시 mark 가 돌아도(재발동) 이미 전달된 것은 다시 나오지 않는다.
+        # Even if mark runs again (refires), an already-delivered session doesn't reappear.
         self.h.mark()
         self.assertIsNone(due.due(self.h.key, "claude-code", "me1", now, home=self.h.home))
 
     def test_status_codex_hook_still_fails_with_only_scan_rows(self):
-        """백필이 만든 via:scan 행이 '훅이 실제로 돌았다' 는 증거로 둔갑하면
-        신뢰 안 된 훅을 가려버린다 — health() 는 이미 scan 을 무시한다."""
+        """If a via:scan row created by backfill disguised itself as evidence
+        that 'the hook actually ran', it would mask an untrusted hook —
+        health() already ignores scan rows."""
         now = time.time()
         hooks_dir = os.path.join(self.h.home, ".codex")
         os.makedirs(hooks_dir, exist_ok=True)
@@ -328,7 +335,7 @@ class TestEndToEnd(unittest.TestCase):
                 {"hooks": [{"type": "command", "command": "omhc brief --harness codex-cli"}]}]}}, fh)
         install_epoch = now - 3600
         os.utime(hooks_path, (install_epoch, install_epoch))
-        self.h.plant("cx1", now - 600)  # install 이후 시작
+        self.h.plant("cx1", now - 600)  # started after install
         self.h.mark()
         self.assertEqual(len(self.h.scan_rows()), 1)
 
@@ -346,10 +353,10 @@ class TestEndToEnd(unittest.TestCase):
 
 
 class TestResumeReopensDelivery(unittest.TestCase):
-    """`source:"resume"` 가 SessionStart payload 로 오면(#22, Claude Code 와
-    Codex 둘 다 실측), 이미 전달됐던 세션도 due() 가 다시 집어야 한다 —
-    `codex exec resume` 은 같은 rollout 에 이어붙고 새 rollout(session_meta)을
-    만들지 않는다."""
+    """When `source:"resume"` arrives in the SessionStart payload (#22,
+    measured on both Claude Code and Codex), due() must pick up an
+    already-delivered session again — `codex exec resume` appends to the
+    same rollout and doesn't create a new rollout (session_meta)."""
 
     def setUp(self):
         self.h = Harness()
@@ -368,8 +375,8 @@ class TestResumeReopensDelivery(unittest.TestCase):
         return brief, path
 
     def _resume_with_new_turn(self, path, text):
-        # `codex exec resume` 은 새 rollout 을 만들지 않고 같은 파일에
-        # 이어붙인다(실측) — session_meta 는 다시 안 쓴다.
+        # `codex exec resume` doesn't create a new rollout, it appends to
+        # the same file (measured) — it never writes session_meta again.
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(_repo.codex_user_row(text, ordinal=50),
                                 ensure_ascii=False) + "\n")
@@ -400,9 +407,10 @@ class TestResumeReopensDelivery(unittest.TestCase):
             due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
 
     def test_fork_after_delivery_does_not_reopen(self):
-        """source:"fork" 는 새 session_id 로 오므로 cmd_mark 는 그저 평범한
-        start 행을 남긴다(#34) — resume 처럼 이미 전달된 세션을 reopen 하지
-        않는다. Claude 쪽 fork 적격성은 어댑터의 classify() 가 판정한다."""
+        """source:"fork" arrives with a new session_id, so cmd_mark just
+        leaves a plain start row (#34) — unlike resume, it doesn't reopen an
+        already-delivered session. Fork eligibility on the Claude side is
+        judged by the adapter's classify()."""
         now = time.time()
         self._deliver(now, "필드 경로부터 다시 확인해줘")
         code, out = self.h.mark(harness="codex-cli", session_id="cx1", source="fork")
@@ -412,9 +420,9 @@ class TestResumeReopensDelivery(unittest.TestCase):
             due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
 
     def test_claude_receiving_side_with_source_fork_is_unaffected(self):
-        """cmd_mark 의 source 분기는 harness 를 가리지 않는다 — Claude 자신의
-        포크가 SessionStart 를 source:"fork" 로 낼 때도 그저 새 start 행
-        하나일 뿐, resume 취급으로 새지 않는다."""
+        """cmd_mark's source branch doesn't distinguish harnesses — even when
+        Claude's own fork emits SessionStart as source:"fork", it's just a
+        plain new start row, not leaking into resume treatment."""
         now = time.time()
         code, out = self.h.mark(harness="claude-code", session_id="fork1", source="fork")
         self.assertEqual(code, 0)
@@ -434,17 +442,19 @@ class TestResumeReopensDelivery(unittest.TestCase):
 
 
 class TestReactivateGrownSessions(unittest.TestCase):
-    """#22 마지막 구멍: 신뢰 안 된 Codex 훅에서 `codex exec resume` 은 같은
-    rollout 파일에 이어 쓰고 `session_meta` 를 다시 안 쓴다 — 훅이 안 도는
-    경우 discover()/첫 줄 시작 시각으로는 이 재개를 절대 못 본다. 파일 크기
-    성장 + offset 부터만 읽는 read_session_since 로 잡는다."""
+    """#22's last hole: under an untrusted Codex hook, `codex exec resume`
+    appends to the same rollout file and never writes `session_meta` again
+    — if the hook doesn't run, discover()/first-line start time can never
+    see this resume. Caught via file-size growth + read_session_since,
+    which reads only from an offset onward."""
 
     def setUp(self):
         self.h = Harness()
         self.addCleanup(self.h.close)
-        # 성장 판정은 훅 예산(80ms) 안에서 돈다. 실제 시계로 재면 부하가 큰
-        # 머신에서 전체 스위트 중에만 예산에 걸려 grew 행이 안 생겼다
-        # (TestRebaseMarker 와 같은 원인). 예산 초과 경로는 따로 확인한다.
+        # The growth check runs inside the hook budget (80ms). Timed with
+        # the real clock, it tripped the budget only under the full suite on
+        # a loaded machine and no grew row was produced (same cause as
+        # TestRebaseMarker). The budget-exceeded path is checked separately.
         patcher = mock.patch.object(cli, "BACKFILL_TIME_BUDGET", 60.0)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -456,7 +466,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
 
     def _deliver(self, now, human):
         path = self.h.plant("cx1", now - 600, human=human)
-        self.h.mark()  # backfill 이 baseline size 를 원장에 남긴다
+        self.h.mark()  # backfill leaves the baseline size in the ledger
         got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
@@ -470,12 +480,12 @@ class TestReactivateGrownSessions(unittest.TestCase):
                and r.get("session") == session and r.get("grew")]
 
     def test_growth_with_a_human_turn_is_reactivated_without_any_hook(self):
-        """훅이 한 번도 안 돌아도(source:"resume" 없이 그냥 mark 만 반복해도)
-        새 사람 턴이 생기면 due() 가 다시 집는다."""
+        """Even if the hook never runs (just repeating plain mark, no
+        source:"resume"), due() picks it up again once a new human turn appears."""
         now = time.time()
         path = self._deliver(now, "필드 경로부터 다시 확인해줘")
         self._append_human_turn(path, "이제 두 번째 턴도 반영해줘")
-        self.h.mark()  # source 없는 평범한 mark — 훅이 신뢰 안 되는 상황을 흉내
+        self.h.mark()  # a plain mark with no source — mimics an untrusted hook
         self.assertEqual(len(self._grew_rows()), 1)
         got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
@@ -493,33 +503,34 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self.assertIn("이제 두 번째 턴도 반영해줘", body)
 
     def test_a_first_baseline_taken_mid_long_record_does_not_redeliver_old_content(self):
-        """첫 관측 순간 64KB 넘는 레코드를 쓰는 중이어도 baseline 을 0 으로
-        두지 않는다 — 0 이면 다음 판정이 처음부터 읽어 **원래의** 사람 턴으로
-        거짓 재활성화하고 옛 내용을 다시 넘긴다(리뷰 t7 재현)."""
+        """Even if a >64KB record is being written at the moment of first
+        observation, the baseline must not be set to 0 — at 0, the next
+        check would read from the start and falsely reactivate on the
+        **original** human turn, redelivering old content (review t7 repro)."""
         now = time.time()
         path = self.h.plant("cx1", now - 600, human="필드 경로부터 다시 확인해줘")
         big = json.dumps({"timestamp": "2026-09-24T00:00:00Z", "type": "response_item",
                           "payload": {"type": "function_call_output", "call_id": "c9",
                                       "output": "x" * 80000}}) + "\n"
         with open(path, "a", encoding="utf-8") as fh:
-            fh.write(big[:70000])  # 64KB 넘게 쓰는 중 — 아직 개행 없음
+            fh.write(big[:70000])  # writing past 64KB — no newline yet
         self.h.mark()
         got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
         with open(path, "a", encoding="utf-8") as fh:
-            fh.write(big[70000:])  # 레코드가 끝났다 — 새 사람 턴은 없다
+            fh.write(big[70000:])  # record is done — no new human turn
         self.h.mark()
         self.assertEqual(self._grew_rows(), [])
         self.assertIsNone(
             due.due(self.h.key, "claude-code", "me2", now, home=self.h.home))
 
     def test_growth_without_a_human_turn_is_not_reactivated(self):
-        """에이전트 혼잣말(셸 실행)만 붙은 성장은 재개로 보지 않는다 — 기준
-        크기만 갱신한다(seen 행)."""
+        """Growth with only agent soliloquy (shell execution) appended is not
+        seen as a resume — only the baseline size is updated (seen row)."""
         now = time.time()
         path = self._deliver(now, "필드 경로부터 다시 확인해줘")
-        _repo.append_codex_turn(path, ordinal=90)  # 순수 에이전트 셸 실행
+        _repo.append_codex_turn(path, ordinal=90)  # pure agent shell execution
         self.h.mark()
         self.assertEqual(self._grew_rows(), [])
         self.assertIsNone(
@@ -530,13 +541,14 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self.assertEqual(len(seen), 1, rows)
 
     def test_a_torn_last_line_does_not_lose_the_completed_human_turn(self):
-        """리뷰(2차) #2: os.stat 이 레코드를 쓰는 도중을 잡으면(마지막 줄이
-        개행 없이 끝난다) baseline 에 그 부분 바이트까지 포함하면 안 된다 —
-        나중에 그 레코드가 마저 쓰인 뒤 읽으면 skip-to-newline 로직이 완성된
-        레코드 전체를 건너뛰어 사람 턴을 영영 잃는다."""
+        """Review (round 2) #2: if os.stat catches a record mid-write (the
+        last line ends with no newline), the baseline must not include those
+        partial bytes — if that record finishes being written later and gets
+        read, the skip-to-newline logic would skip over the whole completed
+        record and lose the human turn for good."""
         now = time.time()
         path = self._deliver(now, "필드 경로부터 다시 확인해줘")
-        # 완전한 에이전트 턴 한 줄(개행으로 끝난다) — 이것만으로는 재개가 아니다.
+        # One complete agent turn line (ends with a newline) — this alone isn't a resume.
         agent_row = {"timestamp": _iso(now), "ordinal": 90, "type": "response_item",
                     "payload": {"type": "message", "role": "assistant", "id": "a90",
                                 "content": [{"type": "output_text",
@@ -546,24 +558,24 @@ class TestReactivateGrownSessions(unittest.TestCase):
 
         human_row = _repo.codex_user_row("사람의 완성된 재개 턴", ordinal=91)
         full_line = json.dumps(human_row, ensure_ascii=False).encode("utf-8")
-        torn = full_line[:30]  # 개행 없이 레코드 중간에서 끊는다 — 쓰는 도중
+        torn = full_line[:30]  # cut off mid-record with no newline — mid-write
         with open(path, "ab") as fh:
             fh.write(torn)
 
-        self.h.mark()  # baseline 이 이 미완성 줄을 포함하면 안 된다
+        self.h.mark()  # the baseline must not include this incomplete line
         self.assertEqual(self._grew_rows(), [])
 
         with open(path, "ab") as fh:
-            fh.write(full_line[30:] + b"\n")  # 나머지를 마저 쓴다
+            fh.write(full_line[30:] + b"\n")  # finish writing the rest
 
-        self.h.mark()  # 이제 완성됐다 — 재개로 잡혀야 한다
+        self.h.mark()  # now complete — must be caught as a resume
         self.assertEqual(len(self._grew_rows()), 1)
         got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "cx1")
 
     def test_the_existing_dedupe_test_still_holds(self):
-        """size 기록이 더해져도 #22 의 기존 dedupe 보장은 그대로다."""
+        """#22's existing dedupe guarantee holds even with size recording added."""
         now = time.time()
         self.h.plant("cx1", now - 600)
         self.h.mark()
@@ -575,62 +587,65 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self.assertEqual(self._grew_rows(), [])
 
     def test_a_newer_session_in_the_same_interval_wins_over_a_grown_older_one(self):
-        """조건 (b): 같은 mark 호출이 방금 더 최신 세션(B)을 채웠다면, 그 안에서
-        낡은 재개(A)를 얹어 due() 가 B 대신 A 를 고르게 하면 안 된다."""
+        """Condition (b): if the same mark call just filled in a newer
+        session (B), it must not stack a stale resume (A) on top and make
+        due() pick A instead of B."""
         now = time.time()
         path_a = self._deliver(now, "A 세션 첫 턴")
         self._append_human_turn(path_a, "A 세션 재개 턴")
         self.h.plant("cx-b", now - 100, human="B 세션 첫 턴")
 
-        self.h.mark()  # 한 호출 안에서 backfill(B) + reactivate(A) 후보가 겹친다
-        self.assertEqual(self._grew_rows(), [], "B 가 채워진 호출에서는 A 를 재개하지 않는다")
+        self.h.mark()  # backfill(B) and reactivate(A) candidates overlap within one call
+        self.assertEqual(self._grew_rows(), [], "A must not be reactivated in the call that fills in B")
         got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "cx-b")
 
-        # 다음 호출에서도 A 는 B 에 밀린 것으로 남는다(조건 a: baseline 뒤에
-        # 다른 세션의 start 행이 있다).
+        # In the next call too, A stays superseded by B (condition a: there's
+        # another session's start row after the baseline).
         self.h.mark()
         self.assertEqual(self._grew_rows(), [])
         got = due.due(self.h.key, "claude-code", "me3", now, home=self.h.home)
         self.assertEqual(got.session_id, "cx-b")
 
     def test_a_grows_again_after_b_is_delivered_and_is_reactivated(self):
-        """리뷰 #1: `superseded` 로 건너뛴 세션이 영원히 막히면 안 된다 — B
-        이후 A 가 **다시** 자라면(새 사람 턴) 다시 잡혀야 한다. B 가 막 들어온
-        순간(`_rebaseline_after_fresh_start`) A 의 baseline 이 이미 B 뒤로
-        옮겨지므로, 그 뒤의 성장은 곧바로 새 판정을 받는다."""
+        """Review #1: a session skipped as `superseded` must not stay blocked
+        forever — if A **grows again** (a new human turn) after B, it must
+        be caught again. The moment B just arrived
+        (`_rebaseline_after_fresh_start`), A's baseline already moves past
+        B, so growth after that gets a fresh verdict right away."""
         now = time.time()
         path_a = self._deliver(now, "A 세션 첫 턴")
         self._append_human_turn(path_a, "B 이전의 재개 턴")
         self.h.plant("cx-b", now - 100, human="B 세션 첫 턴")
 
-        self.h.mark()  # backfill(B) 이 이 순간 A 의 baseline 도 B 뒤로 옮긴다
+        self.h.mark()  # backfill(B) also moves A's baseline past B at this moment
         got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertEqual(got.session_id, "cx-b")
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
 
-        self.h.mark()  # 재기준점 이후로는 더 자라지 않았다 — 재개 아님
+        self.h.mark()  # no growth since the rebaseline point — not a resume
         self.assertEqual(self._grew_rows(), [])
 
         self._append_human_turn(path_a, "B 이후의 진짜 재개 턴")
-        self.h.mark()  # baseline 이 B 뒤에 있으니 이 성장은 곧바로 새 판정이다
+        self.h.mark()  # baseline is past B, so this growth gets a fresh verdict right away
         self.assertEqual(len(self._grew_rows()), 1)
         got2 = due.due(self.h.key, "claude-code", "me3", now, home=self.h.home)
         self.assertIsNotNone(got2)
         self.assertEqual(got2.session_id, "cx1")
 
     def test_a_resume_that_starts_only_after_b_is_delivered_is_reactivated(self):
-        """리뷰(2차) #1 정확한 재현: A 는 B 이전에 전혀 안 자란다 — 딱 한 번,
-        B 가 이미 전달된 **뒤**에만 재개된다. 라운드1 픽스(성장 시점에만
-        superseded 를 흡수)는 이 경우 baseline 이 계속 B 앞에 남아 있어 이
-        유일한 재개까지 통째로 흡수해 버렸다 — mark 를 몇 번을 더 불러도
-        due() 가 영원히 None 이었다."""
+        """Review (round 2) #1 exact repro: A never grows at all before B —
+        it's resumed exactly once, only **after** B has already been
+        delivered. Round 1's fix (absorbing superseded only at growth time)
+        left the baseline stuck before B in this case, so it swallowed even
+        this one and only resume — calling mark any number of times more
+        left due() permanently None."""
         now = time.time()
         path_a = self._deliver(now, "A 세션 첫 턴")
         self.h.plant("cx-b", now - 100, human="B 세션 첫 턴")
 
-        self.h.mark()  # backfill(B) — 이 순간 A 는 아직 안 자랐다
+        self.h.mark()  # backfill(B) — A hasn't grown yet at this moment
         got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertEqual(got.session_id, "cx-b")
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
@@ -644,26 +659,27 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self.assertEqual(got2.session_id, "cx1")
 
     def test_t5_b_started_via_its_own_trusted_hook_still_rebaselines_a(self):
-        """리뷰(3차) #1, 재현 t5: B 가 백필이 아니라 **자기 자신의 신뢰된
-        Codex 훅**으로 직접 start 행을 남기면 `_backfill_foreign_sessions`
-        는 그 세션을 "이미 안다"고 보고 다시 안 채우므로(`fresh` 가 비어
-        있다), 백필 시점 재기준점(`_rebaseline_after_fresh_start`)이 전혀
-        안 돈다. 그래도 다음 Claude mark 의 지연(lazy) 재기준점(원장
-        `_reactivate_grown_sessions`)이 A 를 구해야 한다 — 성장 여부와
-        무관하게 낡은 baseline 을 B 뒤로 옮긴다."""
+        """Review (round 3) #1, repro t5: if B leaves its start row directly
+        via **its own trusted Codex hook** rather than backfill,
+        `_backfill_foreign_sessions` treats that session as "already known"
+        and doesn't fill it in again (`fresh` is empty), so the
+        backfill-time rebaseline (`_rebaseline_after_fresh_start`) never
+        runs at all. Even so, the next Claude mark's lazy rebaseline
+        (ledger's `_reactivate_grown_sessions`) must still rescue A —
+        moving the stale baseline past B regardless of whether it grew."""
         now = time.time()
         path_a = self._deliver(now, "A 세션 첫 턴")
 
-        # B 자신의 신뢰된 훅이 직접 start 행을 남긴다 — 백필이 아니다.
+        # B's own trusted hook leaves the start row directly — not a backfill.
         self.h.mark(harness="codex-cli", session_id="cx-b")
 
-        self.h.mark()  # Claude mark — B 를 알게 되고, A 의 baseline 을 지연 이동한다
+        self.h.mark()  # Claude mark — learns about B, lazily moves A's baseline
         got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "cx-b")
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
 
-        # 훅 없이(SessionStart 발동 없이) A 를 계속 타이핑한다.
+        # Keep typing into A with no hook (no SessionStart firing).
         self._append_human_turn(path_a, "훅 없이 A 를 계속 타이핑")
         for _ in range(3):
             self.h.mark()
@@ -673,11 +689,11 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self.assertEqual(got2.session_id, "cx1")
 
     def test_an_adapter_that_cannot_tell_never_gets_a_growth_row(self):
-        """리뷰 #2: `read_session_since` 가 (계약대로) 항상 None 을 돌려주는
-        어댑터(Claude, 아직 미구현)는 성장이 있어도 seen/grew 행을 하나도
-        안 남긴다 — 계약은 "이 어댑터는 구분할 수 없다"이지, "매번 재확인해
-        모르는 채로 seen 행만 쌓는다"가 아니다. 실측(고침 전): mark 4번 →
-        seen 4번."""
+        """Review #2: an adapter where `read_session_since` (per contract)
+        always returns None (Claude, not yet implemented) must leave no
+        seen/grew rows at all even if there's growth — the contract is "this
+        adapter can't tell", not "recheck every time and pile up seen rows
+        while still not knowing". Measured (before the fix): 4 marks → 4 seen rows."""
         now = time.time()
         fake_claude_path = os.path.join(self.h.home, "fake-claude-session.jsonl")
         with open(fake_claude_path, "w", encoding="utf-8") as fh:
@@ -697,11 +713,12 @@ class TestReactivateGrownSessions(unittest.TestCase):
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         claude_side = [r for r in rows if r.get("harness") == "claude-code"
                       and r.get("session") == "cl1"]
-        self.assertEqual(len(claude_side), 1, claude_side)  # 처음 심은 한 줄뿐
+        self.assertEqual(len(claude_side), 1, claude_side)  # only the one originally planted line
 
     def test_a_baseline_older_than_the_discover_window_is_still_reactivated(self):
-        """discover() 는 14일 창만 스캔하지만(SCAN_DAYS), 재개 감지는 원장에
-        이미 적힌 path 로만 stat 하므로 그보다 오래된 baseline 도 잡는다."""
+        """discover() only scans a 14-day window (SCAN_DAYS), but resume
+        detection stats only the path already in the ledger, so it catches
+        an older baseline too."""
         for days in (10, 20):
             with self.subTest(days=days):
                 h = Harness()
@@ -762,11 +779,12 @@ class TestReactivateGrownSessions(unittest.TestCase):
 
 @contextlib.contextmanager
 def _deadline_trips_after_first_stat(target_name):
-    """#28 리뷰 재현: `cli.<target_name>` 안에서 `os.stat` 이 처음 불린
-    **뒤부터** `time.time()` 이 deadline 을 훌쩍 넘긴 값을 돌려주게 만든다 —
-    그 함수를 호출하는 동안만(armed 는 그 함수 진입 전엔 절대 안 켜진다).
-    첫 세션의 stat 은 정상적으로 끝나고, 그다음 세션 처리 직전의 deadline
-    검사에서 걸려 `break` 하게 된다."""
+    """#28 review repro: makes `time.time()` return a value well past the
+    deadline **starting right after** the first `os.stat` call inside
+    `cli.<target_name>` — only while that function is running (armed is
+    never turned on before entering that function). The first session's
+    stat finishes normally, and it's the deadline check right before
+    processing the next session that trips and causes a `break`."""
     orig_fn = getattr(cli, target_name)
     orig_stat = os.stat
     orig_time = time.time
@@ -790,23 +808,27 @@ def _deadline_trips_after_first_stat(target_name):
 
 
 class TestRebaseMarker(unittest.TestCase):
-    """#28: backfill/지연 재기준 둘 다에서, 안 자란 다른 세션들은 개별 seen
-    행 대신 (repo, harness) 당 하나의 `rebase` 마커로 흡수한다."""
+    """#28: in both backfill and lazy rebaseline, other sessions that didn't
+    grow are absorbed into a single `rebase` marker per (repo, harness)
+    instead of individual seen rows."""
 
     def setUp(self):
         self.h = Harness()
         self.addCleanup(self.h.close)
-        # 마커 개수는 한 번의 판정을 끝까지 마쳤을 때만 센다. 훅 예산(80ms)을
-        # 실제 시계로 재면 부하가 큰 머신(load 7)에서 세션 60개 판정이 예산에
-        # 걸려 마커를 안 쓰고, 테스트가 3번 중 2번 실패했다. 예산 초과는
-        # _deadline_trips_after_first_stat 이 시계를 건너뛰어 따로 확인한다.
+        # The marker count is only meaningful once a verdict has run to
+        # completion. Timed with the real clock, the hook budget (80ms) got
+        # tripped judging 60 sessions on a loaded machine (load 7), no
+        # marker got written, and the test failed 2 out of 3 runs. The
+        # budget-exceeded case is checked separately, with
+        # _deadline_trips_after_first_stat skipping the clock ahead.
         patcher = mock.patch.object(cli, "BACKFILL_TIME_BUDGET", 60.0)
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def _seed_known_unchanged(self, n, base):
-        """이미 알려진, 이번 판정에서 안 자랄 세션 n 개를 원장에 직접 심는다
-        (실제 backfill 을 거치지 않고 "알려진 세션" 상태만 재현한다)."""
+        """Directly plants n already-known sessions that won't grow in this
+        verdict into the ledger (reproducing only the "known session" state
+        without going through a real backfill)."""
         sids = []
         for i in range(n):
             sid = "old{}".format(i)
@@ -820,9 +842,10 @@ class TestRebaseMarker(unittest.TestCase):
         return sids
 
     def test_twenty_unchanged_sessions_yield_markers_not_per_session_seen_rows(self):
-        """20 개(딱 REACTIVATE_SCAN_CAP) + 4 개가 새로 들어와도 여전히 라운드당
-        마커 하나, 개별 seen 행은 없다(#28 2차 리뷰: complete 는 cap 과
-        무관하다 — 아래 test_beyond_the_cap_* 이 cap 을 넘는 규모를 다룬다)."""
+        """Even with 20 (exactly REACTIVATE_SCAN_CAP) + 4 new sessions coming
+        in, still one marker per round, no individual seen rows (#28 review
+        round 2: complete is independent of the cap — the
+        test_beyond_the_cap_* tests below handle scale beyond the cap)."""
         now = time.time()
         self._seed_known_unchanged(20, now)
 
@@ -837,15 +860,15 @@ class TestRebaseMarker(unittest.TestCase):
                    and str(r.get("session", "")).startswith("old")]
         self.assertLessEqual(len(markers), 4, codex_rows)
         self.assertEqual(old_seen, [])
-        # 마커는 session/path 가 없다 — known_sessions·newest_start·log 랭크가
-        # 세션으로 착각하면 안 된다(#28).
+        # A marker has no session/path — known_sessions/newest_start/log
+        # ranking must never mistake it for a session (#28).
         for m in markers:
             self.assertNotIn("session", m)
             self.assertNotIn("path", m)
 
     def test_a_session_that_grew_before_b_still_gets_its_own_seen_row(self):
-        """애매한 사전 성장(B 전, agent 전용)은 여전히 자기 seen 행을 받는다
-        — 마커가 그 흡수를 대신 삼켜 위치를 잘못 앞당기면 안 된다."""
+        """Ambiguous pre-growth (before B, agent-only) still gets its own
+        seen row — the marker must not swallow it and falsely move its position up."""
         now = time.time()
         sids = self._seed_known_unchanged(3, now)
         grown_sid = sids[0]
@@ -853,10 +876,10 @@ class TestRebaseMarker(unittest.TestCase):
         for r in ledger.read(repo_key=self.h.key, home=self.h.home):
             if r.get("session") == grown_sid:
                 grown_path = r.get("path")
-        _repo.append_codex_turn(grown_path, ordinal=90)  # 순수 에이전트 셸 실행
+        _repo.append_codex_turn(grown_path, ordinal=90)  # pure agent shell execution
 
         self.h.plant("new-b", now - 500)
-        self.h.mark()  # backfill(B) 이 이 순간 old0 은 이미 자란 상태다
+        self.h.mark()  # backfill(B) — old0 has already grown at this moment
 
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
@@ -867,15 +890,15 @@ class TestRebaseMarker(unittest.TestCase):
         self.assertEqual(len(markers), 1, codex_rows)
 
     def test_lazy_path_writes_one_marker_under_a_trusted_hook_b(self):
-        """B 가 자기 자신의 신뢰된 훅으로 직접 들어오면(백필이 아니다) 지연
-        재기준(`_reactivate_grown_sessions`)이 돈다 — 안 자란 여러 A 를 한
-        번의 마커로 흡수하고, A 의 나중 human 턴은 여전히 재활성화된다."""
+        """If B arrives via its own trusted hook (not a backfill), the lazy
+        rebaseline (`_reactivate_grown_sessions`) runs — it absorbs several
+        non-growing A's into one marker, and A's later human turn is still reactivated."""
         now = time.time()
         sids = self._seed_known_unchanged(5, now)
 
-        self.h.mark(harness="codex-cli", session_id="new-b")  # B 자신의 신뢰된 훅
+        self.h.mark(harness="codex-cli", session_id="new-b")  # B's own trusted hook
 
-        self.h.mark()  # Claude mark — 지연 재기준이 5개의 A 를 한 마커로 흡수
+        self.h.mark()  # Claude mark — lazy rebaseline absorbs the 5 A's into one marker
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
         markers = [r for r in codex_rows if r.get("event") == cli.REBASE_EVENT]
@@ -884,8 +907,8 @@ class TestRebaseMarker(unittest.TestCase):
         self.assertEqual(len(markers), 1, codex_rows)
         self.assertEqual(old_seen, [])
 
-        # B(new-b) 를 전달한 뒤, A(=sids[0]) 의 사람 턴이 계속되면 여전히
-        # 재활성화된다.
+        # After B (new-b) is delivered, if A's (=sids[0]) human turn
+        # continues, it's still reactivated.
         got_b = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got_b)
         self.assertEqual(got_b.session_id, "new-b")
@@ -905,11 +928,13 @@ class TestRebaseMarker(unittest.TestCase):
         self.assertEqual(got.session_id, reactivated_sid)
 
     def test_beyond_the_cap_backfill_path_still_yields_one_marker_per_round(self):
-        """[리뷰 2차] `complete` 는 cap(`REACTIVATE_SCAN_CAP`) 초과와 무관하다
-        — 알려진 세션이 cap 을 훨씬 넘어도(top-N 만 후보이고 나머지는 애초에
-        손대지 않으므로) 라운드당 마커 하나, 확인된 세션엔 개별 seen 행이
-        없다. cap 을 `complete` 에 얹었던 1차 실수를 되돌리면 n=25/60 에서
-        HEAD 와 같은 행 폭증(측정: 84행/80 seen)이 재현된다."""
+        """[review round 2] `complete` is independent of exceeding the cap
+        (`REACTIVATE_SCAN_CAP`) — even when known sessions vastly exceed the
+        cap (only the top-N are candidates and the rest are never touched at
+        all), it's still one marker per round with no individual seen rows
+        for checked sessions. Reverting the round-1 mistake of tying the cap
+        to `complete` reproduces the same row explosion as HEAD at n=25/60
+        (measured: 84 rows/80 seen)."""
         for n in (cli.REACTIVATE_SCAN_CAP + 5, cli.REACTIVATE_SCAN_CAP + 40):
             with self.subTest(n=n):
                 h = Harness()
@@ -937,8 +962,7 @@ class TestRebaseMarker(unittest.TestCase):
                 self.assertEqual(old_seen, [], codex_rows)
 
     def test_beyond_the_cap_lazy_path_still_yields_one_marker_per_round(self):
-        """위와 같지만 B 가 매번 backfill 이 아니라 자기 자신의 신뢰된
-        훅으로 직접 들어오는 경우(지연 재기준 경로)."""
+        """Same as above, but B arrives each time via its own trusted hook rather than backfill (the lazy rebaseline path)."""
         for n in (cli.REACTIVATE_SCAN_CAP + 5, cli.REACTIVATE_SCAN_CAP + 40):
             with self.subTest(n=n):
                 h = Harness()
@@ -955,7 +979,7 @@ class TestRebaseMarker(unittest.TestCase):
 
                 for r in range(4):
                     h.mark(harness="codex-cli", session_id="new-b{}".format(r))
-                    h.mark()  # Claude mark — 지연 재기준
+                    h.mark()  # Claude mark — lazy rebaseline
 
                 rows = ledger.read(repo_key=h.key, home=h.home)
                 codex_rows = [row for row in rows if row.get("harness") == "codex-cli"]
@@ -966,15 +990,16 @@ class TestRebaseMarker(unittest.TestCase):
                 self.assertEqual(old_seen, [], codex_rows)
 
     def test_x_far_reentering_via_its_own_hook_is_not_falsely_reactivated(self):
-        """[리뷰 2차, "x-far" 재현] cap 밖에 있던 세션이 B 전에 이미 자란
-        채(사람 턴 포함) 마커에 확인된 적 없는데, 나중에 자기 신뢰된
-        훅으로(path 는 있지만 size 는 없는 새 start 행) 재진입해 이번
-        라운드의 top-N 안으로 들어와도, 마커가 그 애매한 사전 성장을 명확한
-        재개로 둔갑시키면 안 된다 — `marker_covers` 는 마커를 **쓸 당시**의
-        top-N 만 기억해야 한다(마커 이전 구간으로 슬라이스해 재구성)."""
+        """[review round 2, "x-far" repro] A session outside the cap already
+        grew before B (including a human turn) without ever being checked by
+        a marker; later it re-enters via its own trusted hook (a new start
+        row with a path but no size) and falls within this round's top-N —
+        the marker must not disguise that ambiguous pre-growth as a clear
+        resume — `marker_covers` must remember only the top-N **at the time
+        the marker was written** (reconstructed by slicing to the segment before the marker)."""
         now = time.time()
         n = cli.REACTIVATE_SCAN_CAP + 5
-        xfar_sid = "old0"  # 가장 먼저 심어 가장 오래된 것 — top-N(cap) 밖으로 밀린다
+        xfar_sid = "old0"  # planted first, so the oldest — pushed outside the top-N (cap)
         xfar_path = None
         for i in range(n):
             sid = "old{}".format(i)
@@ -986,28 +1011,28 @@ class TestRebaseMarker(unittest.TestCase):
                 "event": "start", "epoch": now - 100000 + i, "path": path,
                 "cwd": self.h.root, "via": "scan", "size": os.path.getsize(path),
             }, home=self.h.home)
-        # x-far 는 B 가 들어오기 전에 이미 사람 턴으로 자란다 — cap 밖이라
-        # 이번 라운드엔 확인되지 않는다.
+        # x-far already grew with a human turn before B arrives — it's
+        # outside the cap so it isn't checked in this round.
         with open(xfar_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(_repo.codex_user_row("B 전, cap 밖에서의 사전 성장",
                                                        ordinal=90),
                                 ensure_ascii=False) + "\n")
 
         self.h.plant("new-b", now - 500, human="B 세션 첫 턴")
-        self.h.mark()  # backfill(B) — top-N(cap) 안만 확인되고 마커가 찍힌다
+        self.h.mark()  # backfill(B) — only the top-N (cap) gets checked and a marker is written
 
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
         self.assertEqual(
             len([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT]), 1,
             codex_rows)
-        # x-far 는 이번 라운드에 확인되지 않았다 — 아무 행도 안 남는다.
+        # x-far was not checked this round — no row of any kind is left.
         self.assertEqual(
             [r for r in codex_rows if r.get("session") == xfar_sid
              and r.get("via") == "scan" and r is not codex_rows[0]], [])
 
-        # x-far 가 자기 신뢰된 훅으로 재진입한다 — path 는 진짜지만(같은
-        # rollout) size 는 없다(#28 2차 리뷰가 재현하는 정확한 모양).
+        # x-far re-enters via its own trusted hook — the path is real (same
+        # rollout) but there's no size (the exact shape #28's round-2 review reproduces).
         stdin = json.dumps({"cwd": self.h.root, "session_id": xfar_sid,
                             "transcript_path": xfar_path})
         args = cli.build_parser().parse_args(
@@ -1016,17 +1041,18 @@ class TestRebaseMarker(unittest.TestCase):
         code = cli.cmd_mark(args, home=self.h.home, out=out)
         self.assertEqual(code, 0)
 
-        self.h.mark()  # Claude mark — 지연 재기준이 이제 top-N 에 들어온 x-far 를 본다
+        self.h.mark()  # Claude mark — lazy rebaseline now sees x-far, which is inside the top-N
 
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
         xfar_grew = [r for r in codex_rows if r.get("session") == xfar_sid and r.get("grew")]
         self.assertEqual(xfar_grew, [], codex_rows)
 
-        # 진짜 더 최신 세션(C)이 들어오면 due() 는 여전히 그걸 돌려준다 —
-        # x-far 가 아니다. x-far 재진입 행의 epoch 는 그 mark 호출 시점의
-        # **실제** 시각(cmd_mark 가 round(time.time(),0) 을 쓴다)이라, C 도
-        # 그 뒤의 실제 시각으로 심어야 newest_start 필터에 안 걸린다.
+        # If a genuinely newer session (C) comes in, due() must still return
+        # it — not x-far. x-far's re-entry row's epoch is the **real** wall
+        # clock time at that mark call (cmd_mark uses round(time.time(),0)),
+        # so C also has to be planted with a real later time to avoid
+        # tripping the newest_start filter.
         after_reentry = time.time()
         self.h.plant("new-c", after_reentry + 10, human="C 세션 첫 턴")
         self.h.mark()
@@ -1035,8 +1061,8 @@ class TestRebaseMarker(unittest.TestCase):
         self.assertEqual(got.session_id, "new-c")
 
     def _seed_two_known(self, now, grown_sid_human_turn):
-        """a-stale(B 전에 이미 사람 턴으로 자람) 와 a-unch(안 자람) 를
-        원장에 심는다 — 아래 세 리뷰 재현이 공유하는 준비 단계."""
+        """Plants a-stale (already grown with a human turn before B) and
+        a-unch (unchanged) into the ledger — the shared setup step for the three review repros below."""
         path_stale = self.h.plant("a-stale", now - 5000, human="원래 턴")
         ledger.append({
             "repo": self.h.key, "harness": "codex-cli", "session": "a-stale",
@@ -1056,53 +1082,54 @@ class TestRebaseMarker(unittest.TestCase):
         return path_stale, path_unch
 
     def test_deadline_trip_mid_backfill_rebaseline_does_not_mark_unverified_session(self):
-        """[high, 리뷰 재현] 마커는 하네스 전체("이 하네스의 알려진 세션
-        전부가 안 자란 채 확인됐다")에 적용된다 — deadline 이 a-unch 만
-        확인한 채 a-stale(B 전에 이미 자람) 을 못 보고 끊으면, a-unch 만
-        가지고 마커를 찍으면 안 된다. 안 그러면 다음 라운드에 a-stale 이
-        마커 뒤로 잘못 밀려 애매한 사전 성장이 명확한 재개로 오판되고, due()
-        가 B 대신 a-stale 을 돌려준다."""
+        """[high, review repro] A marker applies to the whole harness ("every
+        known session for this harness was checked and didn't grow") — if
+        the deadline cuts things off after checking only a-unch, never
+        seeing a-stale (already grown before B), a marker must not be
+        written based on a-unch alone. Otherwise, on the next round a-stale
+        would be wrongly pushed behind the marker, its ambiguous pre-growth
+        misjudged as a clear resume, and due() would return a-stale instead of B."""
         now = time.time()
         self._seed_two_known(now, grown_sid_human_turn=True)
         self.h.plant("new-b", now - 100, human="B 세션 첫 턴")
 
         with _deadline_trips_after_first_stat("_rebaseline_after_fresh_start"):
-            self.h.mark()  # backfill(B) — a-unch 만 확인되고 a-stale 은 못 본다
+            self.h.mark()  # backfill(B) — only a-unch gets checked, a-stale is never seen
 
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
         self.assertEqual([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT],
-                         [], "전수 확인이 아니었으니 마커를 찍으면 안 된다")
+                         [], "must not write a marker without an exhaustive check")
 
-        self.h.mark()  # 정상 라운드 — a-stale 의 사전 성장은 흡수돼야지 재개가 아니다
+        self.h.mark()  # a normal round — a-stale's pre-growth should be absorbed, not treated as a resume
         got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "new-b")
 
     def test_deadline_trip_mid_lazy_reactivate_does_not_mark_unverified_session(self):
-        """[high, 리뷰 재현] 위와 같은 재현을 지연(lazy) 경로에서 — B 가
-        백필이 아니라 자기 자신의 신뢰된 훅으로 들어온 경우."""
+        """[high, review repro] Same repro as above on the lazy path — where
+        B arrives via its own trusted hook rather than backfill."""
         now = time.time()
         self._seed_two_known(now, grown_sid_human_turn=True)
-        self.h.mark(harness="codex-cli", session_id="new-b")  # B 자신의 신뢰된 훅
+        self.h.mark(harness="codex-cli", session_id="new-b")  # B's own trusted hook
 
         with _deadline_trips_after_first_stat("_reactivate_grown_sessions"):
-            self.h.mark()  # Claude mark — 지연 재기준, a-unch 만 확인되고 끊긴다
+            self.h.mark()  # Claude mark — lazy rebaseline, cut off after only checking a-unch
 
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
         self.assertEqual([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT],
-                         [], "전수 확인이 아니었으니 마커를 찍으면 안 된다")
+                         [], "must not write a marker without an exhaustive check")
 
         got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "new-b")
 
     def test_transient_stat_error_on_one_session_does_not_mark_the_others(self):
-        """[medium, 리뷰 재현] a-stale 의 stat 이 일시적으로 실패해도(예:
-        PermissionError) a-unch 가 안 자란 것으로 확인됐다는 이유만으로
-        마커를 찍으면 안 된다 — 확인 못 한 a-stale 에도 그 마커가 똑같이
-        적용되기 때문이다."""
+        """[medium, review repro] Even if a-stale's stat fails transiently
+        (e.g. PermissionError), a marker must not be written just because
+        a-unch was confirmed unchanged — that marker would apply equally to
+        the a-stale that was never checked."""
         now = time.time()
         path_stale, _ = self._seed_two_known(now, grown_sid_human_turn=True)
         self.h.plant("new-b", now - 100, human="B 세션 첫 턴")
@@ -1120,20 +1147,21 @@ class TestRebaseMarker(unittest.TestCase):
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
         self.assertEqual([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT],
-                         [], "a-stale 을 확인 못 했으니 마커를 찍으면 안 된다")
+                         [], "must not write a marker when a-stale could not be checked")
 
-        self.h.mark()  # stat 이 다시 정상 — a-stale 의 사전 성장은 흡수된다
+        self.h.mark()  # stat is back to normal — a-stale's pre-growth is absorbed
         got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "new-b")
 
 
 class TestLiveContinueWithoutASessionStart(unittest.TestCase):
-    """#22 새로 발견된 두 번째 구멍: A 를 핸드오프한 뒤 사람이 **살아 있는**
-    Codex 세션 A 에 계속 타이핑하다가 새 Claude 세션으로 옮기면, 그 Claude
-    세션의 SessionStart 는 있지만(mark 는 돈다) A 쪽 SessionStart 는 전혀
-    없다 — 그래도 성장 감지 + read_session_since 가 잡아야 한다(그 mark 가
-    스캔 대상으로 codex-cli 세션을 다시 stat 하므로 Codex 훅과 무관하다)."""
+    """#22's newly discovered second hole: after A is handed off, if the
+    human keeps typing into the **still-alive** Codex session A and then
+    switches to a new Claude session, that Claude session's SessionStart
+    fires (mark runs) but A's SessionStart never fires at all — growth
+    detection + read_session_since must still catch it (that mark re-stats
+    codex-cli sessions as scan targets, independent of the Codex hook)."""
 
     def setUp(self):
         self.h = Harness()
@@ -1141,20 +1169,20 @@ class TestLiveContinueWithoutASessionStart(unittest.TestCase):
 
     def test_live_continue_is_delivered_to_a_new_claude_session(self):
         now = time.time()
-        path = self.h.plant("cx1", now - 600, human="첫 턴")
+        path = self.h.plant("cx1", now - 600, human="첫 턴")  # first turn
         self.h.mark(session_id="me1")
         got = due.due(self.h.key, "claude-code", "me1", now, home=self.h.home)
         self.assertIsNotNone(got)
         due.mark_delivered(self.h.state, got, to_harness="claude-code", epoch=now)
 
-        # 사람이 살아 있는 Codex 세션 A 에 계속 타이핑한다 — Codex 쪽
-        # SessionStart 는 전혀 없다.
+        # The human keeps typing into the still-alive Codex session A — the
+        # Codex side never fires SessionStart at all.
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(_repo.codex_user_row("A 에서 계속 타이핑",
                                                       ordinal=90),
                                 ensure_ascii=False) + "\n")
 
-        # 새 Claude 세션의 SessionStart 만 발동한다.
+        # Only the new Claude session's SessionStart fires.
         code, _ = self.h.mark(session_id="me2")
         self.assertEqual(code, 0)
         got = due.due(self.h.key, "claude-code", "me2", now, home=self.h.home)
@@ -1163,8 +1191,8 @@ class TestLiveContinueWithoutASessionStart(unittest.TestCase):
 
 
 class TestCompactSessionStart(unittest.TestCase):
-    """#30: 자동 압축 뒤 같은 세션에서 SessionStart(source=compact) 가 다시
-    발화한다. 이미 원장에 있는 세션이면 start 행을 또 남기지 않는다."""
+    """#30: after auto-compaction, SessionStart(source=compact) fires again
+    in the same session. If the session is already in the ledger, it must not leave another start row."""
 
     def setUp(self):
         self.h = Harness()
@@ -1182,13 +1210,14 @@ class TestCompactSessionStart(unittest.TestCase):
         self.assertEqual(len(self._starts("codex-cli", "cx1")), 1)
 
     def test_compact_for_an_unknown_session_is_still_recorded(self):
-        """startup 을 놓친 세션(도중에 설치)이면 compact 가 첫 기록이다."""
+        """For a session that missed startup (installed midway), compact is the first record."""
         self.h.mark(harness="codex-cli", session_id="cx9", source="compact")
         self.assertEqual(len(self._starts("codex-cli", "cx9")), 1)
 
     def test_compact_refreshes_age_for_a_long_lived_session(self):
-        """due() 는 가장 최근 start 행으로 나이를 잰다. 며칠째 쓰는 세션이
-        compact 만 반복해도 MAX_AGE 를 넘겨 빠지면 안 된다(#30 리뷰)."""
+        """due() judges age by the most recent start row. A session used
+        over multiple days must not drop out past MAX_AGE just because it
+        only ever repeats compact (#30 review)."""
         old = time.time() - 8 * 86400
         ledger.append({"repo": self.h.key, "harness": "claude-code",
                        "session": "cc1", "event": "start", "epoch": old,
@@ -1197,7 +1226,7 @@ class TestCompactSessionStart(unittest.TestCase):
         self.assertEqual(len(self._starts("claude-code", "cc1")), 2)
 
     def test_a_scan_row_alone_does_not_suppress_the_hook_row(self):
-        """backfill 이 대신 적은 행만 있으면 훅이 돈 증거를 남긴다."""
+        """If there's only a row backfill left in its place, it must leave evidence that the hook ran."""
         ledger.append({"repo": self.h.key, "harness": "codex-cli",
                        "session": "cx2", "event": "start", "epoch": time.time(),
                        "path": "", "cwd": self.h.root, "via": "scan"},
@@ -1214,10 +1243,10 @@ class TestCompactSessionStart(unittest.TestCase):
 
 
 class TestOnSessionStartMarkCli(unittest.TestCase):
-    """#36: `omhc mark` 가 startup/resume 에서 "이미 읽힌" AGENTS.md 블록을
-    붕괴시켜 다음 Codex 세션이 못 읽게 한다 — 어댑터 선택 메서드가 cmd_mark
-    를 거쳐 실제로 불리는 것까지 확인한다(단위 테스트는 test_codex_cli.py
-    ::TestOnSessionStartMark)."""
+    """#36: `omhc mark` collapses an "already read" AGENTS.md block on
+    startup/resume so the next Codex session can't read it — checks that the
+    adapter's optional method actually gets called through cmd_mark (the
+    unit test is test_codex_cli.py::TestOnSessionStartMark)."""
 
     def setUp(self):
         self.h = Harness()
@@ -1237,9 +1266,9 @@ class TestOnSessionStartMarkCli(unittest.TestCase):
         self.assertIsNone(self._captured_at())
 
     def test_old_block_is_kept_on_codex_resume_mark(self):
-        """리뷰 #2: "훅보다 먼저 읽는다"는 순서는 startup 에서만 실측했다 —
-        resume 에서 Codex 가 AGENTS.md diff 를 언제 계산하는지는 모르므로
-        resume 은 붕괴시키지 않는다."""
+        """Review #2: the "reads before the hook" ordering was only measured
+        on startup — since it's unknown when Codex computes the AGENTS.md
+        diff on resume, resume never collapses the block."""
         from omhc import agents_md, managed_block
 
         managed_block.splice(agents_md.path_for(self.h.root), "[omhc] old\n",
@@ -1248,8 +1277,9 @@ class TestOnSessionStartMarkCli(unittest.TestCase):
         self.assertIsNotNone(self._captured_at())
 
     def test_block_written_by_this_same_burst_is_kept(self):
-        """brief(Path B) 가 병렬로 이 세션 몫을 방금 썼다고 흉내낸다 — mark
-        가 그걸 "낡은 블록"으로 오인해 지우면 이 세션조차 못 읽는다."""
+        """Mimics brief (Path B) having just written this session's share of
+        the block in parallel — if mark mistook it for a "stale block" and
+        wiped it, even this session couldn't read it."""
         from omhc import agents_md, managed_block
 
         managed_block.splice(agents_md.path_for(self.h.root), "[omhc] just written\n",

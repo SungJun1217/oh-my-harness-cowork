@@ -18,7 +18,7 @@ NOW = 1758500000.0
 
 
 class Harness:
-    """임시 홈 + 임시 레포. 세션 심기는 tests/_repo.plant_codex 가 소유한다."""
+    """Temp home + temp repo. Planting sessions is owned by tests/_repo.plant_codex."""
 
     def __init__(self):
         self.t = _repo.TempRepo()
@@ -66,9 +66,9 @@ class TestCompute(unittest.TestCase):
         self.assertEqual(body, "")
 
     def test_a_subagent_codex_session_never_becomes_a_handoff(self):
-        """부모 에이전트의 프롬프트가 사람의 말로 둔갑해 GOAL/NEXT 가 되면 안 된다
-        (invariant 3). ref_for_path 와 list_sessions 폴백 둘 다 걸러야 due 가
-        빈 몸으로 돌아온다."""
+        """A parent agent's prompt must never disguise itself as a human's
+        words and become GOAL/NEXT (invariant 3). Both ref_for_path and the
+        list_sessions fallback must filter it out for due() to come back empty."""
         self.h.t.plant_codex(
             session_id="sub1", human="부모 에이전트가 시킨 일",
             ledger_home=self.h.home, when=NOW,
@@ -80,9 +80,10 @@ class TestCompute(unittest.TestCase):
         self.assertEqual(body, "")
 
     def test_an_applecider_templated_turn_never_reaches_goal(self):
-        """originator=applecider 는 source=vscode 라 서브에이전트 표식이 없다.
+        """originator=applecider has source=vscode, so there's no subagent marker.
 
-        걸러지지 않으면 앱서버가 채운 기계 템플릿이 사람의 GOAL 로 둔갑한다.
+        If not filtered out, the app server's machine-filled template gets
+        disguised as the human's GOAL.
         """
         self.h.t.plant_codex(
             session_id="app1",
@@ -95,7 +96,7 @@ class TestCompute(unittest.TestCase):
         self.assertEqual(body, "")
 
     def test_second_call_in_the_same_session_yields_empty(self):
-        """SessionStart 훅은 한 세션에서 여러 번 발동한다."""
+        """The SessionStart hook fires multiple times within one session."""
         self.h.plant_codex_session()
         first = brief.compute(my_harness="claude-code", my_session_id="me1",
                               repo_root=self.h.repo_root, home=self.h.home, now=NOW)
@@ -118,14 +119,15 @@ class TestCompute(unittest.TestCase):
                       repo_root=self.h.repo_root, home=self.h.home, now=NOW)
         pinned = os.path.join(self.h.state, "pinned", "cx1", "source.jsonl")
         idx = os.path.join(self.h.state, "index", "cx1.idx")
-        self.assertTrue(os.path.exists(pinned), "하드링크가 없다")
+        self.assertTrue(os.path.exists(pinned), "no hardlink")
         self.assertEqual(os.stat(path).st_ino, os.stat(pinned).st_ino)
-        self.assertTrue(os.path.exists(idx), "색인이 없다")
+        self.assertTrue(os.path.exists(idx), "no index")
 
     def test_pin_failure_is_logged_but_the_hook_still_succeeds(self):
-        """리뷰 결함: pin 실패를 조용히 넘기면 `omhc status` 의 archive 행이
-        아무 흔적 없이 거짓 PASS 를 낸다. 훅 경로(invariant 2)이므로 로그만
-        남기고 exit 0/핸드오프 본문은 그대로여야 한다."""
+        """Review defect: silently swallowing a pin failure leaves `omhc
+        status`'s archive row falsely PASS-ing with no trace. Since this is
+        the hook path (invariant 2), only a log should be left — exit 0 and
+        the handoff body must stay unaffected."""
         self.h.plant_codex_session()
         broken = pin.PinResult(None, False, 0, "mocked pin failure")
         stdin = json.dumps({"session_id": "me1", "cwd": self.h.repo_root})
@@ -152,7 +154,7 @@ class TestCompute(unittest.TestCase):
         self.assertIn("source of truth", body)
 
     def test_old_stamped_notes_expire_but_legacy_lines_stay(self):
-        """#36: 7일이 지난 메모는 핸드오프에 붙지 않는다. 시각 없는 옛 줄은 남는다."""
+        """#36: a note older than 7 days doesn't ride along in the handoff. Legacy timestampless lines still stay."""
         from omhc import due
         self.h.plant_codex_session()
         os.makedirs(self.h.state, exist_ok=True)
@@ -169,7 +171,7 @@ class TestCompute(unittest.TestCase):
         self.assertNotIn("\t", body)
 
     def test_omhc_note_writes_a_stamp_that_the_reader_expires(self):
-        """쓰는 쪽과 읽는 쪽이 같은 형식을 쓰는지 고정한다(리뷰)."""
+        """Pins down that the writer and reader agree on the same format (review)."""
         import time as _time
         from omhc import cli, due
         cwd = os.getcwd()
@@ -196,7 +198,7 @@ class TestCompute(unittest.TestCase):
 
 
 class TestEligibilityAtBriefTime(unittest.TestCase):
-    """사람이 대화한 세션인지는 brief 시점에 어댑터가 판정한다(#21)."""
+    """Whether a session was a human conversation is judged by the adapter at brief time (#21)."""
 
     EXEC = {"source": "exec", "originator": "codex_exec"}
 
@@ -229,8 +231,10 @@ class TestEligibilityAtBriefTime(unittest.TestCase):
         self.assertNotIn("exec 가 받은 프롬프트", body)
 
     def test_a_newer_session_whose_file_is_gone_stops_the_search(self):
-        """사라진 파일은 헤드리스가 아니다. 건너뛰면 사용자가 이어서 작업한 세션을
-        두고 그 전날 세션이 방금 일처럼 나간다 — 낡은 표식은 없는 표식보다 나쁘다."""
+        """A vanished file is not evidence of headless. Skipping past it would
+        surface the previous day's session as if it just happened, instead
+        of the one the user actually continued — a stale handoff is worse
+        than none."""
         self.h.t.plant_codex(session_id="cx1", human="월요일에 하던 옛 작업",
                              ledger_home=self.h.home, when=NOW)
         cx2 = self.h.t.plant_codex(session_id="cx2", human="화요일에 이어서 한 작업",
@@ -239,8 +243,9 @@ class TestEligibilityAtBriefTime(unittest.TestCase):
         self.assertEqual(self.compute(), "")
 
     def test_a_newer_session_in_an_unknown_shape_stops_the_search(self):
-        """빈 파일이나 포맷이 바뀐 rollout 은 헤드리스라는 증거가 아니다. 건너뛰면
-        포맷이 바뀐 날부터 새 세션이 전부 건너뛰어지고 낡은 세션이 나간다
+        """An empty file or a rollout in a changed format is not evidence of
+        headless. Skipping past it would skip every new session from the
+        day the format changed onward and surface a stale one instead
         (invariant 7: fail open)."""
         for content in ("", '{"type": "session_start_v2", "payload": {}}\n'):
             with self.subTest(content=content):
@@ -275,7 +280,7 @@ class TestEligibilityAtBriefTime(unittest.TestCase):
         self.assertIn("exec 가 받은 프롬프트", self.compute())
 
     def test_mark_records_no_verdict_even_before_the_rollout_exists(self):
-        """rollout 이 mark 시점에 아직 없어도 원장에 비대화형으로 굳지 않는다."""
+        """Even if the rollout doesn't exist yet at mark time, it must not be locked in as non-interactive in the ledger."""
         from omhc import cli
         path = os.path.join(self.h.home, ".codex", "sessions", "rollout-cx1.jsonl")
         stdin = json.dumps({"cwd": self.h.repo_root, "session_id": "cx1",
@@ -288,7 +293,7 @@ class TestEligibilityAtBriefTime(unittest.TestCase):
 
 
 class TestRunHostileInputs(unittest.TestCase):
-    """스펙 §16-5: 적대적 입력 5종에서 빈 stdout + exit 0."""
+    """Spec §16-5: empty stdout + exit 0 across 5 kinds of adversarial input."""
 
     def setUp(self):
         self.h = Harness()
@@ -350,10 +355,11 @@ class TestRunHostileInputs(unittest.TestCase):
         self.assertEqual((code, text), (0, ""))
 
     def test_refused_root_yields_empty_stdout_and_exit_0(self):
-        """비어 있지 않아야 의미가 있다 — repo_key("/") 로 실제 세션을 심어,
-        거부가 없었다면 compute() 가 진짜 핸드오프를 만들었을 상황을 재현한다.
-        원장에 아무것도 없어 무조건 빈 손인 상태에서는 이 테스트가 거부
-        분기를 지우고도 통과한다(리뷰 결함)."""
+        """Meaningless unless non-empty — plant a real session under repo_key("/")
+        to reproduce the situation where compute() would have made a real
+        handoff had the refusal not happened. With nothing at all in the
+        ledger, this test would still pass with the refusal branch deleted
+        (review defect)."""
         self.h.t.plant_codex(cwd="/", session_id="cx-root",
                              human="루트 세션은 절대 새면 안 된다",
                              ledger_home=self.h.home, when=NOW)
@@ -420,8 +426,9 @@ class TestRunWireShape(unittest.TestCase):
 
 
 class TestDryRun(unittest.TestCase):
-    """--dry-run 은 본문만 보이고 아무것도 쓰지 않는다(#17). 한 번의 수동 확인이
-    그 세션의 전달을 소비하면 다음 실제 SessionStart 에 아무것도 가지 않는다."""
+    """--dry-run shows the body only and writes nothing (#17). If one manual
+    check consumed that session's delivery, the next real SessionStart would
+    get nothing."""
 
     def setUp(self):
         self.h = Harness()
@@ -464,8 +471,7 @@ class TestDryRun(unittest.TestCase):
         self.assertIn("[omhc]", payload["hookSpecificOutput"]["additionalContext"])
 
     def test_dry_run_works_without_a_session_id(self):
-        """수동 호출에는 훅 payload 가 없다. 게이트를 쓰지 않으므로 세션 id 도
-        필요 없다."""
+        """A manual call has no hook payload. Since the gate isn't used, no session id is needed either."""
         self.h.plant_codex_session()
         out = io.StringIO()
         brief.emit(harness="claude-code", dry_run=True,
@@ -474,11 +480,13 @@ class TestDryRun(unittest.TestCase):
         self.assertTrue(out.getvalue().startswith("[omhc]"))
 
     def test_dry_run_with_an_open_non_tty_stdin_does_not_hang(self):
-        """`omhc brief --dry-run` 이 stdin 이 TTY 가 아닌 채 열려 있으면(파이프의
-        다른 쪽 끝이 열려만 있고 아무것도 안 씀) 멈추면 안 된다(#27 부수 발견).
-        --stdin 을 명시하지 않은 dry-run 은 stdin 을 아예 읽지 않아야 한다."""
-        # 실제 프로세스라 brief 가 진짜 time.time() 을 쓴다 — NOW 상수는 고정된
-        # 과거 시각이라 too-old 필터에 걸린다. 여기서만 실제 현재 시각을 심는다.
+        """`omhc brief --dry-run` must not hang when stdin is open but not a
+        TTY (the other end of a pipe stays open and writes nothing) (#27
+        side discovery). A dry-run with no explicit --stdin must not read
+        stdin at all."""
+        # A real process, so brief uses the real time.time() — the NOW
+        # constant is a fixed past time and would trip the too-old filter.
+        # Only here do we plant with the real current time.
         self.h.t.plant_codex(session_id="cx1", human="필드 경로부터 다시 확인해줘",
                              ledger_home=self.h.home, when=time.time())
         from tests._repo import REPO
@@ -498,15 +506,15 @@ class TestDryRun(unittest.TestCase):
         self.assertIn("[omhc]", proc.stdout)
 
     def test_dry_run_reads_a_piped_payload_from_a_different_cwd(self):
-        """리뷰(#27 라운드 1): 문서화된 쓰임 하나가 다른 cwd 에서 payload 를
-        파이프로 넘기는 것이다(`echo '{"cwd": R}' | omhc brief --dry-run`).
-        stdin 을 아예 안 읽으면 이 쓰임이 깨진다 — 여기서는 실제로 읽어야 한다."""
+        """Review (#27 round 1): one documented use is piping the payload from
+        a different cwd (`echo '{"cwd": R}' | omhc brief --dry-run`). Never
+        reading stdin at all would break this use — here it must actually read."""
         self.h.t.plant_codex(session_id="cx1", human="필드 경로부터 다시 확인해줘",
                              ledger_home=self.h.home, when=time.time())
         from tests._repo import REPO
         r_fd, w_fd = os.pipe()
         os.write(w_fd, json.dumps({"cwd": self.h.repo_root}).encode("utf-8"))
-        os.close(w_fd)  # echo 처럼 보내고 바로 닫는다 — EOF.
+        os.close(w_fd)  # send like echo and close right away — EOF.
         try:
             proc = subprocess.run(
                 [os.path.join(REPO, "bin", "omhc"), "brief",
@@ -521,8 +529,9 @@ class TestDryRun(unittest.TestCase):
         self.assertIn("[omhc]", proc.stdout)
 
     def test_dry_run_returns_after_a_write_even_if_the_pipe_stays_open(self):
-        """쓰개가 한 줄 보내고 파이프를 계속 열어 두는 경우(#27 리뷰) — EOF 는
-        안 오지만 다음 데이터도 안 오므로 타임아웃 안에 멈춰야 한다."""
+        """The case where the writer sends one line and keeps the pipe open
+        (#27 review) — no EOF arrives, but no more data arrives either, so
+        it must stop within the timeout."""
         self.h.t.plant_codex(session_id="cx1", human="필드 경로부터 다시 확인해줘",
                              ledger_home=self.h.home, when=time.time())
         from tests._repo import REPO
@@ -558,7 +567,7 @@ class TestDryRun(unittest.TestCase):
 
 
 class TestReopenRedeliveryGuard(unittest.TestCase):
-    """#27: reopen 은 힌트일 뿐이다 — 새 사람 턴이 실제로 있어야 다시 보낸다."""
+    """#27: reopen is only a hint — a new human turn must actually exist before resending."""
 
     def setUp(self):
         self.h = Harness()
@@ -574,8 +583,9 @@ class TestReopenRedeliveryGuard(unittest.TestCase):
         return path
 
     def test_empty_prompt_resume_yields_empty(self):
-        """`codex exec resume <id> ""` — rollout 에 `"text": ""` 인 user 메시지만
-        붙는다(실측). 새 사람 턴이 아니므로 다시 보내면 안 된다."""
+        """`codex exec resume <id> ""` — only a user message with `"text": ""`
+        gets appended to the rollout (measured). Not a new human turn, so it
+        must not be resent."""
         path = self._deliver_once()
         due.mark_reopened(self.h.state, "cx1", "codex-cli", NOW + 10)
         from tests._repo import append_codex_user_turn
@@ -594,8 +604,9 @@ class TestReopenRedeliveryGuard(unittest.TestCase):
         self.assertIn("이어서 로그 포맷도 고쳐줘", again)
 
     def test_race_delivery_then_reopen_with_no_new_turn_yields_empty(self):
-        """mark 와 brief 의 동시 실행 경합(실측): brief 가 전달한 바로 그 초에
-        mark 의 성장 판정이 이미 전달된 턴을 보고 reopen 을 그 뒤에 붙인다."""
+        """A measured mark/brief concurrency race: in the exact same second
+        brief delivers, mark's growth check sees the just-delivered turn and
+        appends a reopen right after it."""
         self._deliver_once()
         due.mark_reopened(self.h.state, "cx1", "codex-cli", NOW + 1)
         again = brief.compute(my_harness="claude-code", my_session_id="me2",
@@ -603,8 +614,8 @@ class TestReopenRedeliveryGuard(unittest.TestCase):
         self.assertEqual(again, "")
 
     def test_legacy_four_column_delivery_is_still_redelivered(self):
-        """옛 4열 delivered 줄(offset 없음) 뒤 reopen 은 오늘까지의 동작 그대로
-        — offset 을 모르면 조건 없이 다시 보낸다."""
+        """A reopen after a legacy 4-column delivered line (no offset) keeps
+        today's behavior as-is — with no known offset, resend unconditionally."""
         path = self.h.plant_codex_session()
         wm = due.Watermark(repo_key=self.h.key, harness="codex-cli", session_id="cx1",
                            path=path, event="start", epoch=NOW - 600)
@@ -637,8 +648,9 @@ class TestDeliver(unittest.TestCase):
                              to_adapter_id=to)
 
     def test_same_vendor_produces_no_handoff(self):
-        """F5 는 mint 가 한 곳에서 처리한다 — 같은 규칙을 두 모듈에 두면
-        한쪽만 바뀐다. deliver 에 중복 선언이 있었고 테스트만 그것을 썼다."""
+        """F5 is handled by mint alone — keeping the same rule in two modules
+        means only one gets updated. deliver had a duplicate declaration and
+        only the test exercised it."""
         self.h.plant_codex_session()
         body = brief.compute(my_harness="codex-cli", my_session_id="me1",
                              repo_root=self.h.repo_root, home=self.h.home, now=NOW)
@@ -664,8 +676,8 @@ class TestDeliver(unittest.TestCase):
             self.assertIn("because", fh.read())
 
     def test_file_drop_header_carries_a_readable_utc_stamp_next_to_the_epoch(self):
-        """#36: 본문의 상대 나이("3m ago")는 mint 시점에 얼어붙는다 — 헤더에
-        절대시각이 있어야 나중에 읽는 사람이 그게 낡았는지 가늠할 수 있다."""
+        """#36: the body's relative age ("3m ago") freezes at mint time — the
+        header needs an absolute timestamp so a later reader can judge whether it's stale."""
         receipt = deliver.file_drop(self.bundle(), "because", now=NOW)
         with open(receipt.paths_written[0], encoding="utf-8") as fh:
             header = fh.readline()
@@ -673,8 +685,8 @@ class TestDeliver(unittest.TestCase):
         self.assertIn("captured_utc=\"2025-09-22T", header)
 
     def test_file_drop_neutralizes_a_comment_terminator_in_why(self):
-        """리뷰 #3: `why` 에 `-->` 가 섞이면 주석이 거기서 끝나고 그 뒤의
-        captured=/captured_utc= 가 본문으로 새 버린다."""
+        """Review #3: if `why` contains `-->`, the comment ends there and the
+        following captured=/captured_utc= leaks into the body."""
         receipt = deliver.file_drop(
             self.bundle(), "boom --> <script>evil</script>", now=NOW)
         with open(receipt.paths_written[0], encoding="utf-8") as fh:
@@ -700,8 +712,8 @@ class TestDeliver(unittest.TestCase):
         self.assertEqual(text.count(".omhc/"), 1)
 
     def test_file_drop_registers_a_pre_existing_omhc_dir_too(self):
-        """리뷰 #1: 예전엔 `.omhc/` 를 새로 만들 때만 등재를 시도해서, 이미
-        outbox 가 있던 기존 사용자는 영영 등재되지 않았다."""
+        """Review #1: it used to only try registering when `.omhc/` was newly
+        created, so an existing user who already had an outbox never got registered."""
         os.makedirs(os.path.join(self.h.repo_root, deliver.OUTBOX_DIR), exist_ok=True)
         deliver.file_drop(self.bundle(), "because", now=NOW)
         exclude_path = os.path.join(self.h.repo_root, ".git", "info", "exclude")
@@ -709,8 +721,8 @@ class TestDeliver(unittest.TestCase):
             self.assertIn(".omhc/", fh.read())
 
     def test_second_drop_does_not_spawn_a_subprocess_once_excluded(self):
-        """리뷰 #1: 이미 등재됐으면 `.git/info/exclude` 파일 한 번 읽는 것만으로
-        끝나야 한다 — git check-ignore subprocess 를 또 부르면 안 된다."""
+        """Review #1: once already registered, reading `.git/info/exclude`
+        once must be enough — must not spawn a git check-ignore subprocess again."""
         deliver.file_drop(self.bundle(), "first", now=NOW)
         with mock.patch("subprocess.run") as run:
             deliver.file_drop(self.bundle(), "second", now=NOW + 1)
@@ -776,8 +788,8 @@ if __name__ == "__main__":
 
 
 class TestWireFormat(unittest.TestCase):
-    """세 형식을 동시에 내보내면 Claude Code 가 중복 제거 없이 둘 다 읽어 두 번
-    주입된다 — 설치된 superpowers 훅의 주석에서 확인한 사실이다."""
+    """Emitting all three formats at once means Claude Code reads both with
+    no deduplication and injects twice — confirmed from a comment in an installed superpowers hook."""
 
     def test_claude_wire_is_nested_only(self):
         payload = json.loads(brief.hook_wire("x", "claude"))
@@ -798,11 +810,12 @@ class TestWireFormat(unittest.TestCase):
             self.assertEqual(len(payload), 1, wire)
 
     def test_codex_cli_wire_is_the_nested_shape(self):
-        """실측(codex-cli 0.155.1): 최상위 additionalContext 는 거부되고 아무것도
+        """Measured (codex-cli 0.155.1): a top-level additionalContext is
 
-        주입되지 않는다. hookSpecificOutput 중첩 형식만 rollout 에 실제로 나타난다
-        (content_item_kinds=["hooks.additional_context"]). 어댑터가 다시 "sdk" 로
-        회귀하면 이 테스트가 조용히 깨지지 않고 실패해야 한다.
+        rejected and nothing is injected. Only the nested hookSpecificOutput
+        shape actually shows up in the rollout
+        (content_item_kinds=["hooks.additional_context"]). If the adapter
+        regresses back to "sdk", this test must fail loudly, not break silently.
         """
         from omhc import adapters
 
@@ -815,10 +828,11 @@ class TestWireFormat(unittest.TestCase):
         self.assertEqual(payload["hookSpecificOutput"]["additionalContext"], "x")
 
     def test_every_adapter_declares_its_own_wire(self):
-        """와이어 형식은 코어의 조회표가 아니라 어댑터의 속성이다.
+        """The wire format is a property of the adapter, not a lookup table in the core.
 
-        코어가 표를 들고 있으면 새 어댑터가 코어를 고쳐야 하고, 고치지 않으면
-        자기 하네스가 무시하는 필드를 조용히 내보낸다 — receipt 도 남지 않는다.
+        If the core held the table, a new adapter would have to modify the
+        core, and if it didn't, it would silently emit a field its own
+        harness ignores — with no receipt left behind either.
         """
         from omhc import adapters
 
@@ -838,8 +852,8 @@ class TestLogFailureNeverRaises(unittest.TestCase):
                 self.assertIn("\\udcff", fh.read())
 
     def test_timestamp_is_stamped_with_gmtime_not_the_bare_local_call(self):
-        """리뷰: `time.strftime(fmt)` 하나만 쓰면(구조체 없이) 로컬 시각에
-        `Z`(UTC) 접미가 잘못 붙는다 — `time.gmtime()` 을 명시로 넘겨야 한다."""
+        """Review: using bare `time.strftime(fmt)` (no struct) wrongly tacks a
+        `Z` (UTC) suffix onto local time — `time.gmtime()` must be passed explicitly."""
         with tempfile.TemporaryDirectory() as home, \
              mock.patch.object(brief.time, "gmtime", side_effect=time.gmtime) as spy:
             brief.log_failure(home, "x")
@@ -847,7 +861,7 @@ class TestLogFailureNeverRaises(unittest.TestCase):
 
 
 class TestOutboxHygieneIntegration(unittest.TestCase):
-    """`omhc mark`(훅 경로) 와 `omhc clear` 가 outbox 를 어떻게 청소하는지."""
+    """How `omhc mark` (hook path) and `omhc clear` clean up the outbox."""
 
     def setUp(self):
         self.h = Harness()
@@ -887,3 +901,46 @@ class TestOutboxHygieneIntegration(unittest.TestCase):
             os.chdir(cwd)
 
         self.assertFalse(os.path.exists(fresh))
+
+
+class TestLastRead(unittest.TestCase):
+    """#37: every real read leaves a summary for `omhc status`'s `last read` row."""
+
+    def setUp(self):
+        self.h = Harness()
+
+    def tearDown(self):
+        self.h.close()
+
+    def _state(self):
+        return locate.state_dir(locate.repo_key(self.h.repo_root), home=self.h.home)
+
+    def test_a_real_read_records_the_summary(self):
+        self.h.plant_codex_session(session_id="cx1")
+        brief.emit(harness="claude-code",
+                   stdin_text=json.dumps({"cwd": self.h.repo_root, "session_id": "me1"}),
+                   home=self.h.home, now=NOW, out=io.StringIO())
+        summary = brief.read_last_read(self._state())
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["harness"], "codex-cli")
+        self.assertTrue(summary["session"].startswith("cx1"))
+        self.assertGreater(summary["events"], 0)
+        self.assertEqual(summary["unparsed"], 0)
+        self.assertEqual(summary["epoch"], round(NOW))
+
+    def test_recording_never_raises_even_when_the_state_dir_is_unusable(self):
+        blocker = os.path.join(self.h.home, "not-a-dir")
+        with open(blocker, "w") as fh:
+            fh.write("x")
+        read = mock.Mock()
+        read.ref.adapter_id, read.ref.session_id = "codex-cli", "cx1"
+        read.events, read.unparsed, read.dropped = (), 0, {}
+        brief.record_read(blocker, read, NOW, home=self.h.home)  # must not raise
+        self.assertIsNone(brief.read_last_read(blocker))
+
+    def test_an_unreadable_summary_reads_as_none(self):
+        state = self._state()
+        os.makedirs(state, exist_ok=True)
+        with open(os.path.join(state, brief.LAST_READ_NAME), "w") as fh:
+            fh.write("{not json")
+        self.assertIsNone(brief.read_last_read(state))

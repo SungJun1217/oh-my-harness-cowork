@@ -1,16 +1,17 @@
 {
   "_comment": [
-    "이 조각을 ~/.claude/settings.json 의 hooks 에 병합한다. 파일을 덮어쓰지 말 것.",
-    "설치 전제: install.sh 로 설치했거나 ln -s <repo>/bin/omhc ~/.local/bin/omhc",
+    "Merge this fragment into ~/.claude/settings.json's hooks. Don't overwrite the file.",
+    "Install prerequisite: installed via install.sh, or ln -s <repo>/bin/omhc ~/.local/bin/omhc",
     "",
-    "순서가 중요하다. mark 가 먼저 이 세션을 원장에 남기고, brief 가 그 뒤에 상대",
-    "하네스의 세션을 읽는다. due() 는 my_session_id 를 제외하므로 자기 세션을",
-    "자기에게 핸드오프하지 않는다.",
+    "Order matters. mark records this session to the ledger first, then brief",
+    "reads the counterpart harness's session after it. due() excludes",
+    "my_session_id, so a session never hands off to itself.",
     "",
-    "--wire claude 를 명시한다. 환경변수로 플랫폼을 추측하지 않는 이유는 omhc 가",
-    "플러그인이 아니라 설정 훅이라 CLAUDE_PLUGIN_ROOT 가 설정되지 않기 때문이다.",
-    "그리고 additional_context 와 hookSpecificOutput 을 동시에 내보내면 Claude Code",
-    "가 중복 제거 없이 둘 다 읽어 핸드오프가 두 번 주입된다."
+    "Specifies --wire claude explicitly. It doesn't guess the platform from an",
+    "env var because omhc is a settings hook, not a plugin, so CLAUDE_PLUGIN_ROOT",
+    "is never set. And emitting both additional_context and hookSpecificOutput",
+    "at once would have Claude Code read both without deduping, injecting the",
+    "handoff twice."
   ],
   "hooks": {
     "SessionStart": [

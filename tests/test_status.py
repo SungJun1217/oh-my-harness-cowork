@@ -1,6 +1,7 @@
-"""`omhc status` 의 세 라벨(PASS/FAIL/`----`) 계약. 결정 C1: `----` 는 SKIP 이
-아니다 — 아직 판단할 근거가 없거나 정보성인 행을 실패로도 성공으로도 위장하지
-않고 보여주는 라벨이며, exit code 에 영향을 주지 않는다(#8)."""
+"""The contract of `omhc status`'s three labels (PASS/FAIL/`----`). Decision C1:
+`----` is not SKIP — it's the label for a row with no basis for judgment yet,
+or one that's merely informational, shown without disguising it as either
+failure or success, and it never affects the exit code (#8)."""
 from __future__ import annotations
 
 import io
@@ -17,7 +18,7 @@ from ._repo import TempRepo, plant_hook_install
 
 
 def _find_row(text: str, label: str):
-    """텍스트 출력에서 `label` 행을 찾아 (verdict_word, detail) 을 돌려준다."""
+    """Find the `label` row in the text output and return (verdict_word, detail)."""
     for line in text.splitlines():
         rest = line[5:]
         if rest[: len(label)] == label and rest[len(label): len(label) + 1] in ("", " "):
@@ -32,13 +33,13 @@ class TestStatusRows(unittest.TestCase):
         cwd = os.getcwd()
         os.chdir(self.t.root)
         self.addCleanup(os.chdir, cwd)
-        # adapters 행이 이 유닛의 관심사가 아니므로 고정한다 — 실제 $HOME 을
-        # 보는 adapters.present() 가 테스트 머신마다 다른 결과를 주면 안 된다.
+        # Pin the adapters row since it's not this unit's concern — adapters.present(),
+        # which looks at the real $HOME, must not give different results per test machine.
         patcher = mock.patch.object(cli.adapters, "present", return_value=["claude-code"])
         patcher.start()
         self.addCleanup(patcher.stop)
-        # 이 유닛의 관심사가 아닌 `claude-code hooks` 행을 PASS 로 고정한다 —
-        # 안 그러면 이 파일의 모든 exit-code 단정이 hookconf 의 관심사와 섞인다.
+        # Pin the `claude-code hooks` row (not this unit's concern) to PASS —
+        # otherwise every exit-code assertion in this file gets mixed up with hookconf's concerns.
         plant_hook_install(self.t.home, "claude-code")
         os.environ.pop(due.OFF_ENV, None)
         self.addCleanup(os.environ.pop, due.OFF_ENV, None)
@@ -67,6 +68,46 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(word, "----")
         self.assertIn("nothing handed off", detail)
 
+    def _write_last_read(self, **fields):
+        summary = {"harness": "codex-cli", "session": "01a0c9f4-06aa", "events": 117,
+                   "unparsed": 0, "skipped": 402, "skipped_types": 12,
+                   "epoch": 1758500000}
+        summary.update(fields)
+        os.makedirs(self.t.state, exist_ok=True)
+        with open(os.path.join(self.t.state, "last_read.json"), "w") as fh:
+            json.dump(summary, fh)
+
+    def test_last_read_row_says_nothing_read_yet_on_a_fresh_repo(self):
+        code, text = self.run_status()
+        self.assertEqual(code, 0)
+        word, detail = _find_row(text, "last read")
+        self.assertEqual(word, "----")
+        self.assertIn("nothing read yet", detail)
+
+    def test_last_read_row_shows_the_counts_and_never_gates(self):
+        self._write_last_read()
+        code, text = self.run_status()
+        self.assertEqual(code, 0)
+        word, detail = _find_row(text, "last read")
+        self.assertEqual(word, "----")
+        self.assertIn("codex-cli 01a0c9f4: 117 events, 0 unparsed lines", detail)
+        self.assertIn("402 records of 12 types skipped", detail)
+        self.assertNotIn("format may have changed", detail)
+
+    def test_zero_events_from_a_non_empty_session_points_at_a_format_change(self):
+        self._write_last_read(events=0)
+        code, text = self.run_status()
+        self.assertEqual(code, 0, "an empty session is legitimate, so this row must not gate")
+        _word, detail = _find_row(text, "last read")
+        self.assertIn("format may have changed", detail)
+
+    def test_last_read_is_in_the_json_output(self):
+        self._write_last_read()
+        _code, data = self.run_status_json()
+        self.assertEqual(data["last_read"]["events"], 117)
+        rows = {r["label"]: r for r in data["rows"]}
+        self.assertIsNone(rows["last read"]["verdict"])
+
     def test_injections_without_pins_fail_the_archive_row(self):
         os.makedirs(self.t.state, exist_ok=True)
         with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",
@@ -92,8 +133,9 @@ class TestStatusRows(unittest.TestCase):
         index.append_rows(os.path.join(idx_dir, session_id + ".idx"), [ev])
 
     def test_an_indexed_but_never_pinned_session_fails_archive_even_with_zero_lag(self):
-        """리뷰 결함: pinned/<sid>/source.jsonl 이 없어도 lag_bytes 는 size 0 -
-        watermark 0 = 0 으로 나와 PASS 처럼 보였다. `pinned` 를 실제로 봐야 한다."""
+        """Review defect: even without pinned/<sid>/source.jsonl, lag_bytes came
+        out as size 0 - watermark 0 = 0, which looked like a PASS. `pinned` must
+        actually be checked."""
         self._write_idx("s1")
         os.makedirs(self.t.state, exist_ok=True)
         with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",
@@ -161,8 +203,8 @@ class TestStatusRows(unittest.TestCase):
             fh.write("s2\tclaude-code\tcodex-cli\t1700000001\n")
         from omhc import ledger
 
-        # s1 을 세 번 show 해도 (via 는 show/log 무관) 한 번만 센다. s3 은
-        # delivered.tsv 에 없는 세션이라 X 를 늘리면 안 된다.
+        # Even showing s1 three times (via is show/log-agnostic) counts as one.
+        # s3 isn't in delivered.tsv, so it must not increment X.
         for _ in range(3):
             ledger.append({"repo": self.t.key, "event": "pull", "via": "show",
                            "session": "s1", "epoch": 1700000002},
@@ -182,8 +224,8 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(payload["pull_rate_window"], cli.PULL_RATE_WINDOW)
 
     def test_a_reopen_line_does_not_count_as_an_injection(self):
-        """resume 이 남긴 reopen 줄(#22)은 전달이 아니다 — injections/pull rate
-        분모에 끼면 안 된다."""
+        """A reopen line left by resume (#22) is not a delivery — it must not
+        enter the injections/pull rate denominator."""
         os.makedirs(self.t.state, exist_ok=True)
         with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",
                   encoding="utf-8") as fh:
@@ -199,17 +241,18 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(payload["injections"], 1)
 
     def test_pull_rate_windows_the_denominator_to_the_most_recent_injections(self):
-        """#25: 분모를 delivered.tsv 전체로 두면 한 레포를 오래 쓸수록 옛
-        전달이 영원히 분모에 남아 인출률이 서서히 낮아 보인다. 최근
-        PULL_RATE_WINDOW 개 전달만 분모로 삼아야 한다."""
+        """#25: keeping the denominator as the whole of delivered.tsv means the
+        longer a repo is used, the more old deliveries linger in the denominator
+        forever, making the pull rate look gradually lower. Only the most recent
+        PULL_RATE_WINDOW deliveries should be the denominator."""
         os.makedirs(self.t.state, exist_ok=True)
         from omhc import ledger
 
         window = cli.PULL_RATE_WINDOW
         with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",
                   encoding="utf-8") as fh:
-            # 창보다 오래된 전달 하나 — 실제로 인출됐지만 분모·분자 모두에서
-            # 빠져야 한다.
+            # One delivery older than the window — actually pulled, but must be
+            # excluded from both the denominator and numerator.
             fh.write("old\tclaude-code\tcodex-cli\t1700000000\n")
             for i in range(window):
                 fh.write("s{}\tclaude-code\tcodex-cli\t{}\n".format(i, 1700000001 + i))
@@ -228,12 +271,12 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(payload["injections"], window + 1)
         self.assertEqual(payload["recent_injections"], window)
         self.assertEqual(payload["recent_pulls"], 1)
-        # `pulls` 는 전체 기간 값 그대로다 — `pulls / injections` 가 뜻을 잃지 않게.
+        # `pulls` stays the all-time value — so `pulls / injections` doesn't lose its meaning.
         self.assertEqual(payload["pulls"], 2)
 
     def test_status_reads_the_ledger_exactly_once(self):
-        """#25: repo_key 로 한 번, health 용 limit=0 으로 한 번 — 총 두 번
-        읽던 것을 한 번으로 합쳤다."""
+        """#25: used to read twice — once with repo_key, once with limit=0 for
+        health — now merged into a single read."""
         from omhc import ledger
 
         real_read = ledger.read
@@ -251,8 +294,9 @@ class TestStatusRows(unittest.TestCase):
         self.assertNotIn("repo_key", calls[0])
 
     def test_status_ledger_row_count_matches_reading_with_the_repo_filter_directly(self):
-        """한 번 읽고 메모리에서 거른 결과가 `read(repo_key=key)` 를 직접
-        부른 것과 같아야 한다(필터가 limit 보다 먼저 적용되는 규칙까지)."""
+        """Reading once and filtering in memory must give the same result as
+        calling `read(repo_key=key)` directly (including the rule that the filter
+        applies before the limit)."""
         from omhc import ledger
 
         for i in range(5):
@@ -285,8 +329,8 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(payload["ledger_rejects"], 0)
 
     def test_ledger_rejects_row_fails_and_gates_after_a_refusal(self):
-        """#22: append() 가 반환한 False 를 호출자가 버려도, 거부 자체는
-        status 에 보여야 한다."""
+        """#22: even if the caller discards the False that append() returns,
+        the refusal itself must show up in status."""
         from omhc import ledger
 
         ok = ledger.append(
@@ -309,8 +353,8 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(row["verdict"], "fail")
 
     def test_ledger_rejects_row_counts_distinct_sessions_not_raw_rows(self):
-        """레거시 중복 줄(디듀프가 생기기 전에 이미 쌓인 것)이 있어도 한 세션을
-        여러 번 버려진 것처럼 부풀리면 안 된다."""
+        """Even with legacy duplicate lines (accumulated before dedup existed),
+        a single session must not be inflated as if it were dropped multiple times."""
         from omhc import ledger, fsio
 
         path = ledger._rejected_path(self.t.home)
@@ -329,8 +373,9 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(payload["ledger_rejects"], 1)
 
     def test_ledger_rejects_row_ignores_rows_that_now_fit_under_a_raised_cap(self):
-        """#22 리뷰: MAX_LINE 을 올려 고친 뒤에도 옛 거부 기록이 영원히 FAIL 로
-        남으면 안 된다 — `bytes` 가 지금 상한 밑이면 이미 고쳐진 것으로 본다."""
+        """#22 review: even after raising MAX_LINE to fix things, an old
+        rejection record must not stay FAIL forever — if `bytes` is now under the
+        current cap, it's treated as already fixed."""
         from omhc import ledger, fsio
 
         path = ledger._rejected_path(self.t.home)
@@ -382,8 +427,8 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(word, "----")
 
     def test_hooks_row_passes_when_the_shipped_fragment_is_installed(self):
-        """setUp 이 이미 claude-code 훅을 심어 둔다 — 여기서는 그 행이 실제로
-        나타나고 게이팅에 참여할 수 있다는 것만 확인한다."""
+        """setUp already plants the claude-code hook — this only confirms the
+        row actually shows up and can participate in gating."""
         code, text = self.run_status()
         self.assertEqual(code, 0)
         word, detail = _find_row(text, "claude-code hooks")
@@ -405,8 +450,8 @@ class TestStatusRows(unittest.TestCase):
         self.assertIn("omhc hooks install", detail)
 
     def test_hooks_row_is_still_judged_when_health_raises(self):
-        """리뷰 결함: health() 의 예외가 hooks 판정 자체를 건너뛰면 안 된다 —
-        두 진단은 서로 독립이어야 한다."""
+        """Review defect: an exception from health() must not skip the hooks
+        judgment itself — the two diagnostics must be independent."""
         from omhc.adapters import claude_code as CC
 
         with mock.patch.object(CC.ClaudeCodeAdapter, "health",
@@ -418,8 +463,8 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(detail, "installed")
 
     def test_hooks_row_fails_loudly_when_judging_itself_raises(self):
-        """조용히 버리지 않는다 — 판정 자체가 죽으면 그 사실이 FAIL 행으로
-        보고돼야 한다(예: hooks/ 가 없어 load_fragment 가 실패하는 경우)."""
+        """Doesn't fail silently — if the judgment itself dies, that fact must
+        be reported as a FAIL row (e.g. when hooks/ is missing and load_fragment fails)."""
         with mock.patch.object(cli.hookconf, "load_fragment",
                                side_effect=OSError("no such file")):
             code, text = self.run_status()
@@ -445,9 +490,10 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(row["verdict"], "fail")
         self.assertIn("is not a project root", payload["refused"])
         self.assertIsNone(payload["orphaned_state"])
-        # #19: 정상 경로와 같은 최상위 키 집합 — 값은 비어 있어도 소비자가
-        # `/` 에서만 KeyError 로 죽지 않는다. 목록을 손으로 적지 않고 정상
-        # 경로의 실제 출력과 비교한다(손 목록은 #25 의 새 키를 놓쳤다).
+        # #19: same set of top-level keys as the normal path — even with empty
+        # values, a consumer won't die with a KeyError just because it's `/`.
+        # Compare against the normal path's actual output instead of a hand-written
+        # list (a hand-written list missed #25's new key).
         os.chdir(self.t.root)
         _code, normal = self.run_status_json()
         self.assertEqual(set(normal) - set(payload), set())
@@ -472,9 +518,10 @@ class TestStatusRows(unittest.TestCase):
     def test_health_row_with_ok_none_is_uninformative_and_never_gates(self):
         fake = mock.Mock()
         fake.health.return_value = (("custom diag", None, "not judgeable yet"),)
-        # hook_config 는 선택 메서드다 — 명시적으로 None 을 줘서 이 유닛의
-        # 관심사가 아닌 hooks 행이 끼어들지 않게 한다(Mock 기본값은 MagicMock
-        # 이라 hook_config()가 None 이 아닌 것처럼 보여 hooks 판정이 돈다).
+        # hook_config is an optional method — give it None explicitly so the
+        # hooks row, which isn't this unit's concern, doesn't butt in (Mock's
+        # default is a MagicMock, which makes hook_config() look non-None and runs
+        # the hooks judgment).
         fake.hook_config.return_value = None
         with mock.patch.object(cli.adapters, "get", return_value=fake):
             code, text = self.run_status()

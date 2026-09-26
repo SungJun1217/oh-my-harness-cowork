@@ -1,5 +1,6 @@
-"""#10 `omhc show '#N'` 이 다른 세션의 이벤트를 여는 결함, #15a/#15c 의 log/show
-사용성 항목. 세 항목 모두 여기서 다룬다(구버전 누적 항목은 9495f87 로 이미 고쳐짐)."""
+"""#10's defect where `omhc show '#N'` opens another session's event, and
+#15a/#15c's log/show usability items. All three are covered here (an older
+accumulated item was already fixed in 9495f87)."""
 from __future__ import annotations
 
 import io
@@ -14,8 +15,8 @@ from ._repo import REPO, TempRepo
 
 
 def _write_idx(state: str, session_id: str, rows) -> None:
-    """rows 는 (seq, verb, arg) 튜플. author/ok/offset/length 는 테스트에
-    중요하지 않은 값으로 고정한다."""
+    """rows are (seq, verb, arg) tuples. author/ok/offset/length are pinned
+    to values that don't matter for the test."""
     idx_dir = os.path.join(state, "index")
     os.makedirs(idx_dir, exist_ok=True)
     events = [
@@ -49,14 +50,14 @@ class TestShowSeqRef(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_bare_seq_ref_resolves_to_the_log_default_session(self):
-        """두 세션이 모두 #3 을 갖는다 — 가장 최근 전달된 세션 것이 열려야 한다."""
+        """Both sessions have a #3 — the most recently delivered session's should open."""
         _write_idx(self.t.state, "aaaaaaaa1111", [(3, "said", "old-session-text")])
         _write_idx(self.t.state, "bbbbbbbb2222", [(3, "said", "new-session-text")])
         _mark_delivered(self.t.state, "aaaaaaaa1111")
         _mark_delivered(self.t.state, "bbbbbbbb2222")
 
-        # 원본 바이트는 offset/length 로 찾는다 — pinned 원본이 없으면 실패하므로
-        # source.jsonl 을 상태 디렉터리 아래 심고 fallback 경로로 쓰게 한다.
+        # The original bytes are located by offset/length — this fails without a
+        # pinned original, so plant source.jsonl under the state dir and use the fallback path.
         pin_dir = os.path.join(self.t.state, "pinned", "bbbbbbbb2222")
         os.makedirs(pin_dir, exist_ok=True)
         with open(os.path.join(pin_dir, "source.jsonl"), "wb") as fh:
@@ -64,8 +65,8 @@ class TestShowSeqRef(unittest.TestCase):
 
         code, out, err = self._show("#3")
         self.assertEqual(code, 0)
-        # stdout 은 원본 바이트 그대로다 — `show '#3' | jq .` 같은 파이프가
-        # 깨지면 안 된다(리뷰 결함). 어떤 세션을 골랐는지는 stderr 로만 간다.
+        # stdout is the raw original bytes — a pipe like `show '#3' | jq .`
+        # must not break (review defect). Which session was chosen only goes to stderr.
         self.assertEqual(out, "new!!\n")
         self.assertIn("bbbbbbbb", err)
         self.assertNotIn("aaaaaaaa", err)
@@ -87,8 +88,9 @@ class TestShowSeqRef(unittest.TestCase):
 
         code, out, err = self._show("aaaaaaaa#3")
         self.assertEqual(code, 0)
-        # 명시적 프리픽스라 헤더에 선택 이유를 달 필요는 없지만, 잘못된(최근 전달)
-        # 세션이 아니라 지정한 세션에서 읽혔는지는 pull 회계로 확인한다.
+        # No need to state the reason for selection in the header since the prefix is
+        # explicit, but confirm via pull bookkeeping that it read from the specified
+        # session, not the wrong (most-recently-delivered) one.
         from omhc import ledger
         pulls = [r for r in ledger.read(repo_key=self.t.key, home=self.t.home)
                  if r.get("event") == "pull"]
@@ -99,18 +101,19 @@ class TestShowSeqRef(unittest.TestCase):
         _write_idx(self.t.state, "aaaaaaaa2222", [(1, "said", "y")])
         code, out, err = self._show("aaaaaaaa#1")
         self.assertEqual(code, 1)
-        # 오류는 stdout 이 아니라 stderr 로 간다(#19) — exit code 는 1 그대로.
+        # The error goes to stderr, not stdout (#19) — exit code stays 1.
         self.assertEqual(out, "")
         self.assertIn("ambiguous", err)
-        # 후보는 축약하지 않고 전체 id 로 보여준다 — 접두사로 줄이면 그 자체가
-        # 다시 모호해질 수 있다(리뷰 결함).
+        # Candidates are shown as full ids, not abbreviated — shortening to a prefix
+        # could itself become ambiguous again (review defect).
         self.assertIn("aaaaaaaa1111", err)
         self.assertIn("aaaaaaaa2222", err)
 
     def test_ambiguous_prefix_lists_full_ids_even_when_they_share_13_chars(self):
-        """13자는 표시상 선호일 뿐이다 — 그 안에서 안 갈리는 두 id 를 후보로 줄여
-        보여주면 후보 목록 자체가 서로 구분 안 되는 결함이 생긴다(리뷰 결함)."""
-        long_a = "aaaaaaaaaaaaa1111"  # 앞 13자 "aaaaaaaaaaaaa" 동일
+        """13 chars is just a display preference — shortening two ids that don't
+        differ within it down to candidates creates a defect where the candidate
+        list itself can't tell them apart (review defect)."""
+        long_a = "aaaaaaaaaaaaa1111"  # the first 13 chars "aaaaaaaaaaaaa" are identical
         long_b = "aaaaaaaaaaaaa2222"
         _write_idx(self.t.state, long_a, [(1, "said", "x")])
         _write_idx(self.t.state, long_b, [(1, "said", "y")])
@@ -126,8 +129,8 @@ class TestShowSeqRef(unittest.TestCase):
         self.assertIn("no default session", err)
 
     def test_default_session_delivered_but_not_indexed_gives_a_distinct_hint(self):
-        """#N 힌트가 "아무것도 전달된 적 없다" 와 "전달은 됐는데 색인이 아직
-        없다" 를 뭉뚱그리면 안 된다(리뷰 결함)."""
+        """The #N hint must not conflate "nothing was ever delivered" with
+        "it was delivered but there's no index yet" (review defect)."""
         _mark_delivered(self.t.state, "not-indexed-yet")
         code, out, err = self._show("#1")
         self.assertEqual(code, 1)
@@ -136,10 +139,10 @@ class TestShowSeqRef(unittest.TestCase):
 
 
 class TestShowRealStdoutIsRawBytes(unittest.TestCase):
-    """#19: 진짜 stdout(`.buffer` 가 있는 스트림)에는 원본 바이트를 그대로
-    쓴다 — 잘못된 UTF-8 을 U+FFFD 로 바꾸지 않고, 없는 줄바꿈도 붙이지 않는다.
-    io.StringIO 로는 이 경로를 확인할 수 없어 실제 바이너리를 서브프로세스로
-    돈다. 오류는 stderr 로, exit code 는 1 로 간다."""
+    """#19: real stdout (a stream with `.buffer`) gets the raw original bytes
+    written as-is — invalid UTF-8 isn't replaced with U+FFFD, and no missing
+    newline is appended. io.StringIO can't verify this path, so the real binary
+    is run as a subprocess. Errors go to stderr, exit code is 1."""
 
     def setUp(self):
         self.t = TempRepo()
@@ -199,8 +202,9 @@ class TestLogRefsAndSaidPreview(unittest.TestCase):
         self.assertIn("omhc show", out)
 
     def test_unique_prefix_grows_past_13_chars_when_still_colliding(self):
-        """13자는 표시상 선호일 뿐이다 — 그걸로도 안 갈리면 더 늘려야 한다. 안 그러면
-        log 가 찍은 ref 를 show 가 모호하다고 거부한다(리뷰 결함)."""
+        """13 chars is just a display preference — if it still doesn't disambiguate,
+        it must grow further. Otherwise show rejects as ambiguous a ref that log
+        printed (review defect)."""
         _write_idx(self.t.state, "aaaaaaaaaaaaa1111", [(1, "ran", "x")])
         _write_idx(self.t.state, "aaaaaaaaaaaaa2222", [(1, "ran", "y")])
         code, out = self._log()
@@ -210,8 +214,8 @@ class TestLogRefsAndSaidPreview(unittest.TestCase):
         self.assertEqual(len(sessions), len(set(sessions)))
 
     def test_unique_prefix_grows_when_ids_share_the_first_8_chars(self):
-        """Codex UUIDv7 은 앞 8자가 시간대로 겹친다(#15c) — log 는 그래도 서로
-        다른 ref 를 찍어야 한다."""
+        """Codex UUIDv7's first 8 chars overlap by time period (#15c) — log must
+        still print distinct refs."""
         _write_idx(self.t.state, "0199aaaa1111", [(1, "ran", "x")])
         _write_idx(self.t.state, "0199aaaa2222", [(1, "ran", "y")])
         code, out = self._log()
@@ -221,8 +225,9 @@ class TestLogRefsAndSaidPreview(unittest.TestCase):
         self.assertEqual(len(sessions), len(set(sessions)))
 
     def test_rows_within_a_session_order_by_seq_even_when_epoch_goes_backwards(self):
-        """불변식 6: 타임스탬프는 순서의 근거가 아니다(#18). 같은 세션 안에서
-        epoch 이 뒤로 가도 색인에 적힌 seq 순서를 지켜야 한다."""
+        """Invariant 6: timestamps are not an ordering source (#18). Even if
+        epoch goes backwards within the same session, the seq order recorded in
+        the index must be honored."""
         idx_dir = os.path.join(self.t.state, "index")
         os.makedirs(idx_dir, exist_ok=True)
         events = [
@@ -239,13 +244,14 @@ class TestLogRefsAndSaidPreview(unittest.TestCase):
         self.assertIn("second", lines[1])
 
     def test_sessions_order_by_ledger_append_order_not_epoch(self):
-        """세션 순서는 원장에 `start` 행이 적힌 순서다 — 한 세션의 epoch 이
-        다른 세션보다 늦게 시작한 것처럼 찍혀 있어도 원장 등장 순서를 따른다."""
+        """Session order is the order `start` rows were written to the ledger —
+        even if one session's epoch reads as starting later than another's, the
+        ledger's appearance order is followed."""
         from omhc import ledger
 
         _write_idx(self.t.state, "bbbbbbbb2222", [(1, "said", "second-session")])
         _write_idx(self.t.state, "aaaaaaaa1111", [(1, "said", "first-session")])
-        # aaaaaaaa1111 이 원장엔 먼저 적혔지만 epoch 은 더 크다(뒤로 간 타임스탬프).
+        # aaaaaaaa1111 was written to the ledger first, but its epoch is larger (a backwards timestamp).
         ledger.append({"repo": self.t.key, "harness": "codex-cli",
                        "session": "aaaaaaaa1111", "event": "start",
                        "epoch": 2000000000.0, "path": "x", "cwd": self.t.root},
@@ -261,29 +267,30 @@ class TestLogRefsAndSaidPreview(unittest.TestCase):
         self.assertIn("second-session", lines[1])
 
     def test_log_ends_on_the_last_delivered_session_despite_mark_then_backfill_ledger_order(self):
-        """리뷰 결함(#18): `cmd_mark` 는 제 세션(C)을 원장에 먼저 적고,
-        `_backfill_foreign_sessions` 는 더 일찍 시작한 외래 세션(X)을 뒤늦게
-        `via:"scan"` 으로 적는다 — 원장 등장 순은 C, X 지만 실제 전달 순서
-        (delivered.tsv)는 X, C 다. 원장 등장 순으로 랭크하면 C/X 쌍마다
-        뒤집혀 log 의 끝이 `show '#N'` 의 기본 세션(due.last_delivered)과
-        어긋나고 `--last N` 이 C 의 최신 줄 대신 X 의 옛 줄을 남긴다."""
+        """Review defect (#18): `cmd_mark` writes its own session (C) to the ledger
+        first, and `_backfill_foreign_sessions` later writes a foreign session (X)
+        that actually started earlier, as `via:"scan"` — ledger appearance order is
+        C, X, but the actual delivery order (delivered.tsv) is X, C. Ranking by
+        ledger appearance order flips every C/X pair, so log's tail disagrees with
+        `show '#N'`'s default session (due.last_delivered), and `--last N` keeps
+        X's old line instead of C's newest one."""
         from omhc import ledger
 
         _write_idx(self.t.state, "cccccccc1111", [(1, "said", "c-old"), (2, "said", "c-new")])
         _write_idx(self.t.state, "xxxxxxxx2222", [(1, "said", "x-event")])
 
-        # mark: C 를 먼저 원장에 적는다.
+        # mark: writes C to the ledger first.
         ledger.append({"repo": self.t.key, "harness": "claude-code",
                        "session": "cccccccc1111", "event": "start",
                        "epoch": 2000000000.0, "path": "c", "cwd": self.t.root},
                       home=self.t.home)
-        # backfill: X 는 더 일찍 시작했지만 원장엔 뒤늦게 via:"scan" 으로 적힌다.
+        # backfill: X started earlier but is written to the ledger later, as via:"scan".
         ledger.append({"repo": self.t.key, "harness": "codex-cli",
                        "session": "xxxxxxxx2222", "event": "start",
                        "epoch": 1000000000.0, "path": "x", "cwd": self.t.root,
                        "via": "scan"}, home=self.t.home)
 
-        # 실제 전달 순서는 원장 등장 순과 반대다: X 먼저, C 가 가장 최근.
+        # The actual delivery order is the reverse of ledger appearance order: X first, C most recent.
         _mark_delivered(self.t.state, "xxxxxxxx2222")
         _mark_delivered(self.t.state, "cccccccc1111")
 
@@ -306,8 +313,9 @@ class TestLogRefsAndSaidPreview(unittest.TestCase):
         self.assertIn("c-new", lines2[1])
 
     def test_sessions_without_a_ledger_row_sort_after_ledgered_ones(self):
-        """색인은 있는데 원장에 `start` 행이 없는 세션(예: 백필 전)은 순서를
-        판단할 근거가 없다 — 등장 순 세션 뒤로, 파일명 순으로 결정적으로 둔다."""
+        """A session that has an index but no `start` row in the ledger (e.g.
+        before backfill) has no basis for ordering — it's placed deterministically
+        after ledgered sessions, sorted by filename."""
         from omhc import ledger
 
         _write_idx(self.t.state, "aaaaaaaa1111", [(1, "said", "ledgered")])
@@ -325,7 +333,7 @@ class TestLogRefsAndSaidPreview(unittest.TestCase):
 
 class TestDeliveredOrder(unittest.TestCase):
     def test_a_session_redelivered_later_ranks_by_its_last_delivery(self):
-        """last_delivered 와 같은 기준이라야 log 의 끝과 show 의 기본 세션이 같다."""
+        """Must use the same criterion as last_delivered so log's tail and show's default session match."""
         import tempfile
         from omhc import due
         with tempfile.TemporaryDirectory() as state:

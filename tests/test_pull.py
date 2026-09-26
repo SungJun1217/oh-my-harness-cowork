@@ -1,6 +1,7 @@
-"""§9 인출률 회계: `omhc show`/`log` 가 성공적으로 산출물을 인출하면 원장에
-`{"event":"pull"}` 을 남긴다. 이 행은 due()/backfill/codex health 어느 것도
-건드리지 않는다 — `harness` 키가 없기 때문이며, 그 계약을 여기서 고정한다.
+"""Section 9 pull-rate bookkeeping: `omhc show`/`log` write `{"event":"pull"}`
+to the ledger when they successfully pull an artifact. This row touches none
+of due()/backfill/codex health — because it has no `harness` key — and that
+contract is pinned here.
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ REPO_KEY = "pull-repo-key"
 
 
 def _plant_show_target(t: TempRepo) -> str:
-    """refs.tsv 항목 하나 + 원본 바이트를 심고 태그(E1)를 돌려준다."""
+    """Plant one refs.tsv entry + the original bytes, and return the tag (E1)."""
     os.makedirs(t.state, exist_ok=True)
     source = os.path.join(t.state, "source.jsonl")
     body = b'{"hello":"world"}\n'
@@ -99,8 +100,8 @@ class TestShowLogWritePullRows(unittest.TestCase):
         cli.cmd_show(cli.build_parser().parse_args(["show", tag]), home=self.t.home,
                      out=out_ok)
 
-        # 두 번째 방출을 새 임시 레포에서 비교하기보다, 같은 상태에서 ledger.append
-        # 만 실패하게 만들어 출력이 그대로인지 본다.
+        # Rather than comparing a second emission from a fresh temp repo, make only
+        # ledger.append fail from the same state and check the output stays identical.
         with mock.patch.object(ledger, "append", side_effect=OSError("disk full")):
             out_fail = io.StringIO()
             code = cli.cmd_show(
@@ -123,9 +124,9 @@ class TestShowLogWritePullRows(unittest.TestCase):
 
 
 class TestPullRowsAreInvisibleToTheThreeConsumers(unittest.TestCase):
-    """pull 행은 `harness` 키가 없다 — due()/backfill/codex health 세 곳 모두
-    event=="start" 나 harness 필드에 기대므로, pull 행이 섞여도 결과가 같아야
-    한다."""
+    """A pull row has no `harness` key — since all three of due()/backfill/codex
+    health rely on event=="start" or the harness field, results must stay the
+    same even with pull rows mixed in."""
 
     def setUp(self):
         self.t = TempRepo()
@@ -159,9 +160,9 @@ class TestPullRowsAreInvisibleToTheThreeConsumers(unittest.TestCase):
         with mock.patch.object(adapter, "hook_is_installed", return_value=True), \
              mock.patch.object(adapter, "hooks_path", return_value=__file__):
             result = adapter.health(self.t.root, rows)
-        # health() 는 설치 이후 시작한 세션이 하나도 없으면 (있어도) 미판정
-        # 또는 no-session 취지의 결과를 낸다 — 어느 쪽이든 pull-only 행이
-        # "훅이 돌았다"는 PASS 증거로 오인되면 안 된다.
+        # health() gives an unjudged or no-session-style result when no session
+        # has started since install — either way, a pull-only row must not be
+        # mistaken for PASS evidence that "the hook has run".
         for _label, ok, _detail in result:
             self.assertIsNot(ok, True)
 
@@ -172,7 +173,7 @@ if __name__ == "__main__":
 
 
 class TestShowCreditsTheSessionItRead(unittest.TestCase):
-    """show 는 실제로 읽은 세션에 인출을 돌린다 — 가장 최근 전달이 아니라."""
+    """show credits the pull to the session it actually read — not the most recent delivery."""
 
     def setUp(self):
         self.t = TempRepo()
@@ -183,7 +184,7 @@ class TestShowCreditsTheSessionItRead(unittest.TestCase):
 
     def test_show_records_the_resolved_session_and_tag(self):
         _mark_delivered(self.t, "s-old")
-        tag = _plant_show_target(self.t)  # E1 → s-delivered
+        tag = _plant_show_target(self.t)  # E1 -> s-delivered
         _mark_delivered(self.t, "s-new")
         code = cli.cmd_show(cli.build_parser().parse_args(["show", tag]),
                             home=self.t.home, out=io.StringIO())

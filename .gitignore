@@ -3,18 +3,18 @@ __pycache__/
 .claude/settings.local.json
 .omhc/
 
-# 픽스처는 실제 대화 내용을 담는다. 이 레포에는 GitHub 리모트가 붙어 있으므로
-# 커밋하지 않는다. tests/harvest.py 로 이 머신에서 재생성하고, 골든 카운트만
-# tests/fixtures/expected.json 으로 커밋한다.
+# Fixtures hold real conversation content. This repo has a GitHub remote, so they are
+# never committed. Regenerate them on this machine with tests/harvest.py; only the
+# golden counts are committed, as tests/fixtures/expected.json.
 tests/fixtures/
 
-# 개발용 샌드박스 스크립트(sandbox/setup.sh, run.sh). 로컬 전용.
+# Dev sandbox scripts (sandbox/setup.sh, run.sh). Local only.
 sandbox/
 
-# pyproject 빌드 산출물
+# pyproject build output
 build/
 dist/
 *.egg-info/
 
-# Claude Code 의 병렬 에이전트 worktree. 레포 안에 생기지만 커밋 대상이 아니다.
+# Claude Code's parallel-agent worktrees. They live inside the repo but are never committed.
 .claude/worktrees/

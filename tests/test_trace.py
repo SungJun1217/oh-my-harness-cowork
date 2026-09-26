@@ -1,5 +1,5 @@
-"""#35 `omhc trace <path>` — 색인에서 그 파일을 건드린 이벤트를 세션을 넘나들며
-찾는다(sessionwiki `trace` 선례)."""
+"""#35 `omhc trace <path>` — finds events that touched a file across sessions
+in the index (precedent: sessionwiki's `trace`)."""
 from __future__ import annotations
 
 import io
@@ -14,7 +14,7 @@ from ._repo import TempRepo
 
 
 def _write_idx(state: str, session_id: str, rows) -> None:
-    """rows 는 (seq, verb, paths, arg) 튜플. paths 는 문자열 튜플."""
+    """rows are (seq, verb, paths, arg) tuples. paths is a tuple of strings."""
     idx_dir = os.path.join(state, "index")
     os.makedirs(idx_dir, exist_ok=True)
     events = [
@@ -84,7 +84,7 @@ class TestTrace(unittest.TestCase):
                   [(1, "modified", ("omhc/cli.py",), "")])
         self._mark("aaaaaaaa1111", "codex-cli")
         self._mark("bbbbbbbb2222", "claude-code")
-        # 전달 순서: a 먼저, b 나중 -> b 가 최신이라 마지막 줄이어야 한다.
+        # Delivery order: a first, b later -> b is newest, so it must be the last line.
         self._mark_delivered_helper("aaaaaaaa1111")
         self._mark_delivered_helper("bbbbbbbb2222")
 
@@ -199,12 +199,13 @@ class TestTrace(unittest.TestCase):
         return [r for r in ledger.read(repo_key=self.t.key, home=self.t.home)
                 if r.get("event") == "pull"]
 
-    # --- 리뷰(#35) 1: 모호성 가드가 다중 경로 행 앞에서 뚫리는 결함 ------------
+    # --- review (#35) 1: defect where the ambiguity guard is bypassed by a multi-path row ------------
 
     def test_ambiguous_suffix_match_across_a_multi_path_row_is_reported_not_guessed(self):
-        """재현(리뷰): s1 행 하나가 두 개의 서로 다른 접미사-일치 경로를 담고,
-        s2 는 그중 하나만 담는다 — 첫 매치에서 멈추면 "버킷이 하나뿐"으로
-        잘못 판정해 s1 이 실은 어느 파일을 가리키는지 모른다는 사실이 사라진다."""
+        """Reproduces (review): one s1 row carries two distinct suffix-matching paths,
+        and s2 carries only one of them — stopping at the first match wrongly judges
+        it as "only one bucket", erasing the fact that s1 doesn't actually know which
+        file it points to."""
         _write_idx(self.t.state, "aaaaaaaa1111", [
             (1, "modified", ("omhc/adapters/__init__.py", "omhc/__init__.py"), ""),
         ])
@@ -221,19 +222,19 @@ class TestTrace(unittest.TestCase):
         self.assertIn("ambiguous", out)
         self.assertIn("omhc/__init__.py", out)
         self.assertIn("omhc/adapters/__init__.py", out)
-        # 잘못된 파일(adapters 쪽)의 이력을 짐작해서 찍으면 안 된다.
+        # Must not guess-print the history of the wrong file (the adapters one).
         self.assertNotIn("bbbbbbbb", out)
         self.assertEqual(self._pulls(), [])
 
-        # --json 이면 안내 문장 대신 기계가 읽는 객체를 낸다(리뷰).
+        # With --json, emit a machine-readable object instead of a hint sentence (review).
         code, out = self._trace("__init__.py", ["--json"])
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out),
                          {"ambiguous": ["omhc/__init__.py", "omhc/adapters/__init__.py"]})
 
     def test_suffix_match_respects_path_segment_boundaries(self):
-        """`a/b.py` 는 `x/a/b.py` 와는 같은 파일일 수 있어도 `xa/b.py` 와는
-        아니다 — 문자열 접미사가 아니라 '/' 로 쪼갠 조각 단위로 비교해야 한다."""
+        """`a/b.py` can be the same file as `x/a/b.py`, but not `xa/b.py` — must
+        compare by '/'-split segments, not string suffix."""
         _write_idx(self.t.state, "aaaaaaaa1111", [(1, "modified", ("sub/a/b.py",), "")])
         _write_idx(self.t.state, "bbbbbbbb2222", [(1, "modified", ("subxa/b.py",), "")])
         self._mark("aaaaaaaa1111", "codex-cli")
@@ -248,7 +249,7 @@ class TestTrace(unittest.TestCase):
         self.assertTrue(lines[0].startswith("aaaaaaaa"))
 
     def test_unique_basename_suffix_fallback_still_works(self):
-        """접미사 후보가 하나뿐이면(모호하지 않으면) 여전히 매치로 쓴다."""
+        """If there's only one suffix candidate (unambiguous), it's still used as a match."""
         _write_idx(self.t.state, "aaaaaaaa1111",
                   [(1, "modified", ("omhc/adapters/codex_cli.py",), "")])
         self._mark("aaaaaaaa1111", "codex-cli")
@@ -259,9 +260,10 @@ class TestTrace(unittest.TestCase):
         self.assertIn("aaaaaaaa", out)
 
     def test_symlinked_index_path_resolves_to_the_same_real_file(self):
-        """리뷰: macOS 의 `/var` -> `/private/var` 류. 색인엔 심볼릭 링크를 통한
-        경로가, 질의엔 실제 경로가(혹은 그 반대) 들어와도 같은 파일이어야
-        한다 — realpath 정규화가 접미사 추측 없이 바로 정확히 맞혀야 한다."""
+        """Review: the macOS `/var` -> `/private/var` kind of case. Even if the
+        index has a symlink-traversing path and the query has the real path (or
+        vice versa), they must resolve to the same file — realpath normalization
+        must hit exactly, with no suffix guessing."""
         real_dir = os.path.join(self.t.root, "realdir")
         link_dir = os.path.join(self.t.root, "linkdir")
         os.makedirs(real_dir)
@@ -277,12 +279,12 @@ class TestTrace(unittest.TestCase):
         self.assertIn("aaaaaaaa", out)
         self.assertNotIn("ambiguous", out)
 
-    # --- 리뷰(#35) 2: pull 회계는 실제로 찍힌 매치에만 -----------------------
+    # --- review (#35) 2: pull bookkeeping only for the match actually printed -----------------------
 
     def test_pull_recorded_only_for_the_session_actually_shown(self):
-        """`zzzzzzzz9999` 가 가장 최근 전달이지만 무관한 파일이다 — `#N` 의
-        "가장 최근 전달" 근사를 쓰면 안 되고, 실제로 찍힌 `aaaaaaaa1111` 이
-        인출됐다고 적어야 한다."""
+        """`zzzzzzzz9999` is the most recent delivery but touches an unrelated
+        file — must not use #N's "most recent delivery" approximation, and must
+        record `aaaaaaaa1111`, the one actually printed, as pulled."""
         _write_idx(self.t.state, "aaaaaaaa1111", [(1, "modified", ("omhc/cli.py",), "")])
         _write_idx(self.t.state, "zzzzzzzz9999", [(1, "modified", ("omhc/other.py",), "")])
         self._mark("aaaaaaaa1111", "codex-cli")
@@ -299,7 +301,7 @@ class TestTrace(unittest.TestCase):
     def test_no_pull_recorded_when_the_matched_session_was_never_delivered(self):
         _write_idx(self.t.state, "aaaaaaaa1111", [(1, "modified", ("omhc/cli.py",), "")])
         self._mark("aaaaaaaa1111", "codex-cli")
-        # watch 로만 색인됐고 delivered.tsv 엔 없다.
+        # Indexed only by watch, not in delivered.tsv.
 
         code, out = self._trace("omhc/cli.py")
         self.assertEqual(code, 0)
@@ -316,11 +318,11 @@ class TestTrace(unittest.TestCase):
         self.assertIn("no indexed events touched", out)
         self.assertEqual(self._pulls(), [])
 
-    # --- 리뷰(#35) 3: 원장에 start 행이 없는(watch 전용) 세션의 하네스 -------
+    # --- review (#35) 3: harness for a session with no ledger start row (watch-only) -------
 
     def test_harness_is_a_question_mark_when_no_ledger_start_row_exists(self):
         _write_idx(self.t.state, "aaaaaaaa1111", [(1, "modified", ("omhc/cli.py",), "")])
-        self._mark_delivered_helper("aaaaaaaa1111")  # mark() 는 안 불렀다.
+        self._mark_delivered_helper("aaaaaaaa1111")  # mark() was never called.
 
         code, out = self._trace("omhc/cli.py")
         self.assertEqual(code, 0)
@@ -329,7 +331,7 @@ class TestTrace(unittest.TestCase):
 
 
 class TestTraceRefusesAtSlashRoot(unittest.TestCase):
-    """`/` 는 프로젝트 루트가 아니다(#35 요구: log 와 같은 거부)."""
+    """`/` is not a project root (#35 requirement: same refusal as log)."""
 
     def test_refuses_at_slash(self):
         out = io.StringIO()

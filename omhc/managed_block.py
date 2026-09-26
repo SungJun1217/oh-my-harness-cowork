@@ -11,7 +11,7 @@ MARKER_ID = "omhc"
 BEGIN_PREFIX = "<!-- {}:begin".format(MARKER_ID)
 END = "<!-- {}:end -->".format(MARKER_ID)
 
-# 24시간. 지나면 붕괴시킨다 — 어제의 표식이 오늘의 지시처럼 읽히면 안 된다.
+# 24 hours. Collapse past this — yesterday's marker must not read like today's instruction.
 STALE_AFTER_SECONDS = 24 * 3600
 
 _BLOCK = re.compile(
@@ -27,11 +27,11 @@ def _iso_readable(epoch: float) -> str:
 
 
 def _begin(captured_at: float) -> str:
-    # captured_utc 는 사람이 읽는 절대시각이다(#36) — 본문(body_md)의 상대
-    # 나이("3m ago")는 mint 시점에 얼어붙으므로, 이게 있어야 나중에 읽는
-    # 사람이 그 상대값이 얼마나 낡았는지 가늠할 수 있다. captured(epoch) 는
-    # is_stale/installed_captured_at 가 그대로 계속 읽는다 — 마커 포맷을
-    # 바꾸지 않는다.
+    # captured_utc is a human-readable absolute time (#36) — the body's
+    # relative age ("3m ago") is frozen at mint time, so this lets a later
+    # reader tell how stale that relative value has become. captured(epoch)
+    # is still read as-is by is_stale/installed_captured_at — this doesn't
+    # change the marker format.
     return '{} captured="{:.0f}" captured_utc="{}" -->'.format(
         BEGIN_PREFIX, captured_at, _iso_readable(captured_at))
 
@@ -41,19 +41,20 @@ def _block_text(body: str, captured_at: float) -> str:
 
 
 def _neutralize(body: str) -> str:
-    """본문이 마커를 담으면 구조가 깨진다. 무해하게 바꿔 둔다."""
+    """If the body itself contains the marker, structure breaks. Neutralize it."""
     return body.replace(END, END.replace("<!--", "<!_-")).replace(
         BEGIN_PREFIX, BEGIN_PREFIX.replace("<!--", "<!_-")
     )
 
 
 def _write_target(path: str) -> str:
-    """실제로 덮어쓸 경로. `path` 가 심볼릭 링크면 그 대상을 돌려준다.
+    """The path actually written to. If `path` is a symlink, return its target.
 
-    os.replace 는 목적지가 심볼릭 링크여도 디렉터리 엔트리(링크 자체)를 바꿔치기
-    한다 — 링크가 가리키던 실제 파일은 그대로 두고 링크만 평범한 파일로
-    대체돼 버린다. AGENTS.md 가 CLAUDE.md 와 공유하려고 일부러 둔 심링크라면
-    이 함수가 없으면 collapse() 가 공유 배선을 끊는다.
+    os.replace swaps the directory entry (the link itself) even when the
+    destination is a symlink — the real file the link pointed at stays put,
+    only the link gets replaced by a plain file. If AGENTS.md is deliberately
+    symlinked to share with CLAUDE.md, without this function collapse() would
+    sever that shared wiring.
     """
     try:
         if os.path.islink(path):
@@ -71,13 +72,14 @@ def _has_multiple_links(path: str) -> bool:
 
 
 def _write_shared(target: str, content: str) -> None:
-    """하드링크가 걸린 파일을 그 자리에서 덮어쓴다 (inode 를 바꾸지 않는다).
+    """Overwrite a hard-linked file in place (does not change the inode).
 
-    fsio.write_atomic 은 tmp + os.replace 라 디렉터리 엔트리만 새 inode 로
-    바꿔치기한다 — CLAUDE.md 와 AGENTS.md 가 하드링크로 같은 inode 를 공유할 때
-    이걸 쓰면 이 이름만 새 inode(수정된 내용)를 보고 다른 이름은 옛 inode(블록이
-    남은 원본)를 계속 본다. r+ 로 열어 같은 inode 에 직접 써야 두 이름이
-    갈라지지 않는다.
+    fsio.write_atomic is tmp + os.replace, which swaps only the directory
+    entry for a new inode — if CLAUDE.md and AGENTS.md share an inode via a
+    hard link, this would make only this name see the new inode (updated
+    content) while the other name keeps seeing the old inode (still holding
+    the block). Opening with r+ and writing directly into the same inode is
+    what keeps the two names from diverging.
     """
     with open(target, "r+", encoding="utf-8", newline="") as fh:
         fh.write(content)
@@ -94,41 +96,47 @@ def _write(target: str, content: str) -> None:
 
 
 def _without_block(existing: str) -> str:
-    """`existing` 에서 omhc 구간만 제거한 "순수 사용자 콘텐츠"를 돌려준다.
-    블록이 없으면 그대로.
+    """Returns "pure user content" — `existing` with only the omhc block
+    removed. Returned as-is if there's no block.
 
-    구간 앞뒤에 구분용 빈 줄을 끼워 넣지 않는다(아래 splice) — 리뷰 결함:
-    이전 버전은 그 빈 줄을 되돌리려고 위치(맨 앞/맨 끝)로 앞/뒤 중 어느
-    쪽이 "진짜 사용자 콘텐츠"인지 추측했는데, 사용자가 구간 위에 줄을
-    더하거나(맨 앞 배치에서 `before` 가 비지 않게 됨) 예전 배치의 구간
-    뒤에 콘텐츠가 더 있으면 그 추측이 틀려 한쪽을 통째로 버렸다(#33 리뷰).
-    구분용 빈 줄이 애초에 없으면 이 모호함 자체가 없다 — 앞뒤를 있는
-    그대로 이어붙이기만 하면 사용자 바이트를 한 번도 잃지 않는다."""
+    No separator blank line is inserted around the block (see splice below) —
+    review defect: an earlier version tried to restore that blank line by
+    guessing which side (before/after) was "real user content" based on
+    position (top/bottom), but that guess was wrong whenever the user added
+    lines above the block (making `before` non-empty even in a top placement)
+    or an old bottom placement had content after the block, and it dropped
+    one side wholesale (#33 review). Without a separator blank line to begin
+    with, this ambiguity doesn't exist — simply concatenating before/after as
+    they are never loses a single user byte."""
     return _BLOCK.sub("", existing, count=1)
 
 
 def splice(path: str, body: str, *, captured_at: float, file_header: str = "") -> None:
-    """마커 구간을 멱등하게 교체하고, 파일 맨 앞으로 옮긴다. 원자적으로 쓴다.
+    """Idempotently replaces the marker block and moves it to the top of the
+    file. Written atomically.
 
-    Codex 는 AGENTS.md 를 `project_doc_max_bytes`(기본 32768바이트) 만큼만
-    머리부터 읽는다(#33 실측) — 구간을 파일 끝에 붙이면 큰 AGENTS.md 에서
-    통째로 잘려 보이지 않는다. 그래서 구간을 맨 앞에 두고, 예전에 끝에
-    심어졌던 구간도 다음 splice 에서 앞으로 옮긴다. 구간과 나머지 콘텐츠
-    사이에 구분용 빈 줄을 넣지 않는다 — 블록 문자열 자체가 이미 개행으로
-    끝나 형태는 안 깨지고, `_without_block` 이 그 빈 줄을 되돌릴 필요가
-    아예 없어진다(리뷰 결함 회피, 위 `_without_block` 참고). tmp + fsync +
-    os.replace 를 쓴다 — 사람이 편집 중인 파일을 반쯤 쓴 상태로 남기면 안
-    된다. 다만 대상이 하드링크로 공유된 파일이면 `_write` 가 그 자리 수정으로
-    대신한다(`_write_shared` 참고).
+    Codex only reads AGENTS.md from the top up to `project_doc_max_bytes`
+    (default 32768 bytes, measured #33) — appending the block at the end
+    means it can be truncated away entirely in a large AGENTS.md. So the
+    block is kept at the top, and a block previously planted at the bottom is
+    moved to the top on the next splice. No separator blank line is inserted
+    between the block and the rest of the content — the block string itself
+    already ends in a newline so the shape stays intact, and `_without_block`
+    never has to restore that blank line (avoiding the review defect above,
+    see `_without_block`). Uses tmp + fsync + os.replace — a file a human may
+    be editing must never be left half-written. If the target is a
+    hard-linked shared file, `_write` substitutes an in-place edit instead
+    (see `_write_shared`).
     """
     block = _block_text(body, captured_at)
 
     existing = ""
     created = True
     try:
-        # newline="" — 사람이 CRLF 로 쓴 AGENTS.md 를 텍스트 모드 기본값(보편
-        # 개행 번역)으로 읽으면 \r 이 사라져 strip() 이 원본과 다른 바이트를
-        # 돌려준다. 여기서 안 건드리고 그대로 들고 있다가 그대로 되돌려 쓴다.
+        # newline="" — reading an AGENTS.md a human wrote with CRLF in text
+        # mode's default (universal newline translation) would drop the \r,
+        # making strip() return different bytes than the original. Keep it
+        # untouched here and write it back exactly as read.
         with open(path, encoding="utf-8", errors="replace", newline="") as fh:
             existing = fh.read()
         created = False
@@ -144,11 +152,12 @@ def splice(path: str, body: str, *, captured_at: float, file_header: str = "") -
 
 def prospective_block_end_bytes(path: str, body: str, *, captured_at: float,
                                  file_header: str = "") -> int:
-    """`splice(path, body, ...)` 를 실제로 실행하면 구간이 끝나는 지점의
-    UTF-8 바이트 오프셋. 구간이 항상 파일 맨 앞이므로(위 splice) 이는 곧
-    `len((prefix + block).encode("utf-8"))` — 기존 파일 내용(`rest`) 크기와
-    무관하다. 쓰기 전에 예산(Codex 의 `project_doc_max_bytes`)을 넘는지 미리
-    가늠하는 용도라 실제로 쓰지 않는다."""
+    """The UTF-8 byte offset where the block would end if `splice(path, body,
+    ...)` actually ran. Since the block is always at the top of the file
+    (see splice above), this is just `len((prefix + block).encode("utf-8"))`
+    — independent of the existing file content (`rest`) size. Used only to
+    estimate before writing whether the budget (Codex's
+    `project_doc_max_bytes`) would be exceeded — never actually writes."""
     block = _block_text(body, captured_at)
     created = not os.path.exists(path)
     prefix = file_header if created and file_header else ""
@@ -156,12 +165,13 @@ def prospective_block_end_bytes(path: str, body: str, *, captured_at: float,
 
 
 def strip(path: str) -> bool:
-    """마커 구간을 제거한다. 그것만 있던 파일이면 파일을 지운다.
+    """Removes the marker block. Deletes the file if it held nothing else.
 
-    `path` 가 심볼릭 링크거나 하드링크로 공유된 파일이면 이름/inode 를 살려두고
-    내용만 비운다 — 링크를 지우거나 바꿔치기하면 공유 배선(예: CLAUDE.md ->
-    AGENTS.md)이 끊긴다. 이 파일이 omhc 만의 것이면 비어 있는 실제 파일이
-    남는 편이, 공유 파일을 없애거나 갈라 버리는 것보다 덜 놀랍다.
+    If `path` is a symlink or a hard-linked shared file, the name/inode is
+    kept and only the content is emptied — deleting or replacing the link
+    would sever shared wiring (e.g. CLAUDE.md -> AGENTS.md). If the file
+    belongs to omhc alone, leaving an empty real file is less surprising
+    than deleting or splitting a shared file.
     """
     try:
         is_link = os.path.islink(path)
@@ -194,22 +204,26 @@ def strip(path: str) -> bool:
 
 
 def strip_if_captured(path: str, expected_captured: float) -> bool:
-    """`strip` 의 조건부 버전(#36 리뷰) — 지우려는 구간의 `captured` 가
-    `expected_captured` 와 여전히 같을 때만 지운다. 호출자가 "이 값이면 낡은
-    것"이라고 이미 한 번 판정한 뒤 이 함수를 부르는 사이(check-then-act),
-    다른 프로세스(같은 SessionStart 안에서 병렬로 도는 `brief` 등)가 그 새
-    구간으로 이미 덮어썼으면, 그 값이 달라져 있으므로 손대지 않는다.
+    """A conditional version of `strip` (#36 review) — removes the block only
+    if its `captured` still equals `expected_captured`. Between the caller
+    already judging "this value means stale" and calling this function
+    (check-then-act), if another process (e.g. a `brief` running in parallel
+    within the same SessionStart) has already overwritten it with a new
+    block, that value will have changed, so this leaves it alone.
 
-    경합 창은 두 군데다: (a) 호출자의 판정과 이 함수의 첫 읽기 사이 — 여기
-    아래 첫 읽기가 이미 새 값을 보게 되므로 `expected_captured` 비교에서
-    자연히 걸러진다. (b) 이 함수의 첫 읽기와 실제로 지우는 쓰기 사이 — 쓰기
-    직전에 `installed_captured_at` 로 한 번 더 읽어 그새 바뀌지 않았는지
-    재확인한다. 파일 잠금 없이는 (b) 도 이론상 완전히 닫히지 않지만(재확인과
-    쓰기 사이에도 찰나의 창이 남는다), 재확인 지점을 쓰기 바로 앞으로 당겨
-    실제로 남는 창을 최소화한다 — 이 도구 규모(개인용, v1 순차 사용 가정)에
-    파일 잠금은 과하다. 남는 틈은 재확인부터 os.replace 까지다 — 그 안에
-    임시 파일 쓰기와 fsync 가 들어 있어 몇 밀리초쯤이다(리뷰에서 fsio 안에 끼워
-    넣어 확인). 그 사이에 쓴 블록은 여전히 잃을 수 있다."""
+    There are two race windows: (a) between the caller's judgment and this
+    function's first read — the first read below already sees the new value,
+    so it's naturally filtered out by the `expected_captured` comparison.
+    (b) between this function's first read and the actual delete-write — read
+    once more via `installed_captured_at` right before writing to recheck
+    nothing changed in between. Without file locking, (b) can't be closed
+    completely even in theory (a brief window remains between the recheck
+    and the write), but moving the recheck right up against the write
+    minimizes the window that's actually left — file locking is overkill at
+    this tool's scale (personal use, v1 assumes sequential use). What remains
+    is the gap from the recheck to os.replace — a few milliseconds, since
+    temp-file writing and fsync sit inside it (confirmed by instrumenting
+    fsio during review). A block written in that window can still be lost."""
     try:
         is_link = os.path.islink(path)
     except OSError:
@@ -250,11 +264,11 @@ def strip_if_captured(path: str, expected_captured: float) -> bool:
 
 
 def installed_block_end_bytes(path: str) -> Optional[int]:
-    """설치된 구간이 끝나는 지점의 UTF-8 바이트 오프셋. 구간이 없으면 None.
+    """The UTF-8 byte offset where the installed block ends, or None if there's no block.
 
-    Codex 의 `project_doc_max_bytes` 예산(#33)과 비교하는 용도 — 지금 구간이
-    어디 있든(정상은 맨 앞, 다음 splice 전까지는 예전 배치도 남아 있을 수
-    있다) 실측 오프셋을 그대로 낸다."""
+    For comparing against Codex's `project_doc_max_bytes` budget (#33) — gives
+    the actual measured offset regardless of where the block currently sits
+    (normally the top; an old bottom placement can remain until the next splice)."""
     try:
         with open(path, encoding="utf-8", errors="replace", newline="") as fh:
             text = fh.read()

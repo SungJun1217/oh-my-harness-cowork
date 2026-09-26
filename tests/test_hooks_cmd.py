@@ -1,6 +1,6 @@
-"""`omhc hooks install|uninstall` — CLI 레벨. 파일을 실제로 어떻게 바꾸는지는
-tests/test_hookconf.py 의 `TestHookconfMergeStrip` 이 맡는다. 여기는 출력
-문구·`--harness`·exit code·install.sh 와의 패리티다."""
+"""`omhc hooks install|uninstall` — the CLI level. How the file actually
+changes is covered by `TestHookconfMergeStrip` in tests/test_hookconf.py.
+This covers output wording, `--harness`, exit code, and parity with install.sh."""
 from __future__ import annotations
 
 import io
@@ -67,7 +67,7 @@ class TestHooksInstallCli(unittest.TestCase):
     def test_codex_post_write_note_is_printed(self):
         code, text = _run(["hooks", "install", "--harness", "codex-cli"], self.home)
         self.assertEqual(code, 0)
-        self.assertIn("신뢰", text)  # codex-cli hook_config() 의 post_write_note
+        self.assertIn("untrusted", text)  # codex-cli hook_config()'s post_write_note
 
     def test_unknown_harness_exits_nonzero(self):
         code, text = _run(["hooks", "install", "--harness", "nope"], self.home)
@@ -109,20 +109,20 @@ class TestHooksInstallCli(unittest.TestCase):
         self.assertIn("nothing to remove", text)
 
     def test_exit_code_is_1_when_the_post_install_reinspect_still_fails(self):
-        # 일부러 바이너리를 두지 않은 홈 — 파일은 쓰이지만 재검사는 FAIL 이고,
-        # 그 사실이 exit code 에도 반영돼야 한다(#7 리뷰 2).
+        # A home deliberately without a binary — the file is written but the
+        # re-inspection is FAIL, and that fact must be reflected in the exit code too (#7 review 2).
         home = os.path.join(self._tmp.name, "home-nobin")
         os.makedirs(home)
         code, text = _run(["hooks", "install", "--harness", "claude-code"], home)
         self.assertEqual(code, 1)
         self.assertIn("FAIL", text)
         settings = os.path.join(home, ".claude", "settings.json")
-        self.assertTrue(os.path.exists(settings))  # 그래도 파일은 실제로 쓰였다
+        self.assertTrue(os.path.exists(settings))  # the file was still actually written
 
 
 class TestHooksNoAction(unittest.TestCase):
-    """#19: 동작 없이 `omhc hooks` 만 부르면 argparse 관례대로 사용법은
-    stderr 로, exit 2 로 간다."""
+    """#19: calling bare `omhc hooks` with no action goes to stderr with usage
+    and exit 2, per argparse convention."""
 
     def test_no_action_prints_usage_to_stderr_and_exits_2(self):
         out = io.StringIO()
@@ -134,10 +134,10 @@ class TestHooksNoAction(unittest.TestCase):
 
 
 class TestHooksFreshUser(unittest.TestCase):
-    """curl 설치 직후, 어느 하네스도 아직 한 번도 안 돌아 `detect()` 가 보는
-    세션 디렉터리(`~/.claude/projects`, `~/.codex/sessions`)가 없는 상태
-    (#7 리뷰 1). `adapters.present` 를 고정하지 않는다 — 이 테스트의 요점이
-    바로 그 감지 규칙 자체다."""
+    """Right after a curl install, neither harness has run yet, so the session
+    directories `detect()` looks for (`~/.claude/projects`, `~/.codex/sessions`)
+    don't exist (#7 review 1). `adapters.present` is not pinned — the detection
+    rule itself is exactly what this test is about."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -147,7 +147,7 @@ class TestHooksFreshUser(unittest.TestCase):
         _make_bin(self.home)
 
     def test_default_install_targets_a_harness_whose_config_dir_exists_even_undetected(self):
-        os.makedirs(os.path.join(self.home, ".claude"))  # projects/ 는 아직 없다
+        os.makedirs(os.path.join(self.home, ".claude"))  # projects/ doesn't exist yet
         inst = cli.adapters.get("claude-code", home=self.home)
         self.assertFalse(inst.detect().present)
 
@@ -171,34 +171,36 @@ class TestHooksFreshUser(unittest.TestCase):
         self.assertIn("claude-code hooks", text)
 
 
-# --- install.sh 패리티 --------------------------------------------------
+# --- install.sh parity --------------------------------------------------
 
 
 def _extract_install_sh_stripper() -> str:
-    """`strip_omhc_hooks() { ... }` 안의 python 헤레독 본문. 파일에서 처음
-    나오는 `<<'PY'` 에 기대지 않는다 — install.sh 에 다른 heredoc 이 추가돼도
-    엉뚱한 걸 뽑지 않도록 함수 이름에 앵커를 건다(#7 리뷰 6)."""
+    """The python heredoc body inside `strip_omhc_hooks() { ... }`. Doesn't
+    rely on the first `<<'PY'` in the file — anchors on the function name so
+    that adding another heredoc to install.sh doesn't extract the wrong thing (#7 review 6)."""
     with open(os.path.join(REPO, "install.sh"), encoding="utf-8") as fh:
         text = fh.read()
     fn = re.search(r"strip_omhc_hooks\(\)\s*\{.*?<<'PY'\n(.*?)\nPY\n", text, re.DOTALL)
-    assert fn, "install.sh 에서 strip_omhc_hooks() 의 python 헤레독을 못 찾았다"
+    assert fn, "could not find strip_omhc_hooks()'s python heredoc in install.sh"
     return fn.group(1)
 
 
 class TestInstallShParity(unittest.TestCase):
-    """install.sh 의 SessionStart 스트리퍼(정규식 기반)와 hookconf.strip
-    (argv 구조 기반)이 같은 입력에서 같은 결과 *와 같은 "바뀌었다" 신호* 를
-    내는지 본다(install.sh 의 rc 0/3 대 hookconf.strip() 의 True/False).
+    """Checks that install.sh's SessionStart stripper (regex-based) and
+    hookconf.strip (argv-structure-based) produce the same result *and the same
+    "changed" signal* on the same input (install.sh's rc 0/3 vs. hookconf.strip()'s
+    True/False).
 
-    문자열만 닮았을 뿐 구조가 다른 경우는 두 판정이 의도적으로 갈라진다
-    (omhc/hookconf.py 상단 주석 — docstring 이 아니라 모듈 코멘트 — 참고).
-    실측된 세 divergence 모두 여기 패리티 대상에서 제외한다:
-      - `cd ~ && omhc brief …` — install.sh 는 지우지만 hookconf 는 손대지
-        않는다(전체 명령의 argv[0] 는 "cd").
-      - `/usr/bin/env omhc mark …` — 마찬가지로 install.sh 만 지운다
-        (argv[0] 는 "env").
-      - `'omhc' 'mark' --harness x` — hookconf 는 shlex 로 풀어 인식하지만
-        install.sh 의 정규식은 "mark"/"brief" 앞의 따옴표를 허용하지 않는다.
+    Cases that look alike as strings but differ structurally are where the two
+    judgments deliberately diverge (see the comment atop omhc/hookconf.py — a
+    module comment, not a docstring). All three observed divergences are
+    excluded from parity here:
+      - `cd ~ && omhc brief ...` — install.sh removes it but hookconf leaves it
+        alone (the whole command's argv[0] is "cd").
+      - `/usr/bin/env omhc mark ...` — likewise, only install.sh removes it
+        (argv[0] is "env").
+      - `'omhc' 'mark' --harness x` — hookconf recognizes it via shlex parsing,
+        but install.sh's regex doesn't allow quotes before "mark"/"brief".
     """
 
     @classmethod
@@ -217,7 +219,7 @@ class TestInstallShParity(unittest.TestCase):
         with open(script_path, "w", encoding="utf-8") as fh:
             fh.write(self.script)
         rc = subprocess.run([sys.executable, script_path, path]).returncode
-        self.assertIn(rc, (0, 3), "install.sh 스트리퍼가 예상 못한 코드로 실패: {}".format(rc))
+        self.assertIn(rc, (0, 3), "install.sh stripper failed with an unexpected code: {}".format(rc))
         with open(path, encoding="utf-8") as fh:
             return json.load(fh), rc == 0
 
@@ -234,7 +236,7 @@ class TestInstallShParity(unittest.TestCase):
         got_py, changed_py = self._run_hookconf_strip(json.loads(json.dumps(conf)))
         self.assertEqual(got_sh, got_py)
         self.assertEqual(changed_sh, changed_py,
-                         "changed 신호가 갈렸다: install.sh={} hookconf={}".format(
+                         "changed signal diverged: install.sh={} hookconf={}".format(
                              changed_sh, changed_py))
 
     def test_mixed_group(self):
@@ -288,8 +290,9 @@ class TestInstallShParity(unittest.TestCase):
         ]}})
 
     def test_only_omhc_hooks_drops_the_hooks_key_entirely(self):
-        # #20: SessionStart 가 omhc 훅뿐이면, 지우고 나서 hooks 가 빈 객체로
-        # 남는 게 아니라 hooks 키 자체가 사라져야 한다 — 두 판정이 같이 그런다.
+        # #20: if SessionStart holds only omhc hooks, after removal hooks must not
+        # remain as an empty object — the hooks key itself must disappear, and both
+        # judgments agree on this.
         conf = {"hooks": {"SessionStart": [
             {"hooks": [
                 {"type": "command", "command": "$HOME/.local/bin/omhc mark --harness claude-code"},

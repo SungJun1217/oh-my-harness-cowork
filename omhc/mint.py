@@ -5,47 +5,50 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import guard, locate
 
-# 주입 예산. 하드 캡이며 이 함수의 마지막 문장이 단정이다.
+# Injection budget. Hard cap; the last statement of this function is the assert.
 BUDGET = 900
 
-# 이 아래로는 헤더 2줄과 PULL 만 남아 쓸모가 없다. 조용히 쓰레기를 내지 않고 거절한다.
+# Below this, only the 2-line header and PULL survive — useless. Reject rather
+# than silently emit garbage.
 MIN_BUDGET = 200
 
 SEP = "  "
 
-# 승인형 턴. 이것을 NEXT 로 쓰면 이전 에이전트의 제안이 사람의 지시로 세탁된다.
+# Approval-style turn. Using this as NEXT launders the prior agent's proposal
+# into a human instruction.
 _ACK_TOKEN = (
     r"(?:응|넵|네|그래|오케이|오키|ok|okay|yes|yep|sure|good|굿|ㅇㅇ|"
     r"계속|진행|진행해|진행해줘|해줘|해|가자|continue|go|ahead|please|"
     r"그대로|알아서|부탁)"
 )
-# 승인 토큰들이 이어진 것도 승인이다 — "계속 진행해", "응 진행해줘", "go ahead".
+# A chain of approval tokens is still approval — "계속 진행해", "응 진행해줘", "go ahead".
 _ACK = re.compile(
     r"^{t}(?:[\s,.!~]+{t})*[\s.!~]*$".format(t=_ACK_TOKEN), re.I
 )
 _ACK_MAX = 30
 
-# 실패 해소 판정에 쓰는 인자 접두 길이.
+# Arg prefix length used to judge whether a failure was resolved.
 _RESOLVE_PREFIX = 40
 
 _SAID_MAX = 3
 _FAIL_MAX = 2
 _DID_MAX_PATHS = 4
 
-# 슬롯 우선순위. 낮은 것부터 버린다.
+# Slot priority. Lowest is dropped first.
 #
-# 확인된 사람의 지시(NEXT)와 목표(GOAL)가 이전 에이전트의 검증되지 않은
-# 주장(PLAN?)보다 낮으면 안 된다 — 실측에서 PLAN? 이 GOAL 을 밀어내고 살아남는
-# 일이 실제로 벌어졌다.
-# {슬롯: (우선순위, 바이트 상한)}. 두 표를 따로 두면 슬롯을 추가할 때 둘 다
-# 고쳐야 하고, 한쪽에 오타가 나면 KeyError 와 "출력에서 조용히 빠짐" 이 서로 다른
-# 시점에 터진다.
+# Confirmed human instruction (NEXT) and goal (GOAL) must never rank below the
+# prior agent's unverified claim (PLAN?) — measured: PLAN? actually survived
+# and pushed GOAL out.
+# {slot: (priority, byte cap)}. Keeping these two tables separate would mean
+# fixing both when adding a slot, and a typo in one would surface as a
+# KeyError while the other silently drops from output — different failure
+# times.
 _SLOTS = {
     "NEXT": (60, 300),
     "GOAL": (50, 260),
     "FAIL": (45, 110),
     "NOTE": (40, 180),
-    # DID 는 검증 가능한 사실(고친 파일)이고 PLAN? 은 이전 에이전트의 주장이다.
+    # DID is a verifiable fact (files changed); PLAN? is the prior agent's claim.
     "DID": (38, 180),
     "PLAN?": (35, 190),
     "SAID": (10, 190),
@@ -66,11 +69,12 @@ def _is_ack(text: str) -> bool:
 
 
 def _clip(text: str, limit: int) -> str:
-    """바이트 기준으로 자른다.
+    """Clip by bytes, not characters.
 
-    글자 수로 자르면 안 된다 — 한글은 UTF-8 에서 글자당 3바이트이므로 200자
-    슬롯 하나가 600바이트를 먹고, 900바이트 예산에서 다른 슬롯이 전부 밀린다.
-    실측에서 749바이트 산출물에 151바이트 여유가 남았는데도 슬롯 5개가 버려졌다.
+    Clipping by character count is wrong — Korean is 3 bytes/char in UTF-8, so
+    a single 200-char slot eats 600 bytes and crowds out every other slot in a
+    900-byte budget. Measured: a 749-byte output with 151 bytes of headroom
+    left still dropped 5 slots.
     """
     flat = _one_line(text)
     raw = flat.encode("utf-8")
@@ -81,10 +85,11 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _age(now: float, events) -> str:
-    """마지막 이벤트로부터 얼마나 지났는가.
+    """Time since the last event.
 
-    받는 에이전트에게는 세션이 얼마나 길었는지보다 **얼마나 오래된 일인지**가
-    중요하다 — 10분 전 작업과 사흘 전 작업은 이어가는 방식이 다르다.
+    What matters to the receiving agent is **how old is this**, not how long
+    the session ran — work from 10 minutes ago and work from 3 days ago need
+    to be picked up differently.
     """
     epochs = [e.epoch for e in events if e.epoch]
     if not epochs or not now:
@@ -114,10 +119,11 @@ def _duration(events) -> str:
 
 
 def _relativize(path: str, repo_root: Optional[str]) -> Optional[str]:
-    """레포 상대 경로. 레포 밖이면 None. locate.relativize 의 단일 정의를 쓴다.
+    """Repo-relative path, or None outside the repo. Uses locate.relativize's
+    single definition.
 
-    basename 으로 떨어뜨리면 안 된다 — 레포 밖 파일(홈 디렉터리의 메모 등)이
-    레포 파일처럼 보여 DID 슬롯이 거짓말을 한다.
+    Must not fall back to basename — a file outside the repo (e.g. a note in
+    the home directory) would then look like a repo file and DID would lie.
     """
     if not repo_root:
         return None if path.startswith("/") else path
@@ -128,11 +134,11 @@ def _relativize(path: str, repo_root: Optional[str]) -> Optional[str]:
 
 
 def _unresolved_failures(events) -> Tuple[List, int]:
-    """나중에 같은 일이 성공했다면 그 실패는 보고하지 않는다.
+    """If the same thing later succeeded, don't report the failure.
 
-    FAIL 은 받는 에이전트가 가장 행동하기 쉬운 슬롯이므로, 가장 틀리기 쉬운 줄이
-    되어서는 안 된다. 한 시간 전부터 그린인 스위트에 대해 '3 failed' 라고 말하면
-    다음 에이전트가 없는 문제를 쫓는다.
+    FAIL is the slot the receiving agent acts on most readily, so it must not
+    be the line most likely to be wrong. Saying "3 failed" about a suite
+    that's been green for an hour sends the next agent chasing a non-issue.
     """
     failures = [e for e in events if not e.ok]
     if not failures:
@@ -153,10 +159,11 @@ def _unresolved_failures(events) -> Tuple[List, int]:
 
 
 def failure_tags(read) -> List[Tuple[str, object]]:
-    """[E1], [E2] … 태그와 그 원본 Event 의 짝.
+    """Pairs of [E1], [E2] … tags with their source Event.
 
-    mint 와 refs.tsv 기록이 같은 계산을 쓰도록 여기 한 곳에 둔다 — 두 곳에서
-    따로 세면 `omhc show E1` 이 다른 것을 가리킨다.
+    Kept in one place so mint and the refs.tsv record use the same
+    computation — counting separately in two places would leave `omhc show
+    E1` pointing at something else.
     """
     unresolved, _fixed = _unresolved_failures(list(read.events))
     return [
@@ -172,10 +179,11 @@ def mint(
     now: float,
     notes: Sequence[str] = (),
 ) -> str:
-    """Event 를 ≤budget 바이트의 표식으로 만든다. 주입 텍스트의 유일한 생성지점.
+    """Turns Events into a ≤budget-byte marker. The single generation point
+    for injected text.
 
-    빈 문자열은 "보낼 것이 없다" 는 정상 응답이다 — 같은 벤더이거나 Event 가
-    없을 때. 호출자는 빈 문자열을 그대로 주입하지 않는다.
+    An empty string is a normal "nothing to send" response — same vendor, or
+    no Events. Callers must not inject an empty string as-is.
     """
     if budget < MIN_BUDGET:
         raise ValueError(
@@ -184,12 +192,13 @@ def mint(
         )
 
     ref = read.ref
-    # DID 는 **레포 루트** 기준으로 상대화한다. ref.cwd 는 세션이 시작된
-    # 작업 디렉터리이고 서브디렉터리일 수 있다(어댑터가 equal-or-descendant 로
-    # 매칭하는 이유가 그것이다) — 그걸 기준으로 삼으면 그 밖에서 고친 파일이
-    # "레포 밖"으로 판정되어 DID 에서 사라진다.
+    # DID relativizes against the **repo root**, not ref.cwd. ref.cwd is the
+    # working directory the session started in and can be a subdirectory
+    # (that's why the adapter matches equal-or-descendant) — using it as the
+    # base would judge files changed outside it as "outside the repo" and
+    # drop them from DID.
     repo_root = locate.resolve_repo_root(ref.cwd) if ref.cwd else None
-    # F5: 같은 벤더끼리는 native resume 이 무손실이며 이 요약보다 우월하다.
+    # F5: within the same vendor, native resume is lossless and beats this summary.
     if ref.adapter_id == to_adapter_id:
         return ""
     events = list(read.events)
@@ -199,8 +208,8 @@ def mint(
     humans = [e for e in events if e.author == "human" and e.text]
     agent_said = [e for e in events if e.author == "agent" and e.verb == "said" and e.text]
 
-    # --- 슬롯 만들기 -------------------------------------------------------
-    slots: List[Tuple[str, str, int]] = []  # (key, value, priority) 낮을수록 먼저 버린다
+    # --- build slots --------------------------------------------------------
+    slots: List[Tuple[str, str, int]] = []  # (key, value, priority) lower drops first
 
     goal = humans[0].text if humans else ""
     last_human = humans[-1] if humans else None
@@ -210,30 +219,31 @@ def mint(
     if last_human is not None and last_human is not humans[0] and not _is_ack(last_human.text):
         next_value = last_human.text
     elif last_human is not None and last_human is humans[0] and not _is_ack(last_human.text):
-        # 사람 턴이 하나뿐이면 그것이 목표이자 다음 할 일이다. 중복시키지 않는다.
+        # A single human turn is both the goal and the next step. Don't duplicate it.
         next_value = ""
     if not next_value and agent_said:
-        # 사람의 말이 없거나 승인형이면 이전 에이전트의 주장으로 대체한다.
-        # '?' 한 바이트가 "검증되지 않은 주장" 라벨이다.
+        # No human text, or it's approval-style — fall back to the prior
+        # agent's claim. The single '?' byte labels it "unverified claim".
         plan_value = agent_said[-1].text
 
-    # 중간 턴은 최근 순이 아니라 긴 것 우선으로 고른다 — "어디까지 됐어?" 같은
-    # 짧은 질문보다 요구사항을 담은 문장이 다음 에이전트에게 쓸모 있다.
+    # Middle turns are picked longest-first, not most-recent — a sentence
+    # carrying requirements is more useful to the next agent than a short
+    # question like "how's it going?".
     said_pool = humans[1:-1] if len(humans) > 2 else []
     said_values = [
         e.text for e in sorted(said_pool, key=lambda e: (-len(e.text), -e.seq))
     ][:_SAID_MAX]
 
     unresolved, fixed_later = _unresolved_failures(events)
-    # 인라인 스크립트가 FAIL 줄을 다 잡아먹지 않도록 짧게 자른다. 전문은 태그로
-    # 조회한다 — 그것이 tier (b) 의 존재 이유다.
+    # Clip short so an inline script doesn't eat the whole FAIL line. Full
+    # text is looked up by tag — that's the reason tier (b) exists.
     fail_values = [
         "{} -> failed [E{}]".format(_clip(e.arg, 60) or e.verb, i + 1)
         for i, e in enumerate(unresolved[:_FAIL_MAX])
     ]
 
-    # 같은 파일이 여러 번 고쳐지므로 경로를 메모한다 — 실측 136개 occurrence 에
-    # 고유 경로는 55개였고, realpath 는 경로 성분마다 lstat 를 한다.
+    # Same file gets modified repeatedly, so dedupe paths — measured 136
+    # occurrences down to 55 unique paths, and realpath lstats every path segment.
     modified_paths: List[str] = []
     seen_paths: Dict[str, Optional[str]] = {}
     for e in events:
@@ -264,13 +274,15 @@ def mint(
         add("FAIL", value)
     add("DID", did_value)
 
-    # --- 헤더와 PULL (절대 버리지 않는다) ---------------------------------
-    # 여기 8자는 log/status 의 고유 접두사(_unique_prefix_len)와 달리 일부러
-    # 고정폭이다 — 900바이트 예산 안에서 헤더 한 줄이 늘어나는 만큼 본문에서
-    # 깎이므로, 충돌 가능성(#15c)보다 예산을 우선한다(#19).
+    # --- header and PULL (never dropped) ------------------------------------
+    # The 8 chars here are deliberately fixed-width, unlike the unique prefix
+    # (_unique_prefix_len) used by log/status — a longer header line eats
+    # directly into the body within the 900-byte budget, so budget wins over
+    # collision risk (#15c) here (#19).
     header = [
-        # 문구는 guard.HEADER_LINE1_FMT 하나에서만 정의한다 — guard 가 되돌아온
-        # 자기 발화(#24)를 인식하는 패턴과 어긋나면 안 되기 때문이다.
+        # The wording is defined in exactly one place, guard.HEADER_LINE1_FMT —
+        # it must not drift from the pattern guard uses to recognize its own
+        # echoed text (#24).
         guard.HEADER_LINE1_FMT.format(
             ref.adapter_id,
             (ref.session_id or "-")[:8],
@@ -282,21 +294,22 @@ def mint(
     pull_bits = ["omhc log --last 30"]
     if fail_values:
         pull_bits.insert(0, "omhc show E1")
-    # 긴 경로 하나가 PULL 줄을 100바이트 넘게 만들어 내용 슬롯을 밀어낸다.
-    # 짧은 경로만 힌트로 쓴다.
+    # A single long path can push the PULL line past 100 bytes and crowd out
+    # content slots. Only use a short path as the hint.
     short_paths = sorted(modified_paths, key=len)
     if short_paths and len(short_paths[0]) <= 32:
         pull_bits.append("omhc log --file {}".format(short_paths[0]))
     pull = "PULL" + SEP + " · ".join(pull_bits)
 
-    # --- 예산 맞추기 -------------------------------------------------------
+    # --- fit the budget ------------------------------------------------------
     hidden_events = len(events) - len(humans) - len(unresolved[:_FAIL_MAX])
     dropped_slots: Dict[str, int] = {}
 
     def render(active: List[Tuple[str, str, int]], more: str) -> str:
-        # 슬롯 순서는 add() 호출 순서 하나로 정의된다. 드롭은 상대 순서를
-        # 보존하므로 고정 키 목록으로 다시 정렬할 필요가 없다 — 두 곳에 순서를
-        # 적어두면 슬롯을 추가할 때 둘 다 고쳐야 한다.
+        # Slot order is defined solely by the order add() was called. Dropping
+        # preserves relative order, so there's no need to re-sort against a
+        # fixed key list — writing the order in two places would mean fixing
+        # both when adding a slot.
         lines = list(header)
         for slot_key, value, _prio in active:
             lines.append(slot_key + SEP + value)
@@ -321,7 +334,7 @@ def mint(
     active = list(slots)
     out = render(active, more_text())
     while len(out.encode("utf-8")) > budget and active:
-        # 우선순위가 낮은 것부터 버리고, 버린 사실을 MORE 에 계상한다.
+        # Drop lowest priority first, tallying the drop into MORE.
         victim_index = min(range(len(active)), key=lambda i: (active[i][2], -i))
         key = active[victim_index][0]
         dropped_slots[key] = dropped_slots.get(key, 0) + 1
@@ -329,8 +342,8 @@ def mint(
         out = render(active, more_text())
 
     if not active and slots:
-        # 내용이 하나도 남지 않은 표식은 쓸모가 없다. 예산이 허락하는 만큼
-        # 최우선 슬롯을 잘라서라도 한 가지는 말한다.
+        # A marker with no content left is useless. Say at least one thing,
+        # even if it means clipping the top-priority slot to fit the budget.
         best = max(slots, key=lambda s: s[2])
         floor = len(render([], more_text()).encode("utf-8"))
         room = budget - floor - len(best[0]) - len(SEP) - 1
@@ -344,8 +357,9 @@ def mint(
                 active = []
 
     if len(out.encode("utf-8")) > budget:
-        # 줄 단위로만 줄인다. 문자 단위로 자르면 PULL 이 'omhc log --file .git' 처럼
-        # 중간에서 끊기고, 잘린 명령은 없는 명령보다 나쁘다.
+        # Shrink only line-by-line. Clipping mid-character would cut PULL off
+        # in the middle, e.g. 'omhc log --file .git' truncated — a broken
+        # command is worse than no command.
         for candidate in (
             render([], more_text()),
             "\n".join(header + [pull]) + "\n",
@@ -356,7 +370,7 @@ def mint(
                 out = candidate
                 break
         else:
-            # 헤더 한 줄조차 안 들어가는 예산이면 보낼 것이 없다.
+            # If even a single header line doesn't fit, there's nothing to send.
             out = ""
 
     out = guard.redact_b64(out)

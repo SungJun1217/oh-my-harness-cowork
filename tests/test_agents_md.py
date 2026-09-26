@@ -45,7 +45,7 @@ class TestAgentsMd(unittest.TestCase):
         self.assertIn(managed_block.END, text)
 
     def test_install_registers_the_file_in_git_info_exclude(self):
-        """사용자 결정: 허용하되 git status 에 보이지 않고 클론 밖으로 나가지 않는다."""
+        """User decision: allowed, but stays invisible to git status and never leaves the clone."""
         agents_md.install(self.bundle(), now=1000.0)
         self.assertIn("AGENTS.md", self.exclude_text())
 
@@ -61,7 +61,7 @@ class TestAgentsMd(unittest.TestCase):
         self.assertNotIn("AGENTS.md", out.stdout)
 
     def test_already_tracked_agents_md_is_never_excluded(self):
-        """추적 중인 파일을 exclude 에 넣어도 무효이고, 사용자 파일을 건드리면 안 된다."""
+        """Adding a tracked file to exclude is a no-op, and the user's file must not be touched."""
         with open(self.path, "w", encoding="utf-8") as fh:
             fh.write("# 사람이 쓴 지침\n")
         git(self.repo, "add", "AGENTS.md")
@@ -104,7 +104,7 @@ class TestAgentsMd(unittest.TestCase):
         self.assertFalse(agents_md.collapse(self.repo, now=1000.0))
 
     def test_collapse_of_a_symlinked_agents_md_edits_the_target_and_keeps_the_link(self):
-        """리뷰 결함 1: strip() 이 링크 자체를 파일로 바꿔치기하면 공유 배선이 끊긴다."""
+        """Review defect 1: if strip() replaces the link itself with a plain file, the shared wiring breaks."""
         target = os.path.join(self.repo, "docs.md")
         with open(target, "w", encoding="utf-8") as fh:
             fh.write("neutral instructions")
@@ -128,8 +128,8 @@ class TestAgentsMd(unittest.TestCase):
         self.assertIsNone(managed_block.installed_captured_at(self.path))
 
     def test_collapse_of_a_hardlinked_agents_md_edits_the_shared_inode(self):
-        """라운드 2 리뷰 결함: os.replace 는 하드링크를 갈라놓는다 — 이 이름만 새
-        inode 를 갖고 다른 이름(예: CLAUDE.md)은 블록이 남은 옛 inode 를 계속 본다."""
+        """Round 2 review defect: os.replace splits a hard link — this name gets a new
+        inode while the other name (e.g. CLAUDE.md) keeps looking at the old inode with the block still in it."""
         other_name = os.path.join(self.repo, "CLAUDE.md")
         managed_block.splice(self.path, "[omhc] leaked\n", captured_at=1000.0)
         os.link(self.path, other_name)
@@ -149,14 +149,14 @@ class TestAgentsMd(unittest.TestCase):
             self.assertTrue(receipt.paths_written)
 
     def test_receipt_is_not_consumed_on_read(self):
-        """AGENTS.md 는 세션마다 다시 읽히므로 한 번 읽고 사라지지 않는다."""
+        """AGENTS.md is re-read every session, so it doesn't disappear after one read."""
         receipt = agents_md.install(self.bundle(), now=1000.0)
         self.assertFalse(receipt.consumed_on_read)
         self.assertIn("omhc", receipt.cleanup_hint)
 
 
 class TestSharedWithClaude(unittest.TestCase):
-    """AGENTS.md 가 Claude Code 에도 새는 배선이면 Path B 는 절대 쓰면 안 된다."""
+    """If AGENTS.md's wiring also leaks into Claude Code, Path B must never be used."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -251,9 +251,9 @@ class TestSharedWithClaude(unittest.TestCase):
         os.symlink(self.agents, self.claude)
         home = tempfile.mkdtemp()
         self.addCleanup(lambda: __import__("shutil").rmtree(home, ignore_errors=True))
-        # codex-cli 어댑터가 write 능력이 있다고 판정하려면 detect() 가 필요 없다 —
-        # deliver 는 capabilities 만 보고 install_handoff 는 훅 부재로 실패한 뒤
-        # Path B(agents_md.install)로 넘어가야 이 테스트의 대상 경로를 태운다.
+        # detect() isn't needed to judge the codex-cli adapter as write-capable —
+        # deliver only looks at capabilities; install_handoff must fail from the
+        # missing hook and fall to Path B (agents_md.install) to exercise this test's target path.
         bundle = A.HandoffBundle(body_md="[omhc] handoff\nGOAL x\n",
                                  repo_root=self.repo, to_adapter_id="codex-cli")
         receipt = deliver.deliver(bundle, home=home, now=1000.0)
@@ -263,24 +263,26 @@ class TestSharedWithClaude(unittest.TestCase):
 
 
 class TestStatusInstructionFiles(unittest.TestCase):
-    """omhc status 의 instruction files 행 — 공유 배선과 낡은 누출을 구분한다."""
+    """omhc status's instruction files row — distinguishes shared wiring from a stale leak."""
 
     def setUp(self):
         self.t = TempRepo()
         self.addCleanup(self.t.close)
-        # cmd_status 는 cwd 로 레포를 찾는다 — 개발 중인 이 레포 자체가 AGENTS.md
-        # 를 CLAUDE.md 와 공유하므로(ac95989), 옮기지 않으면 그 배선을 테스트한다.
+        # cmd_status finds the repo via cwd — this very repo under development
+        # shares AGENTS.md with CLAUDE.md (ac95989), so without moving away it
+        # would end up testing that wiring.
         cwd = os.getcwd()
         os.chdir(self.t.root)
         self.addCleanup(os.chdir, cwd)
-        # adapters 행은 이 클래스의 관심사가 아니다 — 실제 $HOME 을 보는
-        # adapters.present() 가 CI(홈에 ~/.claude 없음)와 개발 머신에서 다른
-        # 결과를 주면 이 아래 exit code 단정이 환경에 따라 흔들린다(리뷰 결함).
+        # The adapters row is not this class's concern — adapters.present(),
+        # which looks at the real $HOME, would give a different result on CI
+        # (no ~/.claude in home) versus a dev machine, making the exit-code
+        # assertions below flaky depending on environment (review defect).
         patcher = mock.patch.object(cli.adapters, "present", return_value=["claude-code"])
         patcher.start()
         self.addCleanup(patcher.stop)
-        # `claude-code hooks` 행도 이 클래스의 관심사가 아니다 — instruction
-        # files 행만 흔들리게 고정한다.
+        # The `claude-code hooks` row isn't this class's concern either — pin it
+        # so only the instruction files row can vary.
         plant_hook_install(self.t.home, "claude-code")
 
     def run_status(self):
@@ -320,7 +322,7 @@ class TestStatusInstructionFiles(unittest.TestCase):
         self.assertEqual(code, 1)
 
     def test_status_recovers_to_pass_after_clear_on_a_symlinked_agents_md(self):
-        """리뷰 결함 1: clear 의 처방이 실제로 그 처방이 가리키는 문제를 고쳐야 한다."""
+        """Review defect 1: clear's prescribed fix must actually fix the problem it points to."""
         agents = os.path.join(self.t.root, "AGENTS.md")
         claude = os.path.join(self.t.root, "CLAUDE.md")
         target = os.path.join(self.t.root, "docs.md")
@@ -339,12 +341,12 @@ class TestStatusInstructionFiles(unittest.TestCase):
         code, text = self.run_status()
         line = next(l for l in text.splitlines() if "instruction files" in l)
         self.assertTrue(line.startswith("PASS"))
-        # C1: 빈 ledger/archive 는 이제 게이팅하지 않는 `----` 다 — 나머지 행이
-        # 모두 통과하면 exit 0 이다(예전엔 이 둘이 FAIL 이라 여기서 1 이었다).
+        # C1: empty ledger/archive are now `----`, which doesn't gate — exit is 0
+        # if the rest of the rows all pass (used to be 1 here, since these two were FAIL).
         self.assertEqual(code, 0)
 
     def test_status_recovers_to_pass_after_clear_on_a_hardlinked_agents_md(self):
-        """라운드 2 리뷰 결함: 하드링크를 갈라놓으면 status 가 거짓으로 '공유 아님' PASS 를 낸다."""
+        """Round 2 review defect: splitting the hard link makes status falsely PASS as 'not shared'."""
         agents = os.path.join(self.t.root, "AGENTS.md")
         claude = os.path.join(self.t.root, "CLAUDE.md")
         managed_block.splice(agents, "[omhc] leaked\n", captured_at=1000.0)

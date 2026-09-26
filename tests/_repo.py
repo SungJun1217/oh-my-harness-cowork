@@ -1,15 +1,17 @@
-"""테스트가 공유하는 경로·픽스처·빌더의 단일 정의.
+"""Single source of truth for the paths, fixtures, and builders tests share.
 
-절대 경로를 하드코딩하면 다른 체크아웃·다른 머신에서 `list_sessions()` 가 0건을
-돌려주고, 세션을 순회하는 불변식들이 **단정을 하나도 실행하지 않은 채 PASS** 가
-된다 — "외래 물질이 새지 않는다" 는 보장이 검증됐다고 보고되면서 실제로는 아무것도
-검사되지 않는, 가장 위험한 종류의 통과다.
+Hardcoding absolute paths makes `list_sessions()` return 0 results on a
+different checkout or machine, and invariants that iterate over sessions
+would then **PASS without running a single assertion** — the most dangerous
+kind of pass, since the "no foreign material leaks" guarantee gets reported
+as verified while nothing was actually checked.
 
-같은 이유로 세션 픽스처 빌더도 여기 하나만 둔다. 세 테스트 모듈이 각자 Codex
-rollout 을 만들고 있었고 이미 갈라져 있었다(한쪽은 원장까지 쓰고, 한쪽은 턴 수를
-받고, 한쪽은 둘 다 없었다). Codex 의 날짜 디렉터리 구조나 session_meta 모양이
-바뀌면 세 곳을 찾아야 하고, 놓친 사본은 어댑터가 더 이상 읽지 않는 파일을 심으면서
-계속 통과한다.
+For the same reason, the session fixture builders live only here too. Three
+test modules used to build their own Codex rollouts and had already
+diverged (one also wrote the ledger, one took a turn count, one had
+neither). If Codex's date-directory layout or session_meta shape changes,
+three places would need updating, and a missed copy keeps passing while
+planting a file the adapter no longer reads.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ import subprocess
 import tempfile
 import time
 
-# tests/_repo.py → 레포 루트
+# tests/_repo.py → repo root
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 FIXTURES = os.path.join(REPO, "tests", "fixtures")
@@ -30,7 +32,7 @@ CODEX_EXEC = os.path.join(FIXTURES, "codex", "exec.jsonl")
 CODEX_TOOLS = os.path.join(FIXTURES, "codex", "tools.jsonl")
 CODEX_EDIT = os.path.join(FIXTURES, "codex", "edit.jsonl")
 
-MISSING = "픽스처가 없다. `python3 tests/harvest.py` 를 먼저 실행하라."
+MISSING = "no fixtures. Run `python3 tests/harvest.py` first."
 
 
 def have_fixtures(*paths) -> bool:
@@ -43,7 +45,7 @@ def load_expected() -> dict:
 
 
 def iter_json(path: str):
-    """(index, row) 를 yield 한다. 깨진 줄은 건너뛴다."""
+    """Yield (index, row). Skip malformed lines."""
     with open(path, encoding="utf-8", errors="replace") as fh:
         for i, line in enumerate(fh):
             try:
@@ -53,7 +55,7 @@ def iter_json(path: str):
 
 
 def ref_for(adapter_id: str, path: str, *, session_id: str = "", cwd: str = REPO):
-    """SessionRef 하나. 세 모듈이 각자 만들면서 session_id 규약이 셋으로 갈렸다."""
+    """One SessionRef. Three modules each built their own, splitting the session_id convention three ways."""
     from omhc import adapter as A
 
     return A.SessionRef(
@@ -67,7 +69,7 @@ def ref_for(adapter_id: str, path: str, *, session_id: str = "", cwd: str = REPO
 
 
 def write_jsonl(rows, *, suffix: str = ".jsonl") -> str:
-    """임시 JSONL 을 만들고 경로를 돌려준다. 호출자가 unlink 한다."""
+    """Create a temp JSONL and return its path. Caller unlinks it."""
     fh = tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False, encoding="utf-8")
     with fh:
         for row in rows:
@@ -80,7 +82,7 @@ def git(repo: str, *args: str) -> None:
                    text=True)
 
 
-# --- Codex rollout 픽스처 ------------------------------------------------------
+# --- Codex rollout fixtures ------------------------------------------------------
 
 
 def codex_meta_row(session_id: str, cwd: str, extra: dict = None) -> dict:
@@ -113,10 +115,11 @@ def codex_item_row(item: dict, ordinal: int) -> dict:
 
 
 def codex_shell_rows(command, ordinal: int = 2, failed: bool = False, cwd: str = REPO):
-    """실측 모양(codex-cli 0.150.1–0.155.1, era B). 한 번의 셸 실행은 레코드 두 개를 남긴다.
+    """Observed shape (codex-cli 0.150.1-0.155.1, era B). One shell run leaves two records.
 
-    response_item/custom_tool_call(name="exec") 은 모델이 쓴 JS 래퍼라 명령도
-    종료 코드도 없다. 사실은 event_msg/item_completed 의 CommandExecution 에 있다.
+    response_item/custom_tool_call(name="exec") is a JS wrapper the model wrote, so it has
+    neither the command nor the exit code. Those actually live in event_msg/item_completed's
+    CommandExecution.
     """
     call_id = "c{}".format(ordinal)
     line = " ".join(command)
@@ -138,9 +141,9 @@ def codex_shell_rows(command, ordinal: int = 2, failed: bool = False, cwd: str =
     ]
 
 
-# --- era A (codex-cli 0.141–0.142) 픽스처 --------------------------------
-# 셸은 function_call, 출력은 평문(JSON 아님) — 위 codex_shell_rows(era B) 와는
-# 봉투가 다르다.
+# --- era A (codex-cli 0.141-0.142) fixtures --------------------------------
+# Shell is a function_call, output is plain text (not JSON) — a different
+# envelope from codex_shell_rows(era B) above.
 
 
 def _exec_output_text(status_line: str, output_body: str = "") -> str:
@@ -150,10 +153,10 @@ def _exec_output_text(status_line: str, output_body: str = "") -> str:
 
 def codex_exec_command_rows(cmd, code=None, running_sid=None, workdir=None,
                             ordinal: int = 2):
-    """function_call name=exec_command + 평문 function_call_output 한 쌍.
+    """A function_call name=exec_command + plain-text function_call_output pair.
 
-    code 와 running_sid 가 둘 다 None 이면 abort(출력 없음) 를 뜻한다 —
-    실측: exec_command 한 건은 출력이 아예 없었다(abort).
+    code and running_sid both None means abort (no output) —
+    observed: one exec_command had no output at all (abort).
     """
     call_id = "ec{}".format(ordinal)
     line = " ".join(cmd) if isinstance(cmd, list) else cmd
@@ -169,7 +172,7 @@ def codex_exec_command_rows(cmd, code=None, running_sid=None, workdir=None,
     elif running_sid is not None:
         status_line = "Process running with session ID {}".format(running_sid)
     else:
-        return rows  # abort: 출력 레코드가 없다.
+        return rows  # abort: no output record.
     rows.append({"timestamp": "2026-09-22T16:30:03.000Z", "ordinal": ordinal + 1,
                 "type": "response_item",
                 "payload": {"type": "function_call_output", "call_id": call_id,
@@ -178,8 +181,8 @@ def codex_exec_command_rows(cmd, code=None, running_sid=None, workdir=None,
 
 
 def codex_write_stdin_rows(sid, code, ordinal: int = 10):
-    """백그라운드로 돌던 exec_command(session ID sid) 로 입력을 보내고 그
-    결과(exit code)를 돌려받는 한 쌍."""
+    """A pair: send input to a backgrounded exec_command (session ID sid)
+    and receive its result (exit code) back."""
     call_id = "ws{}".format(ordinal)
     return [
         {"timestamp": "2026-09-22T16:30:10.000Z", "ordinal": ordinal,
@@ -197,8 +200,8 @@ def codex_write_stdin_rows(sid, code, ordinal: int = 10):
 
 def codex_apply_patch_rows(headers, with_filechange: bool = True, workdir=None,
                            ordinal: int = 20):
-    """custom_tool_call name=apply_patch(최상위 input=원본 패치 텍스트) +
-    선택적으로 같은 id 의 FileChange item_completed."""
+    """A custom_tool_call name=apply_patch (top-level input=raw patch text) +
+    an optional FileChange item_completed with the same id."""
     call_id = "ap{}".format(ordinal)
     payload = {"type": "custom_tool_call", "name": "apply_patch", "call_id": call_id,
               "input": "\n".join(headers)}
@@ -238,11 +241,11 @@ def plant_codex(
     when: float = 0.0,
     meta_extra: dict = None,
 ) -> str:
-    """임시 홈에 Codex rollout 하나를 심는다. 경로를 돌려준다.
+    """Plant one Codex rollout in a temp home. Return its path.
 
-    ledger_home 을 주면 원장에 start 행도 남긴다 — brief/due 경로를 태우는 테스트가
-    필요로 한다. meta_extra 는 session_meta.payload 에 그대로 병합된다(예: 서브에이전트
-    표식을 심는 테스트).
+    Passing ledger_home also writes a start row to the ledger — needed by tests
+    that exercise the brief/due path. meta_extra is merged as-is into
+    session_meta.payload (e.g. tests planting a subagent marker).
     """
     stamp = time.gmtime(when or time.time())
     directory = os.path.join(home, ".codex", "sessions",
@@ -253,7 +256,7 @@ def plant_codex(
     rows = [codex_meta_row(session_id, cwd, meta_extra), codex_user_row(human)]
     for i in range(shell_turns):
         fails = failing_shell and i == 0
-        # 실패 턴은 의미 있는 명령을 쓴다 — FAIL 슬롯 단정이 그 문자열을 본다.
+        # The failing turn uses a meaningful command — the FAIL slot assertion checks that string.
         command = ["pytest", "-q"] if fails else ["ls", str(i)]
         rows.extend(codex_shell_rows(command, ordinal=2 + i * 2, failed=fails))
     with open(path, "w", encoding="utf-8") as fh:
@@ -277,19 +280,18 @@ def append_codex_turn(path: str, ordinal: int = 90) -> None:
 
 
 def append_codex_user_turn(path: str, text: str, ordinal: int = 90) -> None:
-    """`codex exec resume <id> "<text>"` 가 같은 rollout 에 이어붙이는 것과 같은
-    모양의 user 메시지 한 줄(#27). `text=""` 로 빈 프롬프트 resume 을 재현한다."""
+    """A single user message row shaped like what `codex exec resume <id> "<text>"`
+    appends to the same rollout (#27). `text=""` reproduces an empty-prompt resume."""
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(codex_user_row(text, ordinal=ordinal), ensure_ascii=False) + "\n")
 
 
 def plant_hook_install(home: str, adapter_id: str) -> None:
-    """임시 홈에 `adapter_id` 의 SessionStart 훅을 실제 배포 조각 그대로 심는다.
+    """Plant `adapter_id`'s SessionStart hook in a temp home, verbatim from the real install fragment.
 
-    `omhc status` 가 hookconf 로 새로 판정하는 `<adapter-id> hooks` 행을 이
-    유닛의 관심사가 아닌 테스트에서 PASS 로 고정하는 용도다 — 바이너리
-    실행 가능 검사까지 통과하도록 `$HOME/.local/bin/omhc` 자리에도 더미
-    실행 파일을 둔다.
+    Pins the `<adapter-id> hooks` row that `omhc status` now judges via hookconf
+    to PASS in tests that aren't concerned with this unit — also plants a dummy
+    executable at `$HOME/.local/bin/omhc` so the binary-executable check passes too.
     """
     from omhc import hookconf
 
@@ -314,9 +316,9 @@ def plant_hook_install(home: str, adapter_id: str) -> None:
 
 
 class TempRepo:
-    """임시 홈 + git 레포 한 쌍. setUp 네 곳에 복제돼 있던 것.
+    """A temp home + git repo pair. Was duplicated across four setUp methods.
 
-    사용:
+    Usage:
         self.t = TempRepo(); self.addCleanup(self.t.close)
         self.t.home / self.t.root / self.t.state / self.t.env
     """

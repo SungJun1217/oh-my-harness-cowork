@@ -5,30 +5,32 @@ import os
 from typing import Optional
 
 
-# `.git` 은 파일(워크트리·서브모듈)일 수도, 디렉터리일 수도 있다. `.omhc-root`
-# 는 non-git 프로젝트(#12)를 위한 명시적 마커 — 파일이든 디렉터리든 상관없다.
+# `.git` can be either a file (worktree/submodule) or a directory.
+# `.omhc-root` is an explicit marker for non-git projects (#12) — file or
+# directory, either is fine.
 #
-# `AGENTS.md`, `.omhc/`, `CLAUDE.md`, `.claude/`, `.codex/` 는 절대 마커가 아니다:
-# 앞의 둘은 omhc 자신이 대상 레포에 써 넣는 파일이라 마커로 쓰면 첫 실행 이후 키가
-# 흔들리고, 뒤의 셋은 `$HOME` 에도 존재해서(`~/.omhc`, `~/.claude`, `~/.codex`) 그걸
-# 마커로 인정하면 `.git` 없는 홈 아래 모든 디렉터리가 `$HOME` 하나로 뭉개진다.
-# 또한 core 는 벤더 이름을 모른다 — `.claude`/`.codex` 를 core 가 알면 그 자체가
-# 계약 위반이다.
+# `AGENTS.md`, `.omhc/`, `CLAUDE.md`, `.claude/`, `.codex/` are never markers:
+# the first two are files omhc itself writes into the target repo, so using
+# them as markers would make the key shift after the first run; the last
+# three also exist under `$HOME` (`~/.omhc`, `~/.claude`, `~/.codex`), and
+# accepting them as markers would collapse every directory under a `.git`-less
+# home into a single `$HOME`. Also, the core doesn't know vendor names —
+# the core knowing `.claude`/`.codex` would itself be a contract violation.
 ROOT_MARKERS = (".git", ".omhc-root")
 
 
 def resolve_repo_root(start: Optional[str] = None) -> str:
-    """레포 루트의 THE 정의. `ROOT_MARKERS` 중 하나를 만나는 첫 조상,
-    없으면 realpath(cwd).
+    """THE definition of repo root. The first ancestor with one of
+    `ROOT_MARKERS`, or realpath(cwd) if none.
 
-    호출 지점마다 다르게 정의하면 서브디렉터리에서 세션 목록이 조용히 0건이
-    된다. Codex 는 rollout 에 레포 루트를 기록하므로 equal-or-descendant 판정과
-    짝을 이뤄야 한다.
+    Defining this differently at each call site would silently give a
+    session list of 0 in a subdirectory. Codex records the repo root in the
+    rollout, so this must pair with the equal-or-descendant judgment.
 
-    `git rev-parse --show-toplevel` 을 쓰지 않는다. 훅 경로에서 프로세스당 한 번
-    이상 불리는데 fork/exec 가 약 2.7ms 이고 subprocess import 가 약 3.7ms 라
-    합쳐서 예산의 4% 를 먹는다. 상향 탐색은 stat 몇 번이다(실측: 16단계 x 마커
-    2개 ≈ 1ms).
+    Doesn't use `git rev-parse --show-toplevel`. It gets called at least once
+    per process on the hook path, and fork/exec is ~2.7ms plus ~3.7ms for the
+    subprocess import — together 4% of the budget. Walking upward is a
+    handful of stats (measured: 16 levels x 2 markers ≈ 1ms).
     """
     base = os.path.realpath(start or os.getcwd())
     current = base
@@ -42,13 +44,13 @@ def resolve_repo_root(start: Optional[str] = None) -> str:
 
 
 def refused_root(root: str) -> Optional[str]:
-    """이 루트에서 omhc 를 도는 게 실수인 이유, 없으면 None.
+    """Why running omhc from this root would be a mistake, or None.
 
-    `resolve_repo_root` 자체에는 두지 않는다 — mint.relativize 등은 어떤
-    루트에서도 계속 동작해야 하므로, 거부는 별도 술어로 호출자가 직접 검사한다.
-    지금은 `/` 하나만 거부한다(오너 결정) — `$HOME` 은 거부하지 않는다: `~` 에서
-    세션을 시작하는 것도 실사용이고, `~/.git` 처럼 홈에 dotfile 레포를 두는
-    사람들이 계속 동작해야 한다."""
+    Not placed inside `resolve_repo_root` itself — mint.relativize and others
+    must keep working from any root, so the refusal is a separate predicate
+    the caller checks directly. Currently rejects only `/` (owner's call) —
+    `$HOME` is not rejected: starting a session from `~` is real usage, and
+    people who keep a dotfile repo at home (e.g. `~/.git`) must keep working."""
     if os.path.realpath(root) == "/":
         return "{} is not a project root — run omhc from a project directory " \
             "(or touch .omhc-root there)".format(root)
@@ -56,19 +58,20 @@ def refused_root(root: str) -> Optional[str]:
 
 
 def repo_key(repo_root: str) -> str:
-    """사람이 읽을 수 있는 basename + 경로 해시. 다른 경로의 동명 레포를 구분한다."""
+    """Human-readable basename + path hash. Distinguishes same-named repos at different paths."""
     digest = hashlib.sha1(repo_root.encode("utf-8")).hexdigest()[:8]
     return "{}-{}".format(os.path.basename(repo_root.rstrip("/")), digest)
 
 
 def owning_repo_key(cwd: Optional[str]) -> Optional[str]:
-    """이 cwd 가 실제로 속한 레포의 키. cwd 없으면 None.
+    """The key of the repo this cwd actually belongs to. None if there's no cwd.
 
-    `equal-or-descendant`(is_within) 판정은 `.git` 없는 부모 디렉터리에서
-    호출되면 그 아래 **다른** 레포(자기 `.git` 을 가진 자식, 예: 중첩
-    워크트리·서브모듈)에서 시작한 세션까지 통과시킨다. 이 함수로 후보의
-    실제 소속 레포 키를 다시 계산해 걸러야 한다 — cli._backfill_foreign_sessions
-    가 쓰던 것과 같은 해석이다.
+    The `equal-or-descendant` (is_within) judgment, when called from a
+    `.git`-less parent directory, would also pass sessions started in a
+    **different** repo beneath it (a child with its own `.git`, e.g. a nested
+    worktree/submodule). This function must recompute the candidate's actual
+    owning repo key and filter on it — the same interpretation
+    cli._backfill_foreign_sessions uses.
     """
     if not cwd:
         return None
@@ -76,13 +79,13 @@ def owning_repo_key(cwd: Optional[str]) -> Optional[str]:
 
 
 def is_within(repo_root: str, candidate: str) -> bool:
-    """equal-or-descendant. list_sessions 의 cwd 일치 규칙."""
+    """equal-or-descendant. list_sessions' cwd matching rule."""
     return _within(os.path.realpath(repo_root).rstrip("/"),
                    os.path.realpath(candidate).rstrip("/")) is not None
 
 
 def _within(root: str, cand: str) -> Optional[str]:
-    """이미 realpath 된 두 경로로 상대 경로를 계산한다. 밖이면 None."""
+    """Computes a relative path from two already-realpath'd paths. None if outside."""
     if cand == root:
         return "."
     if cand.startswith(root + "/"):
@@ -91,43 +94,45 @@ def _within(root: str, cand: str) -> Optional[str]:
 
 
 def relativize(repo_root: str, path: str) -> Optional[str]:
-    """절대경로 → 레포 상대 POSIX 경로. 레포 밖이면 None.
+    """Absolute path → repo-relative POSIX path. None if outside the repo.
 
-    realpath 는 경로당 한 번만 부른다. 이전 구현은 is_within 안에서 두 번 + 본문에서
-    두 번, 합쳐 네 번 불렀고 그것이 mint 총 15.6ms 중 13ms 였다(실측, 136개 경로).
-    루트는 호출자가 이미 realpath 한 값을 넘기므로 그대로 쓴다.
+    realpath is called only once per path. The earlier implementation called
+    it twice inside is_within plus twice in the body, four times total, which
+    was 13ms of mint's total 15.6ms (measured, 136 paths). Uses the root as
+    passed in, assuming the caller already realpath'd it.
     """
     root = repo_root.rstrip("/")
     rel = _within(root, os.path.realpath(path).rstrip("/"))
     if rel is not None:
         return rel
-    # 넘어온 루트가 realpath 가 아니었을 수도 있으니 한 번만 더 시도한다.
+    # The root passed in might not have been a realpath — try once more.
     resolved = os.path.realpath(repo_root).rstrip("/")
     if resolved == root:
         return None
     return _within(resolved, os.path.realpath(path).rstrip("/"))
 
 
-# 상태 파일 이름의 단일 정의. 네 모듈에 재선언돼 있었고, 하나가 어긋나면
-# brief 가 쓰는 파일과 status/clear 가 보는 파일이 갈라져 핸드오프가 조용히
-# 보이지 않게 된다.
+# The single definition of state file names. Was redeclared in four modules,
+# and any one drifting would split the file brief writes from the file
+# status/clear reads, silently making the handoff invisible.
 ROOT_NAME = ".omhc"
 ARTIFACT_NAME = "omhc.txt"
 NOTES_NAME = "notes.txt"
 
 
 def omhc_root(home: Optional[str] = None) -> str:
-    """모든 omhc 상태의 루트. home=None 이면 실제 홈.
+    """The root of all omhc state. Real home if home=None.
 
-    이 폴백을 세 모듈이 각자 결정하고 있었다 — 루트가 옮겨지면 guard.log 와
-    ledger.jsonl 이 레포별 상태 디렉터리와 다른 곳에 남아, 훅 경로의 유일한
-    실패 로그를 찾을 수 없게 된다.
+    Three modules each used to decide this fallback independently — if the
+    root ever moved, guard.log and ledger.jsonl would end up somewhere
+    different from the per-repo state dir, making the hook path's only
+    failure log unfindable.
     """
     return os.path.join(home or os.path.expanduser("~"), ROOT_NAME)
 
 
 def state_dir(key: str, home: Optional[str] = None) -> str:
-    """이 레포의 상태 루트. 작업 트리를 오염시키지 않도록 홈 아래에 둔다."""
+    """This repo's state root. Kept under home so it never pollutes the working tree."""
     return os.path.join(omhc_root(home), key)
 
 

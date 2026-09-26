@@ -1,52 +1,52 @@
-name: 버그 제보
-description: omhc 가 기대와 다르게 동작할 때
+name: Bug report
+description: omhc does something other than what you expected
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        세션 원문(실제 대화 내용)은 붙이지 마십시오. 보안 문제라면 이슈 대신
-        [비공개 제보](https://github.com/SungJun1217/oh-my-harness-cowork/security/advisories/new)를 써 주십시오.
+        Don't paste raw session content (real conversations). For a security problem, use a
+        [private report](https://github.com/SungJun1217/oh-my-harness-cowork/security/advisories/new) instead of an issue.
   - type: textarea
     id: what
     attributes:
-      label: 무슨 일이 있었나
-      description: 기대한 동작과 실제 동작
+      label: What happened
+      description: Expected behavior vs. actual behavior
     validations:
       required: true
   - type: textarea
     id: repro
     attributes:
-      label: 재현 절차
+      label: Steps to reproduce
       placeholder: |
-        1. Claude Code 에서 작업 후 종료
-        2. 같은 레포에서 codex 실행
-        3. 핸드오프가 비어 있음
+        1. Work in Claude Code, then quit
+        2. Run codex in the same repo
+        3. The handoff is empty
     validations:
       required: true
   - type: textarea
     id: status
     attributes:
-      label: "`omhc status --json` 출력"
+      label: "`omhc status --json` output"
       render: json
     validations:
       required: true
   - type: input
     id: versions
     attributes:
-      label: 버전
-      placeholder: "omhc 0.1.0 (또는 커밋) · Claude Code 2.x · codex-cli 0.155.1"
+      label: Versions
+      placeholder: "omhc 0.1.0 (or a commit) · Claude Code 2.x · codex-cli 0.155.1"
     validations:
       required: true
   - type: dropdown
     id: os
     attributes:
       label: OS
-      options: [macOS, Linux, 기타]
+      options: [macOS, Linux, Other]
     validations:
       required: true
   - type: dropdown
     id: direction
     attributes:
-      label: 핸드오프 방향
-      options: [Claude Code → Codex, Codex → Claude Code, 해당 없음]
+      label: Handoff direction
+      options: [Claude Code → Codex, Codex → Claude Code, Not applicable]

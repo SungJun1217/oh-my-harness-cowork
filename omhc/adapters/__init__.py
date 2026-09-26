@@ -9,22 +9,22 @@ from typing import Dict, List, Optional
 from .. import fsio, locate
 from ..adapter import AdapterUnavailable, InstallReceipt
 
-# 헤드리스 오버라이드. 샌드박스에서 `claude -p`/`codex exec` 를 실제 세션으로
-# 받아들이기 위한 스위치다. 두 하네스가 공유하므로 이름에 벤더 문자열이 없다.
-# 서브에이전트/사이드체인은 이걸로도 절대 풀리지 않는다 — 그건 발화자가 다른
-# 문제이지 대화형/비대화형 문제가 아니다.
+# Headless override. A switch to accept `claude -p`/`codex exec` as real
+# sessions in the sandbox. No vendor string in the name since both harnesses
+# share it. Subagent/sidechain never gets unlocked by this either — that's a
+# different-speaker problem, not an interactive/non-interactive one.
 HEADLESS_ENV = "OMHC_ALLOW_HEADLESS"
 
 
 def allow_headless() -> bool:
     return os.environ.get(HEADLESS_ENV, "").strip() not in ("", "0", "false", "False")
 
-# 클래스의 리터럴 dict. 인스턴스가 아니라 클래스인 이유는 레포별 하네스 home 을
-# 나중에 CLI 에서 한 줄로 꽂을 수 있게 하기 위함이다.
+# A literal dict of classes. Classes, not instances, so a per-repo harness
+# home can later be plugged in with one line from the CLI.
 #
-# entry_points 도, 디렉터리 스캐닝도, 자동 등록도 없다. 어댑터가 실제로 세 개가
-# 되는 날 그때 만든다 — 지금 만들면 두 개를 보고 그린 추상이 되고, 세 번째에서
-# 깨진다.
+# No entry_points, no directory scanning, no auto-registration. Build that
+# the day a third adapter actually shows up — building it now would draw an
+# abstraction from just two data points, and it would break on the third.
 REGISTRY: Dict[str, type] = {}
 
 
@@ -32,14 +32,16 @@ _ISO = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})")
 
 
 def iso_epoch(value) -> float:
-    """ISO 타임스탬프 → epoch. 알아볼 수 없으면 0.0.
+    """ISO timestamp → epoch. 0.0 if unrecognized.
 
-    **순서의 근거로 쓰지 않는다** — 이 머신의 최대 트랜스크립트에 타임스탬프
-    역행이 254건(최대 52ms) 있다. 순서는 원장 epoch 와 바이트 오프셋이다.
+    **Never used as an ordering basis** — this machine's largest transcript
+    has 254 timestamp regressions (up to 52ms). Order comes from ledger epoch
+    and byte offset.
 
-    두 어댑터가 이것을 각자 구현하고 있었다(한쪽은 정규식, 한쪽은 고정 폭 슬라이싱).
-    받아들이는 입력이 달라서, 한쪽이 파싱하는 형식을 다른 쪽은 0.0 으로 돌려주고
-    mint 의 헤더가 하네스에 따라 다르게 나왔다.
+    Both adapters used to implement this separately (one with a regex, one
+    with fixed-width slicing). They accepted different inputs, so a format
+    one could parse the other returned as 0.0, and mint's header came out
+    differently depending on harness.
     """
     if not isinstance(value, str):
         return 0.0
@@ -53,10 +55,11 @@ def iso_epoch(value) -> float:
 
 
 def install_state_artifact(bundle, *, home: Optional[str] = None) -> InstallReceipt:
-    """훅이 읽어갈 자리에 산출물을 둔다. push 가 아니라 pull 이다.
+    """Places the artifact where the hook will read it from. Pull, not push.
 
-    두 어댑터의 install_handoff 본문이 바이트 단위로 같았다 — 범용 코드를 어댑터가
-    들고 있으면 계층이 뒤집힌다. 여기 한 곳에 두고 어댑터는 한 줄로 위임한다.
+    Both adapters' install_handoff bodies were byte-for-byte identical —
+    keeping generic code in an adapter would invert the layering. Kept here
+    in one place; each adapter delegates in one line.
     """
     state = locate.state_dir(locate.repo_key(bundle.repo_root), home=home)
     path = locate.artifact_path(state)
@@ -75,7 +78,7 @@ def _register(cls: type) -> type:
 
 
 def get(adapter_id: str, *, home: Optional[str] = None, now=time.time):
-    """어댑터 하나를 만든다. 모르는 id 는 조용히 넘기지 않는다."""
+    """Builds one adapter. Unknown id is never passed over silently."""
     try:
         cls = REGISTRY[adapter_id]
     except KeyError:
@@ -86,10 +89,10 @@ def get(adapter_id: str, *, home: Optional[str] = None, now=time.time):
 
 
 def present(*, homes: Optional[Dict[str, str]] = None, now=time.time) -> List[str]:
-    """이 머신에 설치된 어댑터 id. 결정적 순서.
+    """Adapter ids installed on this machine. Deterministic order.
 
-    한 어댑터의 나쁜 하루가 전체를 죽이면 안 된다 — detect() 가 던지거나
-    생성이 실패하면 그 어댑터만 빠진다.
+    One adapter's bad day must not kill the rest — if detect() raises or
+    construction fails, only that adapter drops out.
     """
     homes = homes or {}
     found: List[str] = []
@@ -103,12 +106,12 @@ def present(*, homes: Optional[Dict[str, str]] = None, now=time.time) -> List[st
     return found
 
 
-# v1 어댑터를 등재한다. 모듈 맨 아래에서 import 하는 이유는 각 어댑터가
-# `from . import _register` 로 이 모듈을 되참조하기 때문이다 — _register 가
-# 이미 정의된 뒤라야 순환 import 가 성립한다.
+# Registers the v1 adapters. Imported at the bottom of the module because
+# each adapter references this module back via `from . import _register` —
+# the circular import only works once _register is already defined.
 #
-# 자동 스캐닝을 두지 않는 것은 의도적이다. 어댑터가 세 개가 되는 날 그때
-# 만든다. 지금은 이 두 줄이 레지스트리의 전부이고, 새 어댑터를 붙이는 비용도
-# 여기에 한 줄 추가하는 것이다.
-from . import claude_code  # noqa: E402,F401  (등록 부작용)
-from . import codex_cli  # noqa: E402,F401  (등록 부작용)
+# No auto-scanning, deliberately. Build that the day there's a third adapter.
+# For now these two lines are the entire registry, and the cost of adding a
+# new adapter is exactly adding one line here.
+from . import claude_code  # noqa: E402,F401  (registration side effect)
+from . import codex_cli  # noqa: E402,F401  (registration side effect)

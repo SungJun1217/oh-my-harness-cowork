@@ -33,6 +33,9 @@ Claude Code에서 알아낸 것을 Codex CLI가 이어받고, 그 반대도 됩�
 하네스로 돌아가는 세션은 **0 토큰**입니다. 네이티브 resume이 이미 무손실이라
 omhc가 끼지 않습니다. 의존성도 LLM 호출도 없고, 아무 데도 보내지 않습니다.
 
+> [!NOTE]
+> 이 README만 한국어로 옮겼습니다. 자세한 문서(`docs/`)와 코드, 커밋 메시지는 모두 영어입니다.
+
 | | omhc 없이 | omhc 와 함께 |
 |---|---|---|
 | 갈아탄 직후 첫 턴 | "이 레포 뭐하는 거야?"부터 다시 시작 | GOAL/NEXT/FAIL이 세션 시작 컨텍스트에 이미 들어가 있음 |
@@ -72,7 +75,7 @@ PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
 | `PULL` | omhc가 생성 | `omhc log --last 30`은 늘 있고, 미해소 실패가 있으면 `omhc show E1`, 수정 경로가 짧으면 `omhc log --file …`이 붙음. 절대 버리지 않음 |
 
 슬롯마다의 정확한 규칙과 `log`/`show`/`trace`로 원본을 파보는 방법은
-[docs/handoff.ko.md](docs/handoff.ko.md)에 있습니다.
+[docs/handoff.md](docs/handoff.md)에 있습니다.
 
 ## 어떻게 동작하나
 
@@ -98,7 +101,7 @@ PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
 
 훅으로 주입하지 못하면 `AGENTS.md` managed block(Codex 전용), 그다음
 `<repo>/.omhc/outbox/`로 떨어집니다.
-[전달 경로가 막히면](docs/install.ko.md#전달-경로가-막히면)을 보십시오.
+[전달 경로가 막히면](docs/install.md#delivery-fallbacks)을 보십시오.
 
 ## 설치
 
@@ -116,14 +119,14 @@ omhc status          # 모든 행이 PASS/FAIL/---- 중 하나. SKIP 은 없다
 git 레포가 아닌 프로젝트라면 최상위에서 `touch .omhc-root`를 한 번 해 두세요.
 
 - Codex 설정, `AGENTS.md`를 Claude Code와 공유하는 레포, git 체크아웃에서
-  설치, 훅 수동 병합, 제거: [docs/install.ko.md](docs/install.ko.md)
-- `omhc status`의 각 행이 무엇을 확인하는지: [docs/status.ko.md](docs/status.ko.md)
+  설치, 훅 수동 병합, 제거: [docs/install.md](docs/install.md)
+- `omhc status`의 각 행이 무엇을 확인하는지: [docs/status.md](docs/status.md)
 
 ## 사용
 
 | 명령 | 역할 |
 |---|---|
-| `omhc status [--json]` | 유일한 사람용 대시보드. 아카이브 지연과 [pull rate](docs/status.ko.md#pull-rate) 포함 |
+| `omhc status [--json]` | 유일한 사람용 대시보드. 아카이브 지연과 [pull rate](docs/status.md#pull-rate) 포함 |
 | `omhc log [--last N] [--grep P] [--verb V] [--file P]` | 인덱싱된 이벤트를 한 줄씩. 각 줄은 `show`에 그대로 넘길 수 있는 `<session>#N` 참조로 시작 |
 | `omhc trace <path> [--all] [--last N] [--json]` | `path`를 수정한 인덱싱된 이벤트를 두 하네스 세션에 걸쳐 나열. `--all`은 읽기와 명령 언급까지 포함 |
 | `omhc show <E1\|#137\|abcdef01#137> [--full]` | **원본 바이트를 오프셋으로 조회.** 맨 `#N`은 가장 최근 전달된 세션 기준 |
@@ -136,7 +139,7 @@ git 레포가 아닌 프로젝트라면 최상위에서 `touch .omhc-root`를 �
 
 끄려면 `OMHC_OFF=1` 또는 `~/.omhc/<repo-key>/off` 파일을 쓰십시오. 헤드리스
 세션(`claude -p`, `codex exec`)은
-[`OMHC_ALLOW_HEADLESS=1`](docs/install.ko.md#헤드리스-세션)을 켜지 않는 한
+[`OMHC_ALLOW_HEADLESS=1`](docs/install.md#headless-sessions)을 켜지 않는 한
 핸드오프 대상이 되지 않습니다.
 
 ## 이 도구를 쓰지 말아야 할 때
@@ -153,14 +156,14 @@ omhc는 그것보다 **열등합니다.** 요약이기 때문입니다. 그래�
 
 ## 알려진 한계
 
-- [신뢰되지 않은 Codex 훅은 Claude에서 Codex로 가는 방향을 끕니다](docs/limits.ko.md#신뢰되지-않은-codex-훅은-claude에서-codex로-가는-방향을-끕니다)
-- [Codex 0.144~0.148 세션에는 명령 사실이 없습니다](docs/limits.ko.md#codex-01440148-세션에는-명령-사실이-없습니다)
-- [Claude Code 포크는 자기 턴이 생겨야 넘어갑니다](docs/limits.ko.md#claude-code-포크는-자기-턴이-생겨야-넘어갑니다)
-- [원본 포맷은 공식 계약이 아닙니다](docs/limits.ko.md#원본-포맷은-공식-계약이-아닙니다)
-- [git이 아닌 프로젝트는 마커가 필요합니다](docs/limits.ko.md#git이-아닌-프로젝트는-마커가-필요합니다)
-- [동시 사용은 v1 범위 밖입니다](docs/limits.ko.md#동시-사용은-v1-범위-밖입니다)
+- [신뢰되지 않은 Codex 훅은 Claude에서 Codex로 가는 방향을 끕니다](docs/limits.md#an-untrusted-codex-hook-turns-off-claude-to-codex)
+- [Codex 0.144~0.148 세션에는 명령 사실이 없습니다](docs/limits.md#codex-0144-to-0148-sessions-carry-no-command-facts)
+- [Claude Code 포크는 자기 턴이 생겨야 넘어갑니다](docs/limits.md#a-claude-code-fork-needs-a-turn-of-its-own)
+- [원본 포맷은 공식 계약이 아닙니다](docs/limits.md#the-on-disk-formats-are-not-an-official-contract)
+- [git이 아닌 프로젝트는 마커가 필요합니다](docs/limits.md#non-git-projects-need-a-marker)
+- [동시 사용은 v1 범위 밖입니다](docs/limits.md#concurrent-use-is-out-of-scope-for-v1)
 
-설계의 근거가 된 실측값은 [docs/limits.ko.md](docs/limits.ko.md#실측-사실)에
+설계의 근거가 된 실측값은 [docs/limits.md](docs/limits.md#measured-facts)에
 있습니다.
 
 ## 개발

@@ -19,7 +19,7 @@ class Base(unittest.TestCase):
         self.home = self.t.home
         self.root = self.t.root
         self.state = self.t.state
-        # 스킵 캐시는 모듈 전역이다. 테스트 간 오염을 막는다.
+        # The skip cache is a module global. Prevent cross-test contamination.
         watch.forget()
 
     def plant_codex(self, session_id="cx1", extra_turns=0):
@@ -32,9 +32,9 @@ class Base(unittest.TestCase):
 
 class TestSweepCursor(Base):
     def test_session_indexed_by_an_older_parser_still_gets_new_rows(self):
-        """업그레이드 전 파서가 더 많은 이벤트를 세어 색인의 seq 가 지금 파서보다
-        크다(#23). seq 커서였다면 이어진 턴이 `seq > last_seq` 에 걸려 영영
-        색인되지 않았다."""
+        """The pre-upgrade parser counted more events, so the index's seq is
+        larger than the current parser's (#23). With a seq cursor, an appended
+        turn would trip on `seq > last_seq` and never get indexed."""
         path = self.plant_codex()
         watch.sweep(self.root, self.state, home=self.home)
         idx = os.path.join(self.state, "index", "cx1.idx")
@@ -102,17 +102,17 @@ class TestSweep(Base):
         first = watch.sweep(self.root, self.state, home=self.home)
         second = watch.sweep(self.root, self.state, home=self.home)
         self.assertGreater(first, 0)
-        self.assertEqual(second, 0, "같은 내용을 두 번 색인하면 안 된다")
+        self.assertEqual(second, 0, "the same content must not be indexed twice")
         idx = os.path.join(self.state, "index", "cx1.idx")
         seqs = [r.seq for r in index.rows(idx)]
-        self.assertEqual(len(seqs), len(set(seqs)), "중복 seq 가 생겼다")
+        self.assertEqual(len(seqs), len(set(seqs)), "a duplicate seq was created")
         self.append_turn(path, 1)
         third = watch.sweep(self.root, self.state, home=self.home)
-        self.assertEqual(third, 1, "새로 자란 부분만 색인해야 한다")
+        self.assertEqual(third, 1, "only the newly grown part should be indexed")
 
     def test_unchanged_files_are_not_reread(self):
-        """5초 폴링 데몬이 정상 상태에서 3.2MB 를 매번 재파싱하면 시간당 CPU 4분,
-        재독 28GB 인데 새 이벤트는 0건이다."""
+        """If a 5-second polling daemon reparsed 3.2MB every time at steady
+        state, that's 4 CPU-minutes and 28GB reread per hour for zero new events."""
         path = self.plant_codex(extra_turns=2)
         watch.sweep(self.root, self.state, home=self.home)
         reads = {"n": 0}
@@ -127,10 +127,10 @@ class TestSweep(Base):
         codex_cli.CodexCliAdapter.read_session = counting
         try:
             watch.sweep(self.root, self.state, home=self.home)
-            self.assertEqual(reads["n"], 0, "변하지 않은 파일을 다시 읽었다")
+            self.assertEqual(reads["n"], 0, "an unchanged file was reread")
             self.append_turn(path, 1)
             watch.sweep(self.root, self.state, home=self.home)
-            self.assertEqual(reads["n"], 1, "자란 파일은 다시 읽어야 한다")
+            self.assertEqual(reads["n"], 1, "a grown file must be reread")
         finally:
             codex_cli.CodexCliAdapter.read_session = original
 
@@ -139,7 +139,7 @@ class TestSweep(Base):
         watch.sweep(self.root, self.state, home=self.home)
         self.assertEqual(watch.sweep(self.root, self.state, home=self.home), 0)
         watch.forget()
-        # 다시 읽어도 색인은 증분이므로 새 행은 0이다 — 읽기만 다시 일어난다.
+        # Even re-reading, the index is incremental, so new rows are 0 — only the read itself reoccurs.
         self.assertEqual(watch.sweep(self.root, self.state, home=self.home), 0)
 
     def test_sweep_pins_the_source(self):
@@ -150,9 +150,10 @@ class TestSweep(Base):
         self.assertEqual(os.stat(path).st_ino, os.stat(pinned).st_ino)
 
     def test_lag_reports_pinned_false_when_indexed_but_never_pinned(self):
-        """omhc status 의 archive 행이 이 필드로 "고정 안 됨"과 "고정됐지만
-        꼬리가 0바이트"를 구분한다(리뷰 결함) — 색인만 있고 핀이 없으면 size 도
-        lag_bytes 도 0 이라 `pinned` 없이는 구분할 방법이 없었다."""
+        """omhc status's archive row uses this field to distinguish "not pinned"
+        from "pinned but the tail is 0 bytes" (review defect) — with an index but
+        no pin, both size and lag_bytes are 0, so there was no way to tell them
+        apart without `pinned`."""
         idx_dir = os.path.join(self.state, "index")
         os.makedirs(idx_dir, exist_ok=True)
         from omhc.event import Event
@@ -224,9 +225,9 @@ class TestRunLoop(Base):
 
 class TestCorrectnessIndependence(unittest.TestCase):
     def test_brief_does_not_import_watch(self):
-        """데몬이 정확성을 담당하지 않는다는 것을 import 그래프로 확인한다.
+        """Confirms via the import graph that the daemon is not responsible for correctness.
 
-        문자열 검사로는 안 된다 — 주석에 watch 를 언급하는 것은 정당하다.
+        A string check wouldn't do — mentioning watch in a comment is legitimate.
         """
         import ast
         import inspect

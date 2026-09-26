@@ -32,8 +32,8 @@ behavior with evidence. You do not edit repo files and you do not fix anything.
 ## Launching harnesses
 
 - Headless only, never interactive: `claude -p "<prompt>"` and `codex exec "<prompt>"`. Bound
-  each to 180 s. macOS has no `timeout`; use `perl -e 'alarm 180; exec @ARGV' -- <cmd…>`. Keep prompts tiny and harmless (e.g. "README.md 를 읽고 한 줄로
-  요약해"), because each launch costs real tokens.
+  each to 180 s. macOS has no `timeout`; use `perl -e 'alarm 180; exec @ARGV' -- <cmd…>`. Keep prompts tiny and harmless (e.g. "Read README.md and summarize it
+  in one line"), because each launch costs real tokens.
 - Budget: at most 8 harness launches per run. Plan scenarios so each launch answers something.
 - Auth or trust failures (Codex hook trust prompt, missing `auth.json`, keychain) are
   findings, not things to work around. Report the exact message and continue with the

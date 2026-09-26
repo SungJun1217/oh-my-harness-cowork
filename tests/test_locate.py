@@ -13,7 +13,7 @@ from ._repo import REPO
 
 class TestLocate(unittest.TestCase):
     def test_repo_key_is_basename_plus_sha1_prefix(self):
-        """공식을 단정한다. 리터럴을 박으면 다른 체크아웃에서 깨진다."""
+        """Asserts the formula itself. Hardcoding a literal would break on a different checkout."""
         import hashlib
 
         expected = "{}-{}".format(
@@ -23,9 +23,9 @@ class TestLocate(unittest.TestCase):
         self.assertEqual(locate.repo_key(REPO), expected)
 
     def test_known_value_for_this_machine(self):
-        """이 머신의 실측 값. 다른 경로에서는 건너뛴다."""
+        """A value observed on this machine. Skipped on a different path."""
         if REPO != "/home/ec2-user/capstone/oh-my-harness-cowork":
-            self.skipTest("다른 체크아웃 경로: {}".format(REPO))
+            self.skipTest("different checkout path: {}".format(REPO))
         self.assertEqual(locate.repo_key(REPO), "oh-my-harness-cowork-25358bbb")
 
     def test_repo_key_is_stable_and_8_hex_chars(self):
@@ -90,8 +90,8 @@ class TestLocate(unittest.TestCase):
             self.assertEqual(locate.resolve_repo_root(parent), os.path.realpath(parent))
 
     def test_nested_git_beats_a_parent_omhc_root_marker(self):
-        """가장 가까운 조상이 이긴다 — .omhc-root 가 상위에 있어도 자기 .git 을
-        가진 자식이 우선."""
+        """The nearest ancestor wins — a child with its own .git takes priority
+        even if .omhc-root is above it."""
         with tempfile.TemporaryDirectory() as parent:
             open(os.path.join(parent, ".omhc-root"), "w").close()
             child = os.path.join(parent, "child")

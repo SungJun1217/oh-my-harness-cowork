@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""PostToolUse(Edit|Write): 고친 .py 파일이 지원 하한(MIN_PY) 문법으로 파싱되는지 본다.
+"""PostToolUse(Edit|Write): checks that an edited .py file parses under the
+supported minimum (MIN_PY) grammar.
 
-실행하는 인터프리터 버전이 아니라 feature_version 으로 검사한다. 개발 머신마다
-python3 가 다르므로(이 맥 3.9.6, 다른 곳은 3.12…) 로컬 버전에 기대면 3.12 머신에서
-match 가 그냥 통과한다. feature_version 은 CPython 도 best-effort 라 명시하므로
-최종 방어선은 하한 버전에서 도는 테스트다.
+Checked via feature_version, not the running interpreter's version. Since
+python3 differs across dev machines (3.9.6 on this Mac, 3.12 elsewhere…),
+relying on the local version would let `match` pass on a 3.12 machine. CPython
+itself documents feature_version as best-effort, so the final line of defense
+is the test suite running on the minimum version.
 
-jq 에 의존하지 않는다 — python3 는 이 프로젝트의 유일한 전제 조건이다.
+Doesn't depend on jq — python3 is this project's only prerequisite.
 """
 import ast
 import json

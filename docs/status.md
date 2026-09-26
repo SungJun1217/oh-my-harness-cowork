@@ -1,4 +1,4 @@
-**English** · [한국어](status.ko.md) · [← README](../README.md)
+[← README](../README.md)
 
 # What `omhc status` checks
 
@@ -13,6 +13,7 @@ is no SKIP.
 | `ledger` | How many session starts are recorded for this repo (`----`) |
 | [`ledger rejects`](#ledger-rejects) | Ledger rows dropped for being too long |
 | `archive` | Each archived session with its unarchived tail (`tail=…B`). FAIL when handoffs were delivered but nothing got archived |
+| `last read` | What the last session `brief` read yielded: events, unparsed lines, and skipped records by type (#37). Never gates — a session closed with no turn legitimately yields 0 events — but 0 events from a non-empty session points at a harness format change |
 | `off switch` | Whether `OMHC_OFF` or the `off` file has turned omhc off (`----`) |
 | `instruction files` | Whether `AGENTS.md` is shared with `CLAUDE.md` (Path B then falls to the outbox). FAIL when a stale omhc block would leak into Claude Code |
 | [`codex hook`](#codex-hook), [`codex root markers`](#codex-root-markers), [`codex agents.md budget`](#codex-agentsmd-budget) | Codex health rows |

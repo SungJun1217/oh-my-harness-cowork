@@ -1,3 +1,3 @@
-"""omhc — 하네스 간 작업 이어가기."""
+"""omhc — carries working context across coding-agent harnesses."""
 
-__version__ = "0.1.14"
+__version__ = "0.1.15"

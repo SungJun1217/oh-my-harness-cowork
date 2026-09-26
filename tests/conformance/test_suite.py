@@ -1,14 +1,14 @@
-"""모든 어댑터가 지켜야 하는 불변식.
+"""Invariants every adapter must hold.
 
-REGISTRY 위에 파라미터화되므로 **어댑터를 추가하면 테스트가 저절로 늘어난다**.
-"붙인 것 같다"가 아니라 증명이 된다. 읽기 전용 어댑터는 쓰기 절반을 가짜로
-채우지 않고도 통과한다 — 읽기와 쓰기는 독립 capability 다.
+Parameterized over REGISTRY, so **adding an adapter grows the test suite for
+free**. It's proof, not "looks wired up". A read-only adapter still passes
+without faking the write half — read and write are independent capabilities.
 
-새 어댑터를 붙이는 사람이 해야 할 일:
-  1. omhc/adapters/<harness>.py 에 메서드 5개를 구현하고 @_register 를 붙인다
-  2. omhc/adapters/__init__.py 맨 아래에 import 한 줄을 추가한다
-  3. tests/fixtures/<harness>/ 에 실물 세션 하나를 얼린다
-그러면 이 파일의 불변식이 자동으로 그 어댑터에 적용된다.
+What someone adding a new adapter has to do:
+  1. implement the 5 methods in omhc/adapters/<harness>.py and add @_register
+  2. add one import line at the bottom of omhc/adapters/__init__.py
+  3. freeze one real session under tests/fixtures/<harness>/
+Then this file's invariants apply to that adapter automatically.
 """
 from __future__ import annotations
 
@@ -25,7 +25,8 @@ import sys
 sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__))))
 from _repo import REPO  # noqa: E402
 
-# 계약 클래스에서 유도한다. 손으로 적으면 계약과 검증 대상이 조용히 갈라진다.
+# Derived from the contract class. Hand-writing this lets the contract and
+# what's actually verified drift apart silently.
 REQUIRED_METHODS = tuple(
     name for name, value in vars(A.HarnessAdapter).items()
     if not name.startswith("_") and callable(value)
@@ -38,23 +39,24 @@ def adapter_ids():
 
 
 def sessions_or_skip(case, adapter_id):
-    """세션을 하나도 못 찾으면 **건너뛴다**. 조용히 통과시키지 않는다.
+    """**Skip** if no sessions are found at all. Never pass silently.
 
-    0건 순회는 단정을 하나도 실행하지 않은 채 PASS 가 된다 — "외래 물질이 새지
-    않는다" 는 보장이 검증됐다고 보고되면서 실제로는 아무것도 검사되지 않는,
-    가장 위험한 종류의 통과다.
+    A zero-item loop passes with no assertions ever run — the most dangerous
+    kind of pass, one that reports "no foreign matter leaks" as verified
+    while nothing was actually checked.
     """
     refs = adapters.get(adapter_id).list_sessions(REPO)
     if not refs:
         case.skipTest(
-            "{}: {} 에 세션이 없다 — 이 머신에서 그 하네스를 쓴 적이 없거나 "
-            "다른 체크아웃이다. 순회 불변식은 검증되지 않았다.".format(adapter_id, REPO)
+            "{}: no sessions under {} — either this harness was never used "
+            "on this machine or this is a different checkout. The iteration "
+            "invariant was not verified.".format(adapter_id, REPO)
         )
     return refs
 
 
 class AdapterContract(unittest.TestCase):
-    """계약 불변식. 어댑터마다 subTest 로 개별 보고된다."""
+    """Contract invariants. Reported per-adapter via subTest."""
 
     def test_01_registry_holds_classes(self):
         for adapter_id in adapter_ids():
@@ -75,7 +77,7 @@ class AdapterContract(unittest.TestCase):
         for adapter_id in adapter_ids():
             with self.subTest(adapter=adapter_id):
                 caps = adapters.REGISTRY[adapter_id].capabilities
-                self.assertTrue(caps, "capability 를 하나도 선언하지 않았다")
+                self.assertTrue(caps, "declared no capability at all")
                 for cap in caps:
                     self.assertIsInstance(cap, A.Capability)
 
@@ -98,7 +100,7 @@ class AdapterContract(unittest.TestCase):
                     )
 
     def test_07_init_does_no_io(self):
-        """존재하지 않는 home 으로 생성해도 터지지 않아야 한다."""
+        """Must not raise even when constructed with a nonexistent home."""
         for adapter_id in adapter_ids():
             with self.subTest(adapter=adapter_id):
                 adapters.get(adapter_id, home="/proc/omhc-nonexistent")
@@ -117,7 +119,7 @@ class AdapterContract(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as home:
                     got = adapters.get(adapter_id, home=home).detect()
                 if not got.present:
-                    self.assertTrue(got.note, "없으면 왜 없는지 말해야 한다")
+                    self.assertTrue(got.note, "must say why it's absent")
 
     def test_10_list_sessions_returns_empty_for_an_unknown_repo(self):
         for adapter_id in adapter_ids():
@@ -130,7 +132,7 @@ class AdapterContract(unittest.TestCase):
                 self.assertEqual(list(got), [])
 
     def test_11_list_sessions_accepts_none_repo_root(self):
-        """작업 디렉터리 개념이 없는 하네스를 위해 None 을 받아야 한다."""
+        """Must accept None for harnesses with no notion of a working directory."""
         for adapter_id in adapter_ids():
             if A.Capability.READ not in adapters.REGISTRY[adapter_id].capabilities:
                 continue
@@ -200,7 +202,7 @@ class AdapterContract(unittest.TestCase):
                         self.assertIn(ev.author, AUTHORS)
 
     def test_17_no_foreign_machinery_reaches_any_event_text(self):
-        """가장 중요한 불변식. 남의 하네스 지시가 중계되면 안 된다."""
+        """The most important invariant. A foreign harness's instructions must never be relayed."""
         for adapter_id in adapter_ids():
             if A.Capability.READ not in adapters.REGISTRY[adapter_id].capabilities:
                 continue
@@ -209,7 +211,8 @@ class AdapterContract(unittest.TestCase):
                 for ref in sessions_or_skip(self, adapter_id)[:1]:
                     for ev in adapter.read_session(ref).events:
                         if ev.author == "human":
-                            # 사람의 문장은 그 사람의 권위다(사용자 결정 (a)).
+                            # A human's own sentence carries their own authority
+                            # (user decision (a)).
                             continue
                         for marker in guard.FOREIGN_MARKERS:
                             self.assertNotIn(marker, ev.text)
@@ -256,8 +259,9 @@ class AdapterContract(unittest.TestCase):
                 self.assertTrue(hint is None or isinstance(hint, str))
 
     def test_23_every_adapter_declares_exactly_one_wire_field(self):
-        """주입 페이로드에 컨텍스트 필드가 둘이면 Claude Code 가 둘 다 읽어
-        핸드오프가 두 번 주입된다. 어댑터가 추가되면 이 불변식이 자동으로 적용된다."""
+        """If the injected payload carries two context fields, Claude Code reads
+        both and the handoff gets injected twice. This invariant applies
+        automatically to any adapter that's added."""
         from omhc import brief
 
         for adapter_id in adapter_ids():
@@ -269,8 +273,8 @@ class AdapterContract(unittest.TestCase):
                 self.assertEqual(len(_json.loads(brief.hook_wire("x", wire))), 1)
 
     def test_24_fallback_channels_are_callables(self):
-        """폴백 채널은 어댑터의 속성이다 — 라우터에 벤더 문자열이 있으면
-        어댑터 추가가 코어 수정을 요구한다."""
+        """Fallback channels are the adapter's own property — a vendor string
+        in the router would mean adding an adapter requires a core change."""
         for adapter_id in adapter_ids():
             with self.subTest(adapter=adapter_id):
                 with tempfile.TemporaryDirectory() as home:
@@ -286,15 +290,17 @@ class AdapterContract(unittest.TestCase):
                 bundle = A.HandoffBundle(body_md="[omhc] x\n", repo_root=REPO,
                                          to_adapter_id=adapter_id)
                 if A.Capability.WRITE not in caps:
-                    # 읽기 전용은 쓰기 절반을 가짜로 채우지 않는다.
-                    # continue 여야 한다 — return 이면 첫 읽기 전용 어댑터에서
-                    # 테스트가 끝나고 나머지 어댑터는 검증되지 않은 채 PASS 가 된다.
+                    # Read-only adapters don't fake the write half.
+                    # Must be `continue`, not `return` — `return` would end
+                    # the test at the first read-only adapter and leave the
+                    # rest unverified yet PASS.
                     with self.assertRaises((A.NoInjectionChannel, NotImplementedError)):
                         adapters.get(adapter_id).install_handoff(bundle)
                     continue
-                # WRITE 어댑터는 receipt 를 주거나, 그 채널이 지금 성립하지 않는다면
-                # NoInjectionChannel 을 던진다 — 둘 다 선언된 정상 결과다. 전달이
-                # 아닌 것을 성공으로 보고하면 폴백이 영원히 발동하지 않는다.
+                # A WRITE adapter either gives a receipt, or raises
+                # NoInjectionChannel if that channel doesn't currently hold —
+                # both are declared normal outcomes. Reporting a non-delivery
+                # as success would mean the fallback never fires.
                 with tempfile.TemporaryDirectory() as home:
                     try:
                         receipt = adapters.get(
@@ -306,7 +312,7 @@ class AdapterContract(unittest.TestCase):
                 self.assertTrue(receipt.paths_written)
 
     def test_25_deliver_always_produces_a_receipt(self):
-        """어떤 어댑터로 보내도 라우터는 receipt 로 끝난다 — 조용히 사라지지 않는다."""
+        """Whichever adapter it's sent to, the router ends in a receipt — nothing vanishes silently."""
         from omhc import deliver
 
         for adapter_id in adapter_ids() + ["definitely-not-an-adapter"]:
@@ -331,20 +337,23 @@ class AdapterContract(unittest.TestCase):
                     self.assertIsInstance(got, bool)
                 finally:
                     os.unlink(path)
-                # 없는 파일도 던지지 않는다(반환값은 fail-open 정책이라 어댑터마다
-                # 다를 수 있다 — 여기서는 예외가 없다는 것만 본다).
+                # A missing file must not raise either (the return value is
+                # a fail-open policy that can differ per adapter — here we
+                # only check that no exception is raised).
                 adapters.get(adapter_id).classify("/nope/missing.jsonl")
 
     def test_27_health_is_a_tuple_of_3_tuples_and_never_raises(self):
-        """health 는 선택 메서드다(fallback_channels 와 같은 패턴). 빈 홈에서도
-        절대 던지지 않고, 준 게 있다면 (label, ok, detail) 모양이어야 한다.
+        """health is an optional method (same pattern as fallback_channels).
+        Must never raise even on an empty home, and whatever it returns must
+        be shaped (label, ok, detail).
 
-        빈 홈에서는 대부분의 어댑터가 (정당하게) 빈 튜플을 준다 — codex-cli 는
-        훅이 설치돼 있지 않으면 행 자체를 생략한다. 여기서 벤더 지식 없이 훅
-        설치 상태를 흉내 낼 방법이 없으므로, 실제로 행이 나오는 경로의 모양
-        검증은 해당 어댑터의 전용 테스트(tests/test_codex_cli.py::TestHealth)가
-        맡는다 — 이 테스트는 "던지지 않는다" 와 "나온 게 있다면 모양이 맞다"
-        만 모든 어댑터에 대해 증명한다.
+        Most adapters (legitimately) return an empty tuple on an empty home
+        — codex-cli omits the row entirely when its hook isn't installed.
+        There's no way here to fake an installed-hook state without vendor
+        knowledge, so verifying the shape of a row that actually appears is
+        left to that adapter's own test (tests/test_codex_cli.py::TestHealth)
+        — this test only proves "never raises" and "if something comes back,
+        it's shaped right", across every adapter.
         """
         for adapter_id in adapter_ids():
             with self.subTest(adapter=adapter_id):
@@ -355,15 +364,17 @@ class AdapterContract(unittest.TestCase):
                     self.assertEqual(len(row), 3)
                     label, ok, detail = row
                     self.assertIsInstance(label, str)
-                    # ok 는 True/False/None 이다 — None 은 아직 판단할 근거가
-                    # 없는 정보성 진단(status 의 `----`, 게이팅 안 함).
+                    # ok is True/False/None — None is an informational
+                    # diagnosis with no basis to judge yet (status's `----`,
+                    # not gated on).
                     self.assertTrue(ok is None or isinstance(ok, bool))
                     self.assertIsInstance(detail, str)
 
     def test_30_on_session_start_mark_never_raises(self):
-        """on_session_start_mark 는 선택 메서드다(discover/health 와 같은
-        패턴). 훅 경로(cmd_mark)에서 불리므로 어떤 source/repo 조합에도 절대
-        던지지 않아야 한다 — 기본은 no-op 이고, 구현이 있어도 방어해야 한다."""
+        """on_session_start_mark is an optional method (same pattern as
+        discover/health). It's called from the hook path (cmd_mark), so it
+        must never raise for any source/repo combination — the default is a
+        no-op, and any real implementation must still guard against this."""
         for adapter_id in adapter_ids():
             with self.subTest(adapter=adapter_id):
                 with tempfile.TemporaryDirectory() as home:
@@ -373,9 +384,10 @@ class AdapterContract(unittest.TestCase):
                             inst.on_session_start_mark(REPO, source=source, epoch=1.0))
 
     def test_29_hook_config_is_none_or_a_shipped_fragment(self):
-        """hook_config 는 선택 메서드다(health/fallback_channels 와 같은 패턴).
-        None 이 아니면 그 fragment_name 이 배포되는 hooks/ 아래 실재하고 JSON 으로
-        파싱돼야 한다 — 코어(hookconf)와 어댑터가 같은 파일을 가리켜야 한다."""
+        """hook_config is an optional method (same pattern as
+        health/fallback_channels). If not None, its fragment_name must
+        actually exist under the shipped hooks/ and parse as JSON — the
+        core (hookconf) and the adapter must point at the same file."""
         from omhc import hookconf
 
         for adapter_id in adapter_ids():
@@ -390,13 +402,15 @@ class AdapterContract(unittest.TestCase):
                 self.assertIsInstance(hc.post_write_note, str)
 
     def test_28_discover_is_an_iterable_of_session_refs_and_never_raises(self):
-        """discover 는 mark 백필 전용 선택 메서드다(fallback_channels/health 와
-        같은 패턴). 빈 홈에서도 절대 던지지 않고, 준 게 있다면 SessionRef 여야
-        한다 — Claude 는 (일부러) 항상 빈 튜플이다(discover 의 docstring 참고).
+        """discover is an optional method dedicated to mark's backfill (same
+        pattern as fallback_channels/health). Must never raise even on an
+        empty home, and whatever it returns must be a SessionRef — Claude
+        (deliberately) always returns an empty tuple (see discover's
+        docstring).
 
-        `deadline` 은 키워드 전용이 아니라 위치로도 받아들여야 cmd_mark 의
-        호출(`discover(root, deadline=deadline)`)이 모든 어댑터에서 통한다 —
-        이미 지난 deadline 을 줘도 던지지 않아야 한다."""
+        `deadline` must be accepted positionally as well as by keyword so
+        cmd_mark's call (`discover(root, deadline=deadline)`) works across
+        every adapter — must not raise even given an already-past deadline."""
         import time
 
         for adapter_id in adapter_ids():
@@ -410,14 +424,15 @@ class AdapterContract(unittest.TestCase):
                         self.assertIsInstance(ref, A.SessionRef)
 
     def test_30_read_session_since_matches_read_session_restricted_to_the_offset(self):
-        """선택 메서드(discover/health 와 같은 패턴) — 구현하는 어댑터만 본다.
-        기본(None) 인 어댑터는 건너뛴다(#22)."""
+        """Optional method (same pattern as discover/health) — only checked
+        for adapters that implement it. Adapters that default to None are
+        skipped (#22)."""
         for adapter_id in adapter_ids():
             if A.Capability.READ not in adapters.REGISTRY[adapter_id].capabilities:
                 continue
             adapter = adapters.get(adapter_id)
             with self.subTest(adapter=adapter_id):
-                # 가비지에서 절대 던지지 않는다.
+                # Must never raise on garbage.
                 with tempfile.NamedTemporaryFile("wb", suffix=".jsonl",
                                                  delete=False) as fh:
                     fh.write(b"\x00\xff{not json\n\n\x80\x81")
@@ -428,7 +443,7 @@ class AdapterContract(unittest.TestCase):
                                             size=os.path.getsize(junk_path))
                     got = adapter.read_session_since(junk_ref, 0)
                     if got is None:
-                        continue  # 선택 메서드 미구현 — 나머지도 볼 필요 없다.
+                        continue  # optional method not implemented — nothing more to check.
                     self.assertIsInstance(got, A.SessionSince)
                     self.assertIsInstance(got.end_offset, int)
                 finally:
@@ -438,10 +453,12 @@ class AdapterContract(unittest.TestCase):
                     full = adapter.read_session(ref)
                     if not full.events:
                         continue
-                    # 줄 경계(어떤 이벤트의 offset)에서 자른다 — line-aligned start.
-                    # seq 는 이 부분 읽기가 처음부터 다시 매기므로(구현 자유
-                    # — 색인은 read_session_since 를 쓰지 않는다) 비교에서
-                    # 뺀다; 나머지 필드는 read_session 과 완전히 같아야 한다.
+                    # Cut at a line boundary (some event's offset) — a
+                    # line-aligned start. seq is renumbered from scratch by
+                    # this partial read (implementation's own choice — the
+                    # index never uses read_session_since), so it's excluded
+                    # from the comparison; every other field must match
+                    # read_session exactly.
                     mid = full.events[len(full.events) // 2]
                     since = adapter.read_session_since(ref, mid.offset)
                     self.assertIsNotNone(since)
@@ -449,14 +466,15 @@ class AdapterContract(unittest.TestCase):
                                      if e.offset >= mid.offset)
                     got = tuple(e._replace(seq=0) for e in since.events)
                     self.assertEqual(got, expected)
-                    # end_offset 은 항상 줄 경계다(리뷰: 개행 없이 끝나는
-                    # 마지막 줄은 아직 "안전히 다 읽은" 것이 아니다) — 실물
-                    # 픽스처는 마지막 줄에 개행이 없을 수도 있으므로 EOF 와
-                    # 같다고 단정하지 않고, 직전 바이트가 개행인지로 본다.
+                    # end_offset is always a line boundary (review: a last
+                    # line with no trailing newline isn't "safely fully read"
+                    # yet) — a real fixture's last line may lack a newline,
+                    # so instead of asserting it equals EOF, check whether
+                    # the preceding byte is a newline.
                     size = os.path.getsize(ref.source_path)
                     self._assert_line_aligned(ref.source_path, since.end_offset, size)
 
-                    # EOF 에서는 빈 이벤트, end_offset 은 여전히 줄 경계 이하.
+                    # At EOF, events are empty and end_offset is still at or before a line boundary.
                     eof = adapter.read_session_since(ref, size)
                     self.assertIsNotNone(eof)
                     self.assertEqual(eof.events, ())
