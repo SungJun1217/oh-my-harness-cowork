@@ -79,19 +79,36 @@ declines (falling through to the outbox) instead, and logs the reason to
 
 For every detected harness, status also adds a `<adapter-id> hooks` row
 (e.g. `claude-code hooks`, `codex-cli hooks`) that checks whether omhc's
-SessionStart hooks are actually merged into that harness's own config, not
-just that the harness directory exists. Matching is structural (parsed as
-argv, not a byte-for-byte string compare), so an absolute path, `~`,
-`${HOME}`, a quoted command, or a bare `omhc` found on `PATH` all still
-count as installed. It FAILs (and gates) when the config file is missing
-(pointing at `omhc hooks install`) or unparseable, when the `mark`/`brief`
-commands aren't there in the order and with the flags the shipped fragment
-expects (a stale `--wire sdk`, a missing `mark`, `brief` before `mark`, …
-also pointing at `omhc hooks install`), or when the hook's binary can't be
-found or isn't executable. It PASSes once the installed commands match the
-shipped fragment structurally and the binary is executable. A Codex install
-in `config.toml` counts too; see
+hooks are actually merged into that harness's own config, not just that the
+harness directory exists. Matching is structural (parsed as argv, not a
+byte-for-byte string compare), so an absolute path, `~`, `${HOME}`, a quoted
+command, or a bare `omhc` found on `PATH` all still count as installed. It
+FAILs (and gates) when the config file is missing (pointing at `omhc hooks
+install`) or unparseable, when the `mark`/`brief` commands aren't there in
+the order and with the flags the shipped fragment expects (a stale `--wire
+sdk`, a missing `mark`, `brief` before `mark`, … also pointing at `omhc
+hooks install`), or when the hook's binary can't be found or isn't
+executable. It PASSes once the installed commands match the shipped
+fragment structurally and the binary is executable. A Codex install in
+`config.toml` counts too; see
 [Codex: hooks in config.toml](install.md#codex-hooks-in-configtoml).
+
+This one row also covers the `UserPromptSubmit` group (`omhc turn`, v2
+phase 2) — it FAILs the same way if that group is missing entirely from
+`hooks.json`, so an install from before phase 2 shipped (`SessionStart`
+only) is flagged instead of silently staying PASS; `omhc hooks install`
+picks up just the missing group without touching an already-passing
+`SessionStart` group's content.
+
+`omhc hooks install` only ever writes `hooks.json` — it never auto-installs
+into Codex's inline `config.toml [hooks]` (see
+[Codex: hooks in config.toml](install.md#codex-hooks-in-configtoml)). So
+when the `SessionStart`/`brief` half is only installed inline, a missing
+`hooks.json` turn hook isn't a defect `omhc hooks install` could fix, and
+isn't reported as FAIL — it shows as unjudged (`----`) with a hint to add a
+`UserPromptSubmit` entry to `config.toml` by hand (`omhc hooks install`
+prints the same hint instead of writing `hooks.json` in that case, to avoid
+Codex loading both layers and warning).
 
 ## pull rate
 

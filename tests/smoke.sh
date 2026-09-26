@@ -27,8 +27,22 @@ teardown() { rm -rf "$WORK"; }
 
 check() {
   local name="$1" stdin="$2"
+  check_cmd "$name" "$stdin" brief --harness claude-code
+}
+
+# `omhc turn` (v2 phase 2, #42) is a second hook path with the same
+# invariant 2 requirement (empty stdout + exit 0 on anything), routed
+# through bin/omhc's own dedicated branch instead of omhc.cli — so it's
+# exercised through the same adversarial inputs, not assumed safe by association.
+check_turn() {
+  local name="$1" stdin="$2"
+  check_cmd "$name" "$stdin" turn --harness claude-code
+}
+
+check_cmd() {
+  local name="$1" stdin="$2"; shift 2
   local out rc
-  out="$(cd "$REPO" && printf '%s' "$stdin" | "$OMHC" brief --harness claude-code 2>/dev/null)"
+  out="$(cd "$REPO" && printf '%s' "$stdin" | "$OMHC" "$@" 2>/dev/null)"
   rc=$?
   if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
     printf 'PASS  %s\n' "$name"
@@ -88,6 +102,44 @@ teardown
 # 8) cwd is "/" (rejected root)
 setup
 check "cwd is /" '{"cwd":"/","session_id":"smoke-1"}'
+teardown
+
+# --- omhc turn (v2 phase 2, #42) --------------------------------------------
+
+# 9) turn: stdin is broken json
+setup
+check_turn "turn: stdin is broken json" "{not json at all"
+teardown
+
+# 10) turn: stdin is empty
+setup
+check_turn "turn: stdin is empty" ""
+teardown
+
+# 11) turn: cwd is "/" (rejected root)
+setup
+check_turn "turn: cwd is /" '{"cwd":"/","session_id":"smoke-1","transcript_path":"/x.jsonl"}'
+teardown
+
+# 12) turn: transcript_path does not exist
+setup
+check_turn "turn: transcript_path does not exist" \
+  "{\"cwd\":\"$REPO\",\"session_id\":\"smoke-1\",\"transcript_path\":\"/nope/missing.jsonl\"}"
+teardown
+
+# 13) turn: ledger with only a corrupt half-line
+setup
+mkdir -p "$HOME/.omhc"
+printf '{"repo":"x","harn\n' > "$HOME/.omhc/ledger.jsonl"
+check_turn "turn: ledger with a corrupt half-line" \
+  "{\"cwd\":\"$REPO\",\"session_id\":\"smoke-1\",\"transcript_path\":\"/dev/null\"}"
+teardown
+
+# 14) turn: HOME is unwritable
+setup
+export HOME=/proc/omhc-nonexistent
+check_turn "turn: HOME is unwritable" \
+  "{\"cwd\":\"$REPO\",\"session_id\":\"smoke-1\",\"transcript_path\":\"/dev/null\"}"
 teardown
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

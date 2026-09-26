@@ -11,7 +11,13 @@
     "env var because omhc is a settings hook, not a plugin, so CLAUDE_PLUGIN_ROOT",
     "is never set. And emitting both additional_context and hookSpecificOutput",
     "at once would have Claude Code read both without deduping, injecting the",
-    "handoff twice."
+    "handoff twice.",
+    "",
+    "UserPromptSubmit (v2 phase 2, #42): `omhc turn` warns, once per human",
+    "turn, when the other harness modified a file this session already",
+    "touched. This is a separate trust/approval unit from SessionStart above —",
+    "Claude Code may ask you to approve this new hook group on its own even if",
+    "SessionStart is already approved."
   ],
   "hooks": {
     "SessionStart": [
@@ -24,6 +30,16 @@
           {
             "type": "command",
             "command": "$HOME/.local/bin/omhc brief --harness claude-code --wire claude"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/omhc turn --harness claude-code"
           }
         ]
       }

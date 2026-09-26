@@ -30,6 +30,18 @@ def shipped_commands(path: str):
     return out
 
 
+def shipped_turn_commands(path: str):
+    """v2 phase 2 (#42): the UserPromptSubmit group's commands, same shape."""
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    out = []
+    for group in data["hooks"]["UserPromptSubmit"]:
+        for hook in group["hooks"]:
+            assert hook["type"] == "command", hook
+            out.append(hook["command"])
+    return out
+
+
 class TestShippedHookFiles(unittest.TestCase):
     def test_both_fragments_are_valid_json(self):
         for harness, path in FRAGMENTS.items():
@@ -84,6 +96,18 @@ class TestShippedHookFiles(unittest.TestCase):
                     text = fh.read()
                 self.assertIn("omhc", text)
                 self.assertIn("_comment", text)
+
+    def test_turn_group_names_its_own_harness_and_takes_no_wire_flag(self):
+        """v2 phase 2 (#42). `omhc turn` always wraps its note in the nested
+        hookSpecificOutput/UserPromptSubmit shape itself (turn.py) — unlike
+        brief, it has no --wire choice to pin."""
+        for harness, path in FRAGMENTS.items():
+            with self.subTest(harness=harness):
+                commands = shipped_turn_commands(path)
+                self.assertEqual(len(commands), 1)
+                self.assertIn(" turn ", commands[0])
+                self.assertIn("--harness {}".format(harness), commands[0])
+                self.assertNotIn("--wire", commands[0])
 
 
 class TestHookChainExecution(unittest.TestCase):

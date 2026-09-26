@@ -428,11 +428,20 @@ class TestHookconfMergeStrip(unittest.TestCase):
             return json.load(fh)
 
     def test_merge_into_missing_file_creates_it(self):
+        # merge() (bare) only ever touches the one event it's given (default
+        # "SessionStart") — the shipped fragment now also carries a second,
+        # "UserPromptSubmit" key (#42), so this only equals self.fragment
+        # once install_all() has merged every event it declares.
         self.assertFalse(os.path.exists(self.config_path))
-        changed = hookconf.merge(self.config_path, self.fragment, self.home)
+        changed = hookconf.install_all(self.config_path, self.fragment, self.home)
         self.assertTrue(changed)
         self.assertEqual(self._read(), {"hooks": self.fragment})
         self.assertFalse(os.path.exists(self.config_path + ".omhc-bak"))
+
+    def test_merge_only_touches_the_given_event(self):
+        changed = hookconf.merge(self.config_path, self.fragment, self.home)
+        self.assertTrue(changed)
+        self.assertEqual(self._read(), {"hooks": {"SessionStart": self.fragment["SessionStart"]}})
 
     def test_merge_twice_is_idempotent_no_backup_mtime_unchanged(self):
         hookconf.merge(self.config_path, self.fragment, self.home)
@@ -482,7 +491,7 @@ class TestHookconfMergeStrip(unittest.TestCase):
             json.dump({"hooks": {}}, fh)
         link = os.path.join(self._tmp.name, "settings.json")
         os.symlink(real, link)
-        hookconf.merge(link, self.fragment, self.home)
+        hookconf.install_all(link, self.fragment, self.home)
         self.assertTrue(os.path.islink(link))
         self.assertEqual(os.readlink(link), real)
         with open(real, encoding="utf-8") as fh:
@@ -527,6 +536,37 @@ class TestHookconfMergeStrip(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(os.stat(self.config_path).st_mtime_ns, before)
         self.assertEqual(self._read(), conf)
+
+    def test_install_all_leaves_a_passing_hand_merged_event_untouched_migration_case(self):
+        """Review #1 finding 4: a config from before the turn hook existed —
+        `SessionStart` already PASSes, hand-merged with an extra `timeout`
+        field and sharing its group with a user hook — must come out of
+        `install_all` byte-for-byte identical; only the missing
+        `UserPromptSubmit` group gets added."""
+        omhc_group = json.loads(json.dumps(self.fragment["SessionStart"][0]))
+        for h in omhc_group["hooks"]:
+            h["timeout"] = 30
+        conf = {"hooks": {"SessionStart": [
+            {"hooks": [{"type": "command", "command": "echo user"}]},
+            omhc_group,
+        ]}}
+        self._write(conf)
+        changed = hookconf.install_all(self.config_path, self.fragment, self.home)
+        self.assertTrue(changed)
+        got = self._read()
+        # SessionStart is exactly what was written before — same group
+        # order, same hand-added timeout field, same shared user-hook group.
+        self.assertEqual(got["hooks"]["SessionStart"], conf["hooks"]["SessionStart"])
+        # UserPromptSubmit is the only thing that got added.
+        self.assertEqual(got["hooks"]["UserPromptSubmit"], self.fragment["UserPromptSubmit"])
+
+    def test_install_all_is_a_noop_when_both_events_already_pass(self):
+        self._write({"hooks": self.fragment})
+        before = os.stat(self.config_path).st_mtime_ns
+        changed = hookconf.install_all(self.config_path, self.fragment, self.home)
+        self.assertFalse(changed)
+        self.assertEqual(os.stat(self.config_path).st_mtime_ns, before)
+        self.assertFalse(os.path.exists(self.config_path + ".omhc-bak"))
 
     def test_merge_leaves_a_matcher_group_untouched(self):
         omhc_group = json.loads(json.dumps(self.fragment["SessionStart"][0]))
@@ -635,11 +675,14 @@ class TestHookconfMergeStrip(unittest.TestCase):
     def test_strip_drops_empty_group_and_key(self):
         with open(self.config_path, "w", encoding="utf-8") as fh:
             json.dump({"hooks": self.fragment}, fh)
-        changed = hookconf.strip(self.config_path)
+        # strip_all (not bare strip()) — the shipped fragment carries both
+        # the SessionStart and UserPromptSubmit events (#42), and this
+        # asserts "hooks" disappears entirely once every omhc group is gone.
+        changed = hookconf.strip_all(self.config_path)
         self.assertTrue(changed)
         conf = self._read()
-        # If hooks held only SessionStart, hooks itself must disappear too —
-        # no {"hooks": {}} residue left behind (#20).
+        # If hooks held only omhc's own events, hooks itself must disappear
+        # too — no {"hooks": {}} residue left behind (#20).
         self.assertNotIn("hooks", conf)
 
     def test_strip_drops_empty_session_start_key_but_keeps_other_hook_events(self):

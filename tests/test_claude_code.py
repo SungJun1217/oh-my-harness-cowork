@@ -637,6 +637,211 @@ class TestReadSessionForgedRecords(unittest.TestCase):
             os.unlink(path)
 
 
+class TestReadSessionSince(unittest.TestCase):
+    """#42 (v2 phase 2 prerequisite): a per-turn check can't afford a full
+    read_session (measured 112ms on a 24MB transcript) — read_session_since
+    must match read_session's own record classification exactly (invariant 4:
+    never a second, drifting copy of the whitelist)."""
+
+    def _rows(self):
+        return [
+            {"type": "user", "cwd": REPO, "timestamp": _TS,
+             "message": {"content": "첫 턴"}},
+            {"type": "assistant", "cwd": REPO, "timestamp": _TS,
+             "message": {"content": [{"type": "text", "text": "첫 응답"}]}},
+            {"type": "user", "cwd": REPO, "timestamp": _TS,
+             "message": {"content": "두 번째 턴"}},
+        ]
+
+    def _write(self, rows) -> str:
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False,
+                                         encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            return fh.name
+
+    def test_matches_read_session_restricted_to_a_line_aligned_offset(self):
+        path = self._write(self._rows())
+        try:
+            adapter = CC.ClaudeCodeAdapter()
+            ref = ref_for(path)
+            full = adapter.read_session(ref)
+            self.assertGreaterEqual(len(full.events), 3)
+            mid = full.events[1]  # first response
+            since = adapter.read_session_since(ref, mid.offset)
+            self.assertIsNotNone(since)
+            expected = tuple(e._replace(seq=0) for e in full.events
+                             if e.offset >= mid.offset)
+            got = tuple(e._replace(seq=0) for e in since.events)
+            self.assertEqual(got, expected)
+            self.assertIn("두 번째 턴", [e.text for e in since.events])
+            self.assertNotIn("첫 턴", [e.text for e in since.events])
+        finally:
+            os.unlink(path)
+
+    def test_offset_zero_matches_read_session_in_full(self):
+        path = self._write(self._rows())
+        try:
+            adapter = CC.ClaudeCodeAdapter()
+            ref = ref_for(path)
+            full = adapter.read_session(ref)
+            since = adapter.read_session_since(ref, 0)
+            self.assertEqual(since.events, full.events)
+            self.assertEqual(since.end_offset, os.path.getsize(path))
+        finally:
+            os.unlink(path)
+
+    def test_mid_line_offset_skips_the_truncated_record(self):
+        path = self._write(self._rows())
+        try:
+            adapter = CC.ClaudeCodeAdapter()
+            ref = ref_for(path)
+            full = adapter.read_session(ref)
+            second_user = next(e for e in full.events if e.text == "두 번째 턴")
+            since = adapter.read_session_since(ref, second_user.offset + 3)
+            self.assertIsNotNone(since)
+            self.assertEqual(since.events, ())
+        finally:
+            os.unlink(path)
+
+    def test_max_bytes_caps_the_tail_and_end_offset_stays_line_aligned(self):
+        rows = self._rows()
+        for i in range(50):
+            rows.append({"type": "assistant", "cwd": REPO, "timestamp": _TS,
+                        "message": {"content": [{"type": "text",
+                                                 "text": "패딩 " * 50}]}})
+        rows.append({"type": "user", "cwd": REPO, "timestamp": _TS,
+                    "message": {"content": "캡 밖의 사람 턴"}})
+        path = self._write(rows)
+        try:
+            adapter = CC.ClaudeCodeAdapter()
+            ref = ref_for(path)
+            full_size = os.path.getsize(path)
+            since = adapter.read_session_since(ref, 0, max_bytes=200)
+            self.assertLess(since.end_offset, full_size)
+            self.assertNotIn("캡 밖의 사람 턴", [e.text for e in since.events])
+            with open(path, "rb") as fh:
+                content = fh.read()
+            self.assertTrue(since.end_offset == 0
+                           or content[since.end_offset - 1:since.end_offset] == b"\n")
+        finally:
+            os.unlink(path)
+
+    def test_stop_at_human_turn_returns_immediately_after_the_first_match(self):
+        rows = [
+            {"type": "user", "cwd": REPO, "timestamp": _TS,
+             "message": {"content": "첫 사람 턴"}},
+            {"type": "assistant", "cwd": REPO, "timestamp": _TS,
+             "message": {"content": [{"type": "text",
+                                      "text": "안 읽혀야 한다"}]}},
+            {"type": "user", "cwd": REPO, "timestamp": _TS,
+             "message": {"content": "안 읽혀야 하는 두 번째 사람 턴"}},
+        ]
+        path = self._write(rows)
+        try:
+            adapter = CC.ClaudeCodeAdapter()
+            ref = ref_for(path)
+            since = adapter.read_session_since(ref, 0, stop_at_human_turn=True)
+            self.assertEqual(len(since.events), 1)
+            self.assertEqual(since.events[0].text, "첫 사람 턴")
+            self.assertLess(since.end_offset, os.path.getsize(path))
+        finally:
+            os.unlink(path)
+
+    def test_stop_at_human_turn_ignores_a_complete_but_unterminated_human_line(self):
+        """A human turn whose trailing newline hasn't landed yet (may be
+        mid-write) doesn't count as a match — counting it would let the next
+        round, once the newline lands, find the same line again and hand it
+        off twice. Calls that aren't stop_at_human_turn are unaffected."""
+        path = self._write([])
+        try:
+            row = {"type": "user", "cwd": REPO, "timestamp": _TS,
+                  "message": {"content": "완전하지만 개행 없는 턴"}}
+            line = json.dumps(row, ensure_ascii=False).encode("utf-8")
+            with open(path, "ab") as fh:
+                fh.write(line)  # no trailing newline — mimics mid-write
+
+            adapter = CC.ClaudeCodeAdapter()
+            ref = ref_for(path)
+            since = adapter.read_session_since(ref, 0, stop_at_human_turn=True)
+            self.assertEqual(since.events, ())
+            self.assertEqual(since.end_offset, 0)
+
+            full = adapter.read_session(ref)
+            self.assertEqual(len(full.events), 1)
+            self.assertEqual(full.events[0].text, "완전하지만 개행 없는 턴")
+        finally:
+            os.unlink(path)
+
+    def test_fork_copied_records_never_produce_a_human_turn_in_a_tail_read(self):
+        """#34/#42: a forked transcript's copied section is never new work —
+        if a growth check's baseline ever landed inside it (the one race
+        this guards; the common case never sees it, see cli.py's
+        `_reactivate_grown_sessions`), `stop_at_human_turn` must not mistake
+        the copy for a fresh human turn."""
+        rows = [
+            {"type": "history-suppression", "cause": "fork_inherit"},
+            _copied({"type": "user", "cwd": REPO, "timestamp": _TS,
+                    "message": {"content": "부모의 목표"}}, uuid="u1"),
+            _copied({"type": "assistant", "cwd": REPO, "timestamp": _TS,
+                    "message": {"content": [{"type": "text", "text": "부모의 답"}]}},
+                   uuid="u2"),
+        ]
+        path = self._write(rows)
+        try:
+            adapter = CC.ClaudeCodeAdapter()
+            ref = ref_for(path)
+            since = adapter.read_session_since(ref, 0, stop_at_human_turn=True)
+            self.assertFalse(any(e.author == "human" for e in since.events))
+            self.assertEqual(since.end_offset, os.path.getsize(path))
+            # Unaffected — a full/plain read still inherits the copied GOAL.
+            full = adapter.read_session(ref)
+            self.assertEqual(len([e for e in full.events if e.author == "human"]), 1)
+        finally:
+            os.unlink(path)
+
+    def test_missing_file_never_raises(self):
+        adapter = CC.ClaudeCodeAdapter()
+        ref = A.SessionRef(adapter_id="claude-code", session_id="gone",
+                           source_path="/nope/missing.jsonl", cwd=REPO,
+                           epoch=0.0, size=0)
+        since = adapter.read_session_since(ref, 10)
+        self.assertIsNotNone(since)
+        self.assertEqual(since.events, ())
+
+    def test_garbage_offset_never_raises(self):
+        path = self._write(self._rows())
+        try:
+            adapter = CC.ClaudeCodeAdapter()
+            ref = ref_for(path)
+            since = adapter.read_session_since(ref, "not-an-int")
+            self.assertIsNotNone(since)
+        finally:
+            os.unlink(path)
+
+
+class TestTurnHookInjectionNeverParsed(unittest.TestCase):
+    """v2 phase 2 (#42) measured fact: `omhc turn`'s own UserPromptSubmit note
+    lands in the transcript as an `attachment` record of type
+    `hook_additional_context` — invariant 4 (whitelist parsing, own injected
+    notes never become events)."""
+
+    def test_hook_additional_context_attachment_is_never_a_human_turn(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            _write_jsonl(path, [
+                {"type": "user", "cwd": REPO, "timestamp": _TS,
+                 "message": {"content": "진짜 사람의 말"}},
+                {"type": "attachment", "cwd": REPO, "timestamp": _TS,
+                 "attachment": {"type": "hook_additional_context",
+                               "content": "[omhc] codex-cli 01a0d2e1 (running) modified "
+                                          "files you touched, since your last turn:"}},
+            ])
+            read = CC.ClaudeCodeAdapter().read_session(ref_for(path))
+            self.assertEqual(len([e for e in read.events if e.author == "human"]), 1)
+            self.assertIn("attachment", read.dropped)
+
+
 class TestWriteSide(unittest.TestCase):
     def test_native_resume_hint_names_the_session(self):
         hint = CC.ClaudeCodeAdapter().native_resume_hint(ref_for("/x/abc.jsonl"))

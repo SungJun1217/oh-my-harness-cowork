@@ -57,6 +57,57 @@ class TestHooksInstallCli(unittest.TestCase):
         ok, detail = hookconf.inspect(hc.config_path, fragment, self.home)
         self.assertTrue(ok, detail)
 
+    def test_install_also_writes_the_turn_userpromptsubmit_group(self):
+        # v2 phase 2 (#42): one `omhc hooks install` call covers both
+        # managed events in the shared fragment file.
+        _run(["hooks", "install", "--harness", "claude-code"], self.home)
+        settings = os.path.join(self.home, ".claude", "settings.json")
+        with open(settings, encoding="utf-8") as fh:
+            conf = json.load(fh)
+        self.assertIn("UserPromptSubmit", conf["hooks"])
+        self.assertIn("omhc turn --harness claude-code",
+                      conf["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"])
+
+    def test_an_old_install_with_only_sessionstart_is_flagged_fail(self):
+        # An install from before #42 (only mark/brief, no turn hook) must not
+        # silently stay PASS forever — the human needs to be told to rerun
+        # `omhc hooks install` to pick up the new UserPromptSubmit group.
+        settings = os.path.join(self.home, ".claude", "settings.json")
+        os.makedirs(os.path.dirname(settings), exist_ok=True)
+        fragment = hookconf.load_fragment("claude-settings.fragment.json")
+        with open(settings, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": fragment["SessionStart"]}}, fh)
+        out = io.StringIO()
+        cli.cmd_status(cli.build_parser().parse_args(["status"]), home=self.home, out=out)
+        text = out.getvalue()
+        self.assertIn("claude-code hooks", text)
+        for line in text.splitlines():
+            if "claude-code hooks" in line:
+                self.assertIn("FAIL", line)
+                break
+        else:
+            self.fail("no claude-code hooks row found")
+
+        # Running install again brings it back to PASS.
+        code, _text = _run(["hooks", "install", "--harness", "claude-code"], self.home)
+        self.assertEqual(code, 0)
+        out2 = io.StringIO()
+        cli.cmd_status(cli.build_parser().parse_args(["status"]), home=self.home, out=out2)
+        for line in out2.getvalue().splitlines():
+            if "claude-code hooks" in line:
+                self.assertIn("PASS", line)
+                break
+        else:
+            self.fail("no claude-code hooks row found")
+
+    def test_uninstall_also_removes_the_turn_group(self):
+        _run(["hooks", "install", "--harness", "claude-code"], self.home)
+        _run(["hooks", "uninstall", "--harness", "claude-code"], self.home)
+        settings = os.path.join(self.home, ".claude", "settings.json")
+        with open(settings, encoding="utf-8") as fh:
+            conf = json.load(fh)
+        self.assertNotIn("UserPromptSubmit", conf.get("hooks", {}))
+
     def test_harness_flag_limits_the_run_to_one_adapter(self):
         code, text = _run(["hooks", "install", "--harness", "claude-code"], self.home)
         self.assertEqual(code, 0)
@@ -118,6 +169,168 @@ class TestHooksInstallCli(unittest.TestCase):
         self.assertIn("FAIL", text)
         settings = os.path.join(home, ".claude", "settings.json")
         self.assertTrue(os.path.exists(settings))  # the file was still actually written
+
+
+class TestTurnHookInlineCodexInstall(unittest.TestCase):
+    """Review #1 finding 5: an inline `config.toml` SessionStart/brief
+    install must not leave the turn (UserPromptSubmit) half stuck FAIL
+    forever — omhc never auto-installs into config.toml at all, so there's
+    no `omhc hooks install` fix for it to point at."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = os.path.join(self._tmp.name, "home")
+        os.makedirs(self.home)
+        _make_bin(self.home)
+        directory = os.path.join(self.home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        bin_path = os.path.join(self.home, ".local", "bin", "omhc")
+        with open(os.path.join(directory, "config.toml"), "w", encoding="utf-8") as fh:
+            fh.write(
+                '[[hooks.SessionStart]]\n\n'
+                '[[hooks.SessionStart.hooks]]\n'
+                'type = "command"\n'
+                'command = "{bin} mark --harness codex-cli"\n\n'
+                '[[hooks.SessionStart.hooks]]\n'
+                'type = "command"\n'
+                'command = "{bin} brief --harness codex-cli --wire claude"\n'
+                .format(bin=bin_path))
+
+    def test_judge_hooks_row_is_unjudged_not_fail(self):
+        inst = cli.adapters.get("codex-cli", home=self.home)
+        hc = inst.hook_config()
+        fragment = hookconf.load_fragment(hc.fragment_name)
+        custom = getattr(inst, "hooks_status", None)
+        ok, detail = cli._judge_hooks_row(hc, fragment, inst, custom)
+        self.assertIsNone(ok)
+        self.assertIn("config.toml", detail)
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".codex", "hooks.json")))
+
+    def test_hooks_install_prints_the_hint_instead_of_writing_hooks_json(self):
+        code, text = _run(["hooks", "install", "--harness", "codex-cli"], self.home)
+        self.assertIn("config.toml by hand", text)
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".codex", "hooks.json")))
+
+    def test_working_inline_turn_hook_passes_no_hint_no_downgrade(self):
+        # Review #1 finding 3 (round 3): if config.toml *also* has a working
+        # UserPromptSubmit -> omhc turn call, that satisfies the turn half
+        # entirely -- no hint, no unjudged downgrade.
+        bin_path = os.path.join(self.home, ".local", "bin", "omhc")
+        with open(os.path.join(self.home, ".codex", "config.toml"), "a", encoding="utf-8") as fh:
+            fh.write(
+                '\n[[hooks.UserPromptSubmit]]\n\n'
+                '[[hooks.UserPromptSubmit.hooks]]\n'
+                'type = "command"\n'
+                'command = "{bin} turn --harness codex-cli"\n'
+                .format(bin=bin_path))
+        inst = cli.adapters.get("codex-cli", home=self.home)
+        hc = inst.hook_config()
+        fragment = hookconf.load_fragment(hc.fragment_name)
+        custom = getattr(inst, "hooks_status", None)
+        ok, detail = cli._judge_hooks_row(hc, fragment, inst, custom)
+        self.assertNotEqual(ok, False)
+        self.assertNotIn("config.toml by hand", detail)
+
+        code, text = _run(["hooks", "install", "--harness", "codex-cli"], self.home)
+        self.assertNotIn("config.toml by hand", text)
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".codex", "hooks.json")))
+
+    def test_broken_turn_call_in_hooks_json_stays_fail_even_with_inline_sessionstart(self):
+        # Review #1 finding 3 (round 3): a turn call that genuinely exists in
+        # hooks.json but fails the structural check (wrong --harness here)
+        # must stay FAIL -- never downgraded just because SessionStart/brief
+        # happens to be installed inline.
+        hooks_json = os.path.join(self.home, ".codex", "hooks.json")
+        with open(hooks_json, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"UserPromptSubmit": [{"hooks": [
+                {"type": "command",
+                 "command": "$HOME/.local/bin/omhc turn --harness wrong-harness"},
+            ]}]}}, fh)
+        inst = cli.adapters.get("codex-cli", home=self.home)
+        hc = inst.hook_config()
+        fragment = hookconf.load_fragment(hc.fragment_name)
+        custom = getattr(inst, "hooks_status", None)
+        ok, detail = cli._judge_hooks_row(hc, fragment, inst, custom)
+        self.assertFalse(ok)
+        self.assertIn("turn hook", detail)
+        self.assertNotIn("config.toml by hand", detail)
+
+
+class TestCodexPlainHooksJsonUpgradePath(unittest.TestCase):
+    """Review #1 finding 1 (round 4): round 3's `_has_inline_layer` gate
+    keyed the unjudged downgrade off codex-cli merely *having* a
+    `toml_config_path()` method — which every codex-cli instance always has,
+    regardless of whether config.toml is actually in play — so a plain
+    hooks.json-only install missing just the turn group was wrongly waved
+    through as unjudged instead of FAIL, and `omhc hooks install` then saw
+    "already up to date" and never added it. Pins the full upgrade path."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = os.path.join(self._tmp.name, "home")
+        os.makedirs(self.home)
+        _make_bin(self.home)
+        directory = os.path.join(self.home, ".codex")
+        os.makedirs(directory, exist_ok=True)
+        bin_path = os.path.join(self.home, ".local", "bin", "omhc")
+        with open(os.path.join(directory, "hooks.json"), "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": [{"hooks": [
+                {"type": "command", "command": "{} mark --harness codex-cli".format(bin_path)},
+                {"type": "command",
+                 "command": "{} brief --harness codex-cli --wire claude".format(bin_path)},
+            ]}]}}, fh)
+
+    def test_status_row_fails_then_install_adds_turn_then_passes(self):
+        inst = cli.adapters.get("codex-cli", home=self.home)
+        hc = inst.hook_config()
+        fragment = hookconf.load_fragment(hc.fragment_name)
+        custom = getattr(inst, "hooks_status", None)
+
+        ok, detail = cli._judge_hooks_row(hc, fragment, inst, custom)
+        self.assertFalse(ok, detail)
+        self.assertNotIn("config.toml by hand", detail)
+
+        code, text = _run(["hooks", "install", "--harness", "codex-cli"], self.home)
+        self.assertNotIn("already up to date", text)
+        self.assertIn("installed ->", text)
+        self.assertEqual(code, 0, text)
+
+        with open(os.path.join(self.home, ".codex", "hooks.json"), encoding="utf-8") as fh:
+            conf = json.load(fh)
+        self.assertIn("UserPromptSubmit", conf["hooks"])
+
+        inst2 = cli.adapters.get("codex-cli", home=self.home)
+        ok2, detail2 = cli._judge_hooks_row(hc, fragment, inst2, getattr(inst2, "hooks_status", None))
+        self.assertTrue(ok2, detail2)
+
+
+class TestTurnHookInlineNotApplicable(unittest.TestCase):
+    """Review #1 finding 3 (round 3 regression fix): an adapter with no
+    inline config.toml concept at all (Claude Code) must never be downgraded
+    to unjudged just because it also has no such layer -- a missing turn
+    hook there is a plain FAIL, exactly like a missing SessionStart hook."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = os.path.join(self._tmp.name, "home")
+        os.makedirs(self.home)
+        _make_bin(self.home)
+
+    def test_claude_missing_turn_hook_is_fail_not_unjudged(self):
+        settings = os.path.join(self.home, ".claude", "settings.json")
+        os.makedirs(os.path.dirname(settings), exist_ok=True)
+        fragment = hookconf.load_fragment("claude-settings.fragment.json")
+        with open(settings, "w", encoding="utf-8") as fh:
+            json.dump({"hooks": {"SessionStart": fragment["SessionStart"]}}, fh)
+        inst = cli.adapters.get("claude-code", home=self.home)
+        hc = inst.hook_config()
+        custom = getattr(inst, "hooks_status", None)
+        ok, detail = cli._judge_hooks_row(hc, fragment, inst, custom)
+        self.assertFalse(ok)
+        self.assertNotIn("config.toml", detail)
 
 
 class TestHooksNoAction(unittest.TestCase):
@@ -227,7 +440,12 @@ class TestInstallShParity(unittest.TestCase):
         path = os.path.join(self._tmp.name, "b.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(conf, fh)
-        changed = hookconf.strip(path)
+        # strip_all, not bare strip() — install.sh's script always covers
+        # both managed events (SessionStart, UserPromptSubmit) in one pass
+        # (v2 phase 2, #42), so that's what it must be compared against for
+        # true parity. Equivalent to bare strip() on every case above (none
+        # of them declare a UserPromptSubmit key).
+        changed = hookconf.strip_all(path)
         with open(path, encoding="utf-8") as fh:
             return json.load(fh), changed
 
@@ -288,6 +506,56 @@ class TestInstallShParity(unittest.TestCase):
             {"hooks": []},
             {"hooks": [{"type": "command", "command": "echo hello"}]},
         ]}})
+
+    def test_user_prompt_submit_turn_hook_is_stripped_too(self):
+        # v2 phase 2 (#42): both managed events in one config, only the
+        # UserPromptSubmit (turn) group has anything to remove.
+        self._assert_parity({"hooks": {
+            "SessionStart": [{"hooks": [{"type": "command", "command": "echo hello"}]}],
+            "UserPromptSubmit": [
+                {"hooks": [
+                    {"type": "command", "command": "$HOME/.local/bin/omhc turn --harness claude-code"},
+                ]},
+            ],
+        }})
+
+    def test_untouched_empty_event_array_survives_a_change_in_the_other_event(self):
+        # Review #1 finding 8: SessionStart actually has an omhc hook to
+        # remove; UserPromptSubmit is a pre-existing empty array that was
+        # never installed at all — it must be left exactly as-is, not
+        # reassigned or deleted just because SessionStart changed in the
+        # same pass.
+        conf = {"hooks": {
+            "SessionStart": [
+                {"hooks": [
+                    {"type": "command", "command": "$HOME/.local/bin/omhc mark --harness claude-code"},
+                    {"type": "command", "command": "$HOME/.local/bin/omhc brief --harness claude-code --wire claude"},
+                ]},
+            ],
+            "UserPromptSubmit": [],
+        }}
+        got_sh, changed_sh = self._run_install_sh(json.loads(json.dumps(conf)))
+        got_py, changed_py = self._run_hookconf_strip(json.loads(json.dumps(conf)))
+        self.assertTrue(changed_sh)
+        self.assertTrue(changed_py)
+        self.assertIn("UserPromptSubmit", got_sh["hooks"])
+        self.assertEqual(got_sh["hooks"]["UserPromptSubmit"], [])
+        self._assert_parity(conf)
+
+    def test_both_managed_events_present_and_removed_together(self):
+        self._assert_parity({"hooks": {
+            "SessionStart": [
+                {"hooks": [
+                    {"type": "command", "command": "$HOME/.local/bin/omhc mark --harness claude-code"},
+                    {"type": "command", "command": "$HOME/.local/bin/omhc brief --harness claude-code --wire claude"},
+                ]},
+            ],
+            "UserPromptSubmit": [
+                {"hooks": [
+                    {"type": "command", "command": "$HOME/.local/bin/omhc turn --harness claude-code"},
+                ]},
+            ],
+        }})
 
     def test_only_omhc_hooks_drops_the_hooks_key_entirely(self):
         # #20: if SessionStart holds only omhc hooks, after removal hooks must not
