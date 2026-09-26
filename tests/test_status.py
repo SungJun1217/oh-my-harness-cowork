@@ -101,6 +101,22 @@ class TestStatusRows(unittest.TestCase):
         _word, detail = _find_row(text, "last read")
         self.assertIn("format may have changed", detail)
 
+    def test_last_read_says_whether_the_read_ended_in_a_handoff(self):
+        """#48: a read that was gated looked like a delivery."""
+        for delivered, phrase in ((True, "handed off"), (False, "read only")):
+            with self.subTest(delivered=delivered):
+                self._write_last_read(delivered=delivered)
+                _code, text = self.run_status()
+                _word, detail = _find_row(text, "last read")
+                self.assertIn(phrase, detail)
+
+    def test_last_read_without_the_field_keeps_the_old_wording(self):
+        self._write_last_read()
+        _code, text = self.run_status()
+        _word, detail = _find_row(text, "last read")
+        self.assertNotIn("handed off", detail)
+        self.assertNotIn("read only", detail)
+
     def test_last_read_is_in_the_json_output(self):
         self._write_last_read()
         _code, data = self.run_status_json()

@@ -1431,6 +1431,12 @@ def _last_read_detail(summary: Optional[dict]) -> str:
             time.strftime("%Y-%m-%d %H:%M", time.localtime(float(summary.get("epoch", 0)))))
     except (TypeError, ValueError):
         return "unreadable summary"
+    # #48: say whether that read ended in a handoff. Older summaries have no
+    # "delivered" key and keep the old wording.
+    if summary.get("delivered") is True:
+        detail += ", handed off"
+    elif summary.get("delivered") is False:
+        detail += ", read only (not handed off: already delivered to this session or nothing new)"
     if events == 0 and skipped:
         detail += (" — no events from a non-empty session; if it had turns, the session"
                    " format may have changed (use the 'Harness format change' issue form)")
