@@ -64,11 +64,27 @@ even if it was hand-merged with extra fields or in a different group order.
 It's idempotent: a run with nothing to change writes nothing and makes no
 backup — the first change that does write also normalizes the file's JSON
 formatting (2-space indent). `omhc hooks uninstall [--harness ID]` removes
-only omhc's own `SessionStart` hooks the same way, structurally (parsed as
-argv, not `install.sh --uninstall`'s string regex — the two can diverge on
-unusual commands; see `omhc/hookconf.py`'s module comment for the measured
-cases). Either command backs up the config to `<file>.omhc-bak` first
-whenever it's about to change an existing file.
+only omhc's own hooks the same way, structurally (parsed as argv, not
+`install.sh --uninstall`'s string regex — the two can diverge on unusual
+commands; see `omhc/hookconf.py`'s module comment for the measured cases).
+Either command backs up the config to `<file>.omhc-bak` first whenever it's
+about to change an existing file.
+
+Each fragment file actually ships **two** hook groups now: `SessionStart`
+(`mark`/`brief`, the handoff) and `UserPromptSubmit` (`omhc turn`, the
+per-turn overlap warning — see [v2-concurrency.md's phase
+2](v2-concurrency.md#phase-2-overlap-warning-on-each-human-turn)). `omhc
+hooks install` merges both in one pass; `omhc hooks uninstall` removes both.
+An install from before this existed (only `SessionStart`) shows up as FAIL
+on the `<adapter-id> hooks` row until you rerun `omhc hooks install`.
+
+> [!NOTE]
+> Claude Code and Codex CLI both key hook trust/approval by event group —
+> adding the new `UserPromptSubmit` group is a **separate** approval from
+> whatever already covers `SessionStart`. Codex in particular may need its
+> own hook-trust re-approval for it (same procedure as
+> [Codex: trust the hook](#codex-trust-the-hook) below, just for the second
+> group in the same file).
 
 ### Merging the fragment files by hand
 
@@ -233,9 +249,9 @@ sidechains stay excluded even then.
 curl -fsSL https://raw.githubusercontent.com/SungJun1217/oh-my-harness-cowork/main/install.sh | sh -s -- --uninstall
 ```
 
-This removes only omhc's own `SessionStart` hooks from
-`~/.claude/settings.json` and `~/.codex/hooks.json` — other hooks in the
-same file, or even in the same hook group, are left intact; the JSON is
+This removes only omhc's own `SessionStart` and `UserPromptSubmit` hooks
+from `~/.claude/settings.json` and `~/.codex/hooks.json` — other hooks in
+the same file, or even in the same hook group, are left intact; the JSON is
 just re-serialized (2-space indent) in the process. A `<file>.omhc-bak`
 backup is written first. It then removes `~/.local/bin/omhc` and
 `~/.local/share/omhc`. `~/.omhc` (the archive and ledger) is kept — set

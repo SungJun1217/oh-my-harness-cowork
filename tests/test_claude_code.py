@@ -820,6 +820,28 @@ class TestReadSessionSince(unittest.TestCase):
             os.unlink(path)
 
 
+class TestTurnHookInjectionNeverParsed(unittest.TestCase):
+    """v2 phase 2 (#42) measured fact: `omhc turn`'s own UserPromptSubmit note
+    lands in the transcript as an `attachment` record of type
+    `hook_additional_context` — invariant 4 (whitelist parsing, own injected
+    notes never become events)."""
+
+    def test_hook_additional_context_attachment_is_never_a_human_turn(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            _write_jsonl(path, [
+                {"type": "user", "cwd": REPO, "timestamp": _TS,
+                 "message": {"content": "진짜 사람의 말"}},
+                {"type": "attachment", "cwd": REPO, "timestamp": _TS,
+                 "attachment": {"type": "hook_additional_context",
+                               "content": "[omhc] codex-cli 01a0d2e1 (running) modified "
+                                          "files you touched, since your last turn:"}},
+            ])
+            read = CC.ClaudeCodeAdapter().read_session(ref_for(path))
+            self.assertEqual(len([e for e in read.events if e.author == "human"]), 1)
+            self.assertIn("attachment", read.dropped)
+
+
 class TestWriteSide(unittest.TestCase):
     def test_native_resume_hint_names_the_session(self):
         hint = CC.ClaudeCodeAdapter().native_resume_hint(ref_for("/x/abc.jsonl"))

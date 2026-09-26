@@ -33,7 +33,12 @@
     "{\"additionalContext\": …} (--wire sdk) is rejected as 'hook: SessionStart",
     "Failed' and nothing gets injected. Only --wire claude (nested",
     "hookSpecificOutput) actually shows up in the rollout as",
-    "content_item_kinds=[\"hooks.additional_context\"]."
+    "content_item_kinds=[\"hooks.additional_context\"].",
+    "",
+    "UserPromptSubmit (v2 phase 2, #42): `omhc turn` warns, once per human",
+    "turn, when Claude Code modified a file this Codex session already",
+    "touched. This group needs its own hook-trust approval, separate from",
+    "SessionStart above — Codex keys trust by group and index."
   ],
   "hooks": {
     "SessionStart": [
@@ -46,6 +51,16 @@
           {
             "type": "command",
             "command": "$HOME/.local/bin/omhc brief --harness codex-cli --wire claude"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/omhc turn --harness codex-cli"
           }
         ]
       }
