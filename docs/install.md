@@ -1,4 +1,4 @@
-**English** · [한국어](install.ko.md) · [← README](../README.md)
+[← README](../README.md)
 
 # Installing, configuring and removing omhc
 

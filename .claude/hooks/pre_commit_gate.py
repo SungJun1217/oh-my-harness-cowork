@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""PreToolUse(Bash): git commit 직전에 unittest + smoke 를 돌리고, 실패하면 막는다(exit 2).
+"""PreToolUse(Bash): runs unittest + smoke right before git commit, and blocks
+it on failure (exit 2).
 
-매 턴이 아니라 커밋 경계에 둔 것은 스위트가 약 12초라서다.
+Placed at the commit boundary rather than every turn because the suite takes ~12s.
 """
 import json
 import os

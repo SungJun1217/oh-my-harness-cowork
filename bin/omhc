@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# omhc 런처. 심링크로 설치해도 패키지를 찾는다.
+# omhc launcher. Finds the package even when installed as a symlink.
 set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 exec python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from omhc.cli import main; sys.exit(main(sys.argv[2:]))' "$here" "$@"

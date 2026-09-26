@@ -23,12 +23,13 @@ from . import _register, allow_headless, install_state_artifact, iso_epoch
 
 ARTIFACT_NAME = "omhc.txt"
 
-# 파싱하는 레코드 타입. 화이트리스트이므로 하네스 기계장치(attachment 273개 등)는
-# 파싱 자체가 되지 않으며, 따라서 누출될 수 없다. 이것이 1차 방어다.
+# Record types we parse. Whitelist-based, so harness machinery (273
+# attachment records, etc.) never even gets parsed and therefore can't leak
+# through. This is the primary defense.
 _PARSED_TYPES = frozenset({"user", "assistant"})
 
-# 툴 이름 → 중립 동사. Event 스키마에 툴 이름 필드가 없으므로 이 사전이 어휘가
-# 경계를 넘지 못하게 하는 유일한 지점이다.
+# Tool name → neutral verb. The Event schema has no tool-name field, so this
+# dict is the single point that stops the vocabulary from crossing the boundary.
 _VERB_BY_TOOL = {
     "Read": "inspected",
     "Glob": "inspected",
@@ -51,65 +52,71 @@ _VERB_BY_TOOL = {
     "SendMessage": "delegated",
     "WebFetch": "researched",
     "WebSearch": "researched",
-    # 사람에게 묻는 것은 실행이 아니라 발화다.
+    # Asking the human a question is speech, not execution.
     "AskUserQuestion": "said",
     "ExitPlanMode": "said",
     "ReportFindings": "said",
 }
 
-# 모르는 툴의 기본값. 조용히 버리지 않고 이 이름으로 계상한다.
+# Default for unknown tools. Tallied under this name instead of silently dropped.
 _DEFAULT_VERB = "ran"
 
-# Claude Code 2.1.281 자신의 스킵 판정: isApiErrorMessage===true ||
-# isVirtual===true || message.model==="<synthetic>" (바이너리에서 확인).
-# 이 값들을 가진 assistant 레코드는 사람도 에이전트도 쓰지 않은, 하네스가
-# 스스로 합성한 텍스트다(로그인 안내, 합성 PushNotification tool_use 등).
+# Claude Code 2.1.281's own skip check: isApiErrorMessage===true ||
+# isVirtual===true || message.model==="<synthetic>" (confirmed in the
+# binary). assistant records with these values are text the harness
+# synthesized itself, used by neither human nor agent (login notices,
+# synthetic PushNotification tool_use, etc).
 _SYNTHETIC_MODEL = "<synthetic>"
 
 _PATH_KEYS = ("file_path", "path", "notebook_path")
 _ARG_KEYS = ("command", "file_path", "pattern", "query", "prompt", "description", "path")
 
-# /branch, --fork-session, /fork 백그라운드 복사가 만드는 트랜스크립트: 새
-# session_id 로 시작해 부모의 현재 메시지 사슬을 복사한다. 복사된 레코드는
-# 원본에 sessionId/parentUuid/isSidechain/sessionKind 를 덮어쓰고 forkedFrom:
-# {sessionId, messageUuid} 을 얹은 것이고(uuid/timestamp/type/message 는 원본
-# 그대로), history-suppression(cause:"fork_inherit") 레코드가 맨 앞에 붙을 수
-# 있다. 부모가 이미 상대 하네스에 전달됐었다면 포크 자신의 사람 턴이 없어도
-# 그 사람 턴이 새 session_id 아래 "새 일"처럼 다시 나간다(#34, 실측: 425B 가
-# 두 번 전달됨) — #27 의 offset 가드는 delivered 행이 이 새 session_id 에는
-# 아예 없어서 적용되지 않는다.
+# Transcript produced by /branch, --fork-session, /fork background copying:
+# starts with a new session_id and copies the parent's current message
+# chain. Copied records overwrite sessionId/parentUuid/isSidechain/
+# sessionKind on the original and add forkedFrom: {sessionId, messageUuid}
+# (uuid/timestamp/type/message stay from the original); a
+# history-suppression (cause:"fork_inherit") record may be prepended. If the
+# parent had already been delivered to the other harness, even with no turn
+# of its own the fork's copied human turn goes out again as "new work" under
+# the new session_id (#34, measured: 425B delivered twice) — #27's offset
+# guard doesn't apply here because there's no delivered row at all under this
+# new session_id.
 _FORKED_FROM_MARK = b'"forkedFrom"'
 _FORK_INHERIT_MARK = b'"fork_inherit"'
 
-# fork 판정 비용 상한. own tail(복사 구간을 벗어난 뒤)이 이 바이트를 넘도록
-# 새 턴을 못 찾으면, 또는 전체 스캔이 이 시간을 넘으면 판정을 포기하고 예전
-# 동작(적격)으로 연다 — 훅 경로에서 판정 실패가 세션 시작을 막으면 안 된다
-# (invariant 2). 복사 구간 자체는 줄당 값싼 substring 검사뿐이라 바이트 상한에
-# 넣지 않는다(리뷰 지적: 넣으면 8MB 넘는 부모의 포크가 own tail 을 보기도
-# 전에 항상 fail-open 됐다 — 6.9MB 부모를 포크로 다시 쓴 12.6MB 픽스처가
-# 재현) — 실측(synthetic, 이 머신): 복사만 있는 6.3MB 6.7ms, 12.6MB 13.2ms,
-# 25.1MB 26.3ms, 30MB(tail 없이 EOF 까지) 32.3ms, own turn 이 있는 현실적인
-# 2MB 복사 구간 + tail 은 2.3ms. 전부 시간 상한(50ms) 안이다.
+# Cost cap for fork detection. If own tail (past the copied section) exceeds
+# this many bytes without finding a new turn, or the whole scan exceeds this
+# much time, give up and open with the old behavior (eligible) — a detection
+# failure on the hook path must never block session start (invariant 2). The
+# copied section itself is only a cheap per-line substring check, so it's not
+# counted against the byte cap (review finding: counting it made forks of
+# parents over 8MB always fail-open before they even saw their own tail — a
+# 12.6MB fixture, a 6.9MB parent re-forked, reproduced this). Measured
+# (synthetic, this machine): copy-only 6.3MB 6.7ms, 12.6MB 13.2ms, 25.1MB
+# 26.3ms, 30MB (no tail, to EOF) 32.3ms; a realistic 2MB copy section + tail
+# with an own turn is 2.3ms. All within the time cap (50ms).
 _FORK_SCAN_BYTE_LIMIT = 8 * 1024 * 1024
 _FORK_SCAN_TIME_LIMIT = 0.05
 
-# classify() 결과의 프로세스당 캐시. brief 한 번마다 같은 파일이 두 번
-# 스캔된다 — ref_for_path() 가 한 번(적격이면 그대로 쓰고), 적격이 아닐 때는
-# brief.eligible() 이 adapter.classify(mark.path) 로 다시 부른다. adapters.get()
-# 이 호출마다 새 인스턴스를 만들므로(레지스트리가 클래스를 들고 있다) 캐시는
-# 인스턴스가 아니라 모듈에 둔다. 키에 size·mtime_ns 를 넣어 포크가 자라
-# (own turn 이 생기면) 자동으로 무효화되게 한다. watch.py 데몬처럼 오래 도는
-# 프로세스에서 무한히 늘지 않도록 LRU 로 크기를 제한한다.
+# Per-process cache of classify() results. Every brief call scans the same
+# file twice — once via ref_for_path() (kept if eligible), and again via
+# brief.eligible() calling adapter.classify(mark.path) if it wasn't. Since
+# adapters.get() builds a new instance every call (the registry holds
+# classes), the cache lives on the module, not the instance. size/mtime_ns
+# go into the key so a growing fork (once it gets its own turn) invalidates
+# automatically. Bounded by an LRU so a long-running process like the watch.py
+# daemon doesn't grow unbounded.
 _CLASSIFY_CACHE_MAX = 256
 _classify_cache = collections.OrderedDict()  # (path, size, mtime_ns, headless) -> bool
 
 
 def claude_slug(path: str) -> str:
-    """cwd → ~/.claude/projects/<slug>. 이 변환은 파일 어디에도 기록되지 않으므로
-    재계산해야 한다.
+    """cwd → ~/.claude/projects/<slug>. This transform isn't recorded
+    anywhere in any file, so it has to be recomputed.
 
-    실측: 이 머신의 27개 디렉터리 전부와 일치한다. 200자를 넘으면 절단 후
-    경로 해시를 붙여 충돌을 막는다.
+    Measured: matches all 27 directories on this machine. Beyond 200 chars,
+    truncate and append a path hash to avoid collisions.
     """
     slug = re.sub(r"[^a-zA-Z0-9]", "-", path)
     if len(slug) > 200:
@@ -122,20 +129,21 @@ def claude_slug(path: str) -> str:
     return slug
 
 
-# 비대화형 entrypoint. 차단목록이며 허용목록이 아니다 — 허용목록이면 새 대화형
-# entrypoint 가 생겼을 때 진짜 세션을 조용히 잃는다.
+# Non-interactive entrypoints. A blocklist, not an allowlist — an allowlist
+# would silently lose real sessions whenever a new interactive entrypoint appears.
 #
-# 실측: 이 레포의 최상위 세션 31개 중 1개만 entrypoint="cli" 이고 나머지 30개는
-# "sdk-py" 다(보안 리뷰 훅 등이 남긴 것). 걸러내지 않으면 omhc 가 남의 도구가
-# 만든 비대화형 세션을 사람의 작업으로 오인해 핸드오프한다.
+# Measured: only 1 of 31 top-level sessions in this repo has entrypoint="cli";
+# the other 30 are "sdk-py" (left by security-review hooks, etc). Without
+# filtering these out, omhc would mistake another tool's non-interactive
+# session for human work and hand it off.
 NON_INTERACTIVE_ENTRYPOINTS = frozenset({"sdk-cli", "sdk", "sdk-py"})
 
 
 def head_of(path: str, limit: int = 200) -> Dict[str, object]:
-    """앞부분을 한 번만 훑어 세션 머리 정보를 모은다.
+    """Gathers session head info with a single pass over the beginning.
 
-    첫 레코드에서 cwd 를 읽으면 안 된다 — 실측상 최초 등장은 index 3 이고
-    798개 중 222개에는 cwd 가 아예 없다.
+    Never read cwd from just the first record — measured, it first appears
+    at index 3, and 222 of 798 sessions have no cwd at all.
     """
     info: Dict[str, object] = {}
     try:
@@ -146,8 +154,9 @@ def head_of(path: str, limit: int = 200) -> Dict[str, object]:
                 try:
                     row = json.loads(line)
                 except (ValueError, RecursionError):
-                    # 깊게 중첩된 줄은 json 이 RecursionError 를 낸다 — 깨진 줄과
-                    # 같이 건너뛴다(#34 리뷰: classify/list_sessions 가 죽었다).
+                    # json raises RecursionError on deeply nested lines —
+                    # skip it along with malformed ones (#34 review:
+                    # classify/list_sessions were crashing).
                     continue
                 if not isinstance(row, dict):
                     continue
@@ -165,7 +174,7 @@ def head_of(path: str, limit: int = 200) -> Dict[str, object]:
 
 
 def _text_of(content) -> Optional[str]:
-    """사람의 말 후보 텍스트. tool_result 가 섞이면 후보가 아니다."""
+    """Candidate human speech text. Not a candidate if a tool_result is mixed in."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -177,7 +186,7 @@ def _text_of(content) -> Optional[str]:
 
 
 def _one_line_limit(text: str, limit: int = 600) -> str:
-    """봉투에서 꺼낸 본문은 아주 길 수 있다. 한 줄로 접고 상한을 둔다."""
+    """Body pulled from an envelope can be very long. Fold to one line and cap it."""
     flat = " ".join(text.split())
     return flat[:limit]
 
@@ -204,9 +213,10 @@ def _paths_of(tool_input) -> Tuple[str, ...]:
 
 
 def _looks_like_fork(path: str) -> bool:
-    """싸구려 사전판정. 포크의 복사 구간은 파일 맨 앞에서 시작하므로(선택적
-    history-suppression 프리펜드 한 줄 포함) 앞 몇 줄만 보면 된다 — 전체
-    스캔은 포크로 보일 때만 아래에서 한다."""
+    """Cheap pre-check. A fork's copied section always starts at the top of
+    the file (with an optional history-suppression prepend line), so only
+    the first few lines need checking — the full scan below only runs if
+    this looks like a fork."""
     try:
         with open(path, "rb") as fh:
             for i, raw in enumerate(fh):
@@ -220,31 +230,35 @@ def _looks_like_fork(path: str) -> bool:
 
 
 def _forked_lacks_own_turn(path: str) -> bool:
-    """포크인데 포크 자신의 사람 턴이 아직 하나도 없는가.
+    """Is this a fork that still has no human turn of its own?
 
-    복사된 레코드는 전부 forkedFrom 을 달고 파일 앞쪽에 연속으로 온다(분석
-    근거). forkedFrom 이 끊기는 지점부터가 포크 자신이 새로 쓴 구간이고, 거기
-    안에서 read_session 과 같은 화이트리스트로 사람의 말을 찾는다 — 하나라도
-    있으면 적격이다.
+    Copied records all carry forkedFrom and come consecutively at the start
+    of the file (per analysis). Where forkedFrom stops is where the fork's
+    own newly written section begins, and we look for human speech there
+    using the same whitelist as read_session — if there's even one, it's
+    eligible.
 
-    바이트/시간 상한을 넘기면 판정을 포기하고 False(예전 동작인 적격)로
-    돌아간다. 안 여는 쪽(과대판정으로 진짜 새 턴을 계속 숨김)보다 여는 쪽이
-    싸다 — 최악이 "부모 턴이 한 번 더 나간다"는 이미 있던 결함이지 새 결함이
-    아니다.
+    If the byte/time cap is exceeded, give up and return False (eligible,
+    the old behavior). Opening (over-eligible, risking a duplicate parent
+    turn once) is cheaper than not opening (over-conservative, permanently
+    hiding a real new turn) — worst case is the pre-existing bug "the
+    parent's turn goes out once more", not a new one.
 
-    바이트 상한은 **복사 구간을 벗어난 뒤(own tail)** 만 센다 — 복사 구간은
-    줄당 값싼 substring 검사뿐이고(리뷰 실측: 6.3MB 7ms, 12.6MB 9.5ms,
-    25.1MB 9.8ms) 그 바이트까지 상한에 넣으면 부모가 조금만 커도(8MB 넘으면)
-    own tail 을 보기도 전에 늘 포기해 재전달 버그를 못 고친 채로 둔다(리뷰
-    확인: 6.9MB 부모를 포크로 다시 쓴 12.6MB 픽스처가 항상 fail-open 됐다).
-    시간 상한은 복사 구간을 포함해 매 줄마다 확인한다 — 전체 스캔 시간의
-    유일한 안전망이다.
+    The byte cap only counts **past the copied section (own tail)** — the
+    copied section itself is just a cheap per-line substring check (review
+    measurement: 6.3MB 7ms, 12.6MB 9.5ms, 25.1MB 9.8ms), and counting those
+    bytes against the cap would make even a moderately large parent (over
+    8MB) always give up before seeing its own tail, leaving the
+    re-delivery bug unfixed (review confirmed: a 12.6MB fixture, a 6.9MB
+    parent re-forked, always fail-opened). The time cap is checked every
+    line, including the copied section — it's the only safety net on total
+    scan time.
 
-    예상 밖의 레코드 모양(message 가 dict 가 아니거나 text 블록의 text 가
-    문자열이 아닌 등)은 여기서 예외를 낸다 — classify()/list_sessions() 를
-    깨뜨려 그 하네스의 세션 전체를 잃는 것(watch 가 그 레포의 Claude ref 를
-    전부 드롭)보다는 판정 하나를 포기하고 여는 쪽이 싸므로 한 줄 단위로
-    감싸 fail-open 한다.
+    Unexpected record shapes (message not a dict, a text block's text not a
+    string, etc) would raise here — wrapped per line to fail-open, since
+    giving up on one verdict is cheaper than crashing classify()/
+    list_sessions() and losing that harness's sessions entirely (watch would
+    drop all Claude refs for that repo).
     """
     if not _looks_like_fork(path):
         return False
@@ -260,9 +274,9 @@ def _forked_lacks_own_turn(path: str) -> bool:
                     in_copy = True
                     continue
                 if not in_copy:
-                    # history-suppression 프리펜드 등 복사 구간 진입 전이다.
+                    # Not yet into the copied section — e.g. a history-suppression prepend.
                     continue
-                # 복사 구간을 벗어난 첫 레코드부터 포크 자신의 새 내용이다.
+                # From the first record past the copied section on, it's the fork's own new content.
                 scanned += len(raw)
                 if scanned > _FORK_SCAN_BYTE_LIMIT:
                     return False
@@ -303,11 +317,11 @@ class ClaudeCodeAdapter:
     wire = "claude"
 
     def __init__(self, *, home: Optional[str] = None, now=time.time) -> None:
-        # __init__ 에서 I/O 를 하지 않는다.
+        # No I/O in __init__.
         self._home = home
         self._now = now or time.time
 
-    # --- 경로 -------------------------------------------------------------
+    # --- paths --------------------------------------------------------
 
     @property
     def home(self) -> str:
@@ -316,7 +330,7 @@ class ClaudeCodeAdapter:
     def projects_dir(self) -> str:
         return os.path.join(self.home, ".claude", "projects")
 
-    # --- 5개 메서드 --------------------------------------------------------
+    # --- the 5 methods --------------------------------------------------------
 
     def detect(self) -> HarnessPresence:
         path = self.projects_dir()
@@ -329,7 +343,7 @@ class ClaudeCodeAdapter:
             return []
         root = os.path.realpath(repo_root)
         directory = os.path.join(self.projects_dir(), claude_slug(root))
-        # 깊이 1만. <session>/subagents/** 는 남의 에이전트 발화이므로 읽지 않는다.
+        # Depth 1 only. <session>/subagents/** is someone else's agent speech, so never read.
         refs: List[SessionRef] = []
         for path in glob.glob(os.path.join(directory, "*.jsonl")):
             try:
@@ -350,7 +364,7 @@ class ClaudeCodeAdapter:
                     size=stat.st_size,
                 )
             )
-        # 최근 것이 먼저. 호출자는 거의 항상 마지막 세션을 원한다.
+        # Newest first. The caller almost always wants the last session.
         refs.sort(key=lambda r: (-r.epoch, r.session_id))
         return refs
 
@@ -358,7 +372,7 @@ class ClaudeCodeAdapter:
         events: List[Event] = []
         dropped: Dict[str, int] = {}
         unparsed = 0
-        pending: Dict[str, int] = {}  # tool_use_id → events 인덱스
+        pending: Dict[str, int] = {}  # tool_use_id → index into events
         seq = 0
         offset = 0
 
@@ -388,8 +402,9 @@ class ClaudeCodeAdapter:
                 if kind not in _PARSED_TYPES:
                     bump(kind)
                     continue
-                # 서브체인은 남의 에이전트 발화다. 이 머신에서 그런 레코드가
-                # 1766개 있었고, 타입 기반 허용목록이면 전부 사람의 말이 된다.
+                # Sidechain records are someone else's agent speech. This
+                # machine had 1766 such records — a type-based allowlist
+                # alone would turn every one of them into human speech.
                 if row.get("isSidechain") or row.get("agentId"):
                     bump("sidechain")
                     continue
@@ -404,8 +419,8 @@ class ClaudeCodeAdapter:
                 if kind == "assistant" and (
                     row.get("isApiErrorMessage") is True
                     or row.get("isVirtual") is True
-                    # isVirtual 은 실물에서 아직 목격되지 않았지만 업스트림
-                    # 판정식의 일부라 함께 넣는다.
+                    # isVirtual hasn't been observed in the wild yet, but is
+                    # part of upstream's own check so it's included too.
                     or message.get("model") == _SYNTHETIC_MODEL
                 ):
                     bump("synthetic")
@@ -417,18 +432,21 @@ class ClaudeCodeAdapter:
                 if kind == "user":
                     text = _text_of(content)
                     if text is None:
-                        # tool_result 만 담긴 user 레코드. 앞선 tool_use 의 결과다.
+                        # user record containing only a tool_result — the outcome of an earlier tool_use.
                         self._apply_results(content, pending, events)
                         bump("tool_result")
                         continue
-                    # 먼저 판정하고 **자른 뒤에** redact 한다. 전문에 정규식을
-                    # 돌리면 대부분이 곧 버려지거나 600자로 잘리는데도 비용을
-                    # 낸다(실측 16만자 7.3ms → 앞 600자만 1.4ms).
+                    # Judge first, redact only **after** truncating. Running
+                    # a regex over the full text pays a cost even though most
+                    # of it is soon dropped or cut to 600 chars anyway
+                    # (measured: 160k chars 7.3ms → first 600 chars only 1.4ms).
                     text = text.strip()
                     if guard.is_envelope(text):
-                        # 슬래시 명령 봉투 안의 <command-args> 는 사람이 실제로
-                        # 타이핑한 말이다. 봉투째 버리면 세션 첫 메시지(대개 목표
-                        # 진술)가 사라져 GOAL 슬롯이 중간 메시지로 채워진다.
+                        # <command-args> inside a slash-command envelope is
+                        # what the human actually typed. Dropping the whole
+                        # envelope loses the session's first message (usually
+                        # the goal statement), so the GOAL slot ends up filled
+                        # from a mid-conversation message instead.
                         inner = guard.unwrap_command_args(text)
                         if inner:
                             text = _one_line_limit(inner)
@@ -455,7 +473,7 @@ class ClaudeCodeAdapter:
                         continue
                     btype = block.get("type")
                     if btype == "thinking":
-                        # 모델의 사적 추론은 교차 벤더로 옮기지 않는다.
+                        # The model's private reasoning never crosses vendors.
                         bump("thinking")
                         continue
                     if btype == "text":
@@ -497,20 +515,21 @@ class ClaudeCodeAdapter:
     def read_session_since(self, ref: SessionRef, offset: int, *,
                            max_bytes: Optional[int] = None,
                            stop_at_human_turn: bool = False):
-        """미구현(선택 메서드, discover/health 와 같은 패턴) — Claude 쪽
-        live-continue(핸드오프 뒤 같은 Claude 세션에 새 턴만 이어지는 경우)는
-        아직 감지하지 않는다(#22, README 의 남은 한계). 기본값 None 은
-        "이 어댑터는 구분할 수 없다"이고, 호출자는 그러면 오늘의 전체 스캔
-        경로를 그대로 쓴다 — 인자를 받기만 하고 항상 무시한다(base 계약과
-        같은 키워드 모양을 유지해야 cli.py 가 어댑터를 구분 안 하고 부를 수
-        있다)."""
+        """Unimplemented (optional method, same pattern as discover/health) —
+        Claude-side live-continue (a new turn appended to the same Claude
+        session after a handoff) isn't detected yet (#22, a remaining
+        limitation noted in the README). The default None means "this
+        adapter can't distinguish", and the caller then falls back to
+        today's full-scan path — this just accepts the arguments and always
+        ignores them (must keep the same keyword shape as the base contract
+        so cli.py can call any adapter without special-casing)."""
         return None
 
     @staticmethod
     def _apply_results(content, pending: Dict[str, int], events: List[Event]) -> None:
-        """tool_result 를 id 로 앞선 tool_use Event 에 붙인다.
+        """Attaches a tool_result to the earlier tool_use Event by id.
 
-        Event 는 frozen 이므로 실패한 항목만 교체한다. 성공은 기본값이다.
+        Event is frozen, so only failed entries get replaced. Success is the default.
         """
         if not isinstance(content, list):
             return
@@ -525,24 +544,27 @@ class ClaudeCodeAdapter:
             events[idx] = events[idx]._replace(ok=False)
 
     def classify(self, source_path: str) -> bool:
-        """사람이 대화한 세션인가. entrypoint·서브체인 표식에 더해, 포크(#34)면
-        포크 자신의 사람 턴이 하나라도 있어야 적격이다 — 없으면 부모 세션의
-        전달 이력을 그대로 물려받아 이미 전달된 턴이 새 session_id 아래 또
-        나간다.
+        """Was this a session a human talked in? On top of the entrypoint/
+        sidechain markers, a fork (#34) is only eligible if it has at least
+        one human turn of its own — without one it just inherits the
+        parent's delivery history, and an already-delivered turn goes out
+        again under the new session_id.
 
-        실측: 이 레포의 최상위 세션 31개 중 1개만 entrypoint=cli 이고 30개가
-        sdk-py(보안 리뷰 훅 등이 남긴 것)였다.
+        Measured: only 1 of 31 top-level sessions in this repo has
+        entrypoint=cli; 30 were sdk-py (left by security-review hooks, etc).
 
-        brief 한 번에 이 메서드가 같은 파일에 두 번 불릴 수 있다 —
-        ref_for_path() 가 한 번, 그게 거절하면 brief.eligible() 이 다시 한 번.
-        결과를 (path, size, mtime_ns) 로 캐싱해 두 번째 호출이 다시 스캔하지
-        않게 한다(리뷰 지적) — 파일이 자라면(포크가 own turn 을 얻으면) 키가
-        바뀌므로 자동으로 무효화된다.
+        This method can be called twice on the same file in one brief run —
+        once via ref_for_path(), and again via brief.eligible() if that
+        rejected it. Caching the result by (path, size, mtime_ns) keeps the
+        second call from rescanning (review finding) — if the file grows
+        (a fork gets its own turn), the key changes and the cache
+        invalidates automatically.
         """
         try:
             stat = os.stat(source_path)
-            # allow_headless() 도 판정을 바꾸므로 키에 넣는다(#34 리뷰) — 실제
-            # 프로세스에선 환경이 안 바뀌지만, 한 프로세스에서 켰다 끄는 쪽에도 안전하다.
+            # allow_headless() also changes the verdict, so it goes into the
+            # key too (#34 review) — env doesn't actually change within a
+            # real process, but this stays safe even if it's toggled within one.
             key = (source_path, stat.st_size, stat.st_mtime_ns, allow_headless())
         except OSError:
             key = None
@@ -588,30 +610,32 @@ class ClaudeCodeAdapter:
 
     def discover(self, repo_root: Optional[str],
                 deadline: Optional[float] = None) -> Tuple[SessionRef, ...]:
-        """빈 튜플을 명시한다. list_sessions 는 이 머신에서 130개 파일 34.3MB 를
-        읽어 249ms 였다(brief.py 의 _ref_for 주석) — Codex 쪽 mark 가 이걸
-        돌리면 훅 예산을 넘긴다. Claude 세션은 자기 훅이 항상 신뢰되므로
-        Codex→Claude 백필을 Claude 어댑터가 구현할 필요도 없다."""
+        """Explicitly returns an empty tuple. list_sessions measured 249ms on
+        this machine, reading 130 files, 34.3MB (see the _ref_for comment in
+        brief.py) — Codex-side mark would blow the hook budget by running
+        this. Claude sessions' own hook is always trusted, so the Claude
+        adapter doesn't even need to implement a Codex→Claude backfill."""
         return ()
 
     def native_resume_hint(self, ref: SessionRef) -> Optional[str]:
-        """같은 벤더끼리는 이것이 무손실이며 우월하다. 우리 요약은 열등하다."""
+        """Between the same vendor, this is lossless and superior. Our summary is inferior."""
         return "claude --resume {}".format(ref.session_id)
 
     def install_handoff(self, bundle: HandoffBundle) -> InstallReceipt:
         return install_state_artifact(bundle, home=self._home)
 
     def fallback_channels(self):
-        """Claude Code 는 SessionStart 훅이 신뢰 문제 없이 동작하므로 폴백이 없다.
+        """Claude Code's SessionStart hook works with no trust issues, so there's no fallback.
 
-        비어 있음을 명시한다 — 기반 클래스를 아무도 상속하지 않으므로 기본값이
-        상속으로 얻어지지 않는다.
+        Explicitly empty — the base class is never subclassed by anyone
+        else, so this default isn't obtained via inheritance.
         """
         return ()
 
     def health(self, repo_root: Optional[str], ledger_rows):
-        """Claude Code 의 SessionStart 훅은 신뢰 문제가 없어 codex 류의 조용한
-        생략이 없다 — 진단할 행태 결함이 없으므로 빈 튜플이다.
+        """Claude Code's SessionStart hook has no trust issues, so there's
+        no codex-style silent skipping — no behavioral defect to diagnose,
+        hence an empty tuple.
         """
         return ()
 
@@ -623,8 +647,8 @@ class ClaudeCodeAdapter:
         )
 
     def on_session_start_mark(self, repo_root: str, *, source: str, epoch: float) -> None:
-        """Claude Code 가 CLAUDE.md 류를 언제 읽는지는 아직 실측하지 못했다
-        (#36) — 안다는 근거가 없으니 no-op 이다. 기반 클래스를 아무도
-        상속하지 않으므로(#36 이전에도 이미 그랬듯) 기본값이 상속으로
-        얻어지지 않는다."""
+        """When Claude Code reads CLAUDE.md-style files hasn't been measured
+        yet (#36) — with no evidence, this is a no-op. Since the base class
+        is never subclassed by anyone else (true even before #36), this
+        default isn't obtained via inheritance."""
         return None

@@ -6,9 +6,9 @@ Guidance for coding agents (Codex CLI, Claude Code, …) working in this reposit
 
 omhc carries working context across coding-agent harnesses (Claude Code ↔ Codex CLI) so switching tools doesn't reset to zero. It is a **personal practical tool**: rough UX and hardcoded paths are acceptable; the only success criterion is "does my day actually get easier". Python ≥ 3.9 stdlib only, no dependencies, **no LLM calls anywhere**.
 
-Talk to the user in Korean. Repo comments and commit messages are Korean (`type(scope): 한국어 요약`, body explains *why*); instruction files meant for models (`AGENTS.md`, `CLAUDE.md`, `.claude/`) are English.
+Talk to the user in Korean. Everything in the repo is English — code comments, docstrings, CLI help and output, tests, docs, issue/PR templates and commit messages (`type(scope): English summary`, body explains *why*) — with one exception: `README.ko.md`, the Korean translation of the README. Korean string literals that are functional data (the short-approval word list in `mint.py`, Korean test inputs for byte-budget and provenance tests, the handoff sample) stay as they are.
 
-README.md (English) and README.ko.md (Korean) carry the same facts — change both together. The same pairing holds for `docs/<name>.md` / `docs/<name>.ko.md`. The README is the short overview; details live in `docs/` (`handoff`: slot rules and pulling; `install`: Codex settings, delivery fallbacks, uninstall; `status`: what each `omhc status` row judges; `limits`: known limits and measured facts).
+README.md (English) and README.ko.md (Korean) carry the same facts — change both together. The README is the short overview; details live in English-only `docs/` (`handoff`: slot rules and pulling; `install`: Codex settings, delivery fallbacks, uninstall; `status`: what each `omhc status` row judges; `limits`: known limits and measured facts), which both READMEs link to.
 
 ## Commands
 

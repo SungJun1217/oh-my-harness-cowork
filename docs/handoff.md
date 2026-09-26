@@ -1,4 +1,4 @@
-**English** · [한국어](handoff.ko.md) · [← README](../README.md)
+[← README](../README.md)
 
 # The handoff and pulling more
 

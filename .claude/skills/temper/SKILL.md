@@ -67,7 +67,7 @@ changes, and say so in the report.
 
 - Stage only the files this unit touched (`git add <paths>`, never `-A`).
 - Start from the implementer's suggested message and check its type against `git log --oneline -20`.
-  The body is Korean: *why* the change was made (the cause, usually a measured fact), then what
+  The body is English: *why* the change was made (the cause, usually a measured fact), then what
   changed, wrapped at ~80 columns. End with the attribution trailer from the current system instructions.
 - The pre-commit gate (`.claude/hooks/pre_commit_gate.py`) may block the commit. Treat that as a
   new finding: the same implementer fixes it, the same reviewer checks only that fix, then commit again.

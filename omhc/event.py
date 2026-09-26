@@ -3,38 +3,43 @@ from __future__ import annotations
 import collections
 from typing import Dict, Iterable, Tuple
 
-# Event.arg 의 폭. 색인 TSV 의 속성이 아니라 IR 의 속성이므로 여기 둔다 —
-# 어댑터와 색인이 각자 120 을 들고 있으면 한쪽만 올려도 아무 일이 일어나지 않는다.
+# Width of Event.arg. This is a property of the IR, not of the index TSV, so
+# it lives here — if the adapter and the index each kept their own 120, raising
+# one wouldn't do anything.
 ARG_LIMIT = 120
 
-# 닫힌 중립 동사. 툴 어휘 교집합이 공집합이므로(Claude Code: Read/Edit/Bash/Task,
-# Codex: shell/apply_patch/update_plan) 벤더 이름을 담을 자리를 아예 두지 않는다.
-# 어휘 누출을 노력으로 막는 대신 스키마로 불가능하게 만든다.
+# Closed, neutral verb set. The two harnesses' tool vocabularies don't intersect
+# (Claude Code: Read/Edit/Bash/Task, Codex: shell/apply_patch/update_plan), so
+# there's no field for a vendor name to land in. Leakage is prevented by the
+# schema, not by discipline.
 VERBS = frozenset({"said", "inspected", "modified", "ran", "delegated", "researched"})
 
-# 3값 판별자. "human" 만 축자 중계된다.
-# 이 머신에서 서브에이전트 워크플로우 파일 137개에 type:"user" 레코드가 1766개
-# 있었고, role 기반 허용목록은 그것을 전부 사람의 말로 판정해 그대로 중계한다.
-# author 를 3값으로 두는 것이 그것을 구조적으로 막는 유일한 장치다.
+# 3-valued discriminator. Only "human" is relayed verbatim.
+# On this machine, 137 subagent workflow files had 1766 type:"user" records —
+# a role-based allowlist would judge all of those as human speech and relay
+# them as-is. Keeping author 3-valued is the only thing that blocks that
+# structurally.
 AUTHORS = frozenset({"human", "agent", "harness"})
 
 
-# NamedTuple 을 쓰는 이유는 import 비용이다. dataclasses 는 inspect·ast·dis·
-# tokenize·linecache·copy 를 끌어와 이 머신에서 import 만 8ms 이고, 훅 경로의
-# 두 프로세스가 매 세션 시작마다 그것을 지불한다(예산 150ms 의 11%).
-# 불변 보장은 동일하다 — 선언된 필드도 미선언 이름도 할당할 수 없다.
-# typing.NamedTuple 은 __new__ 재정의를 금지하므로 collections.namedtuple 을
-# 상속한다. __slots__ = () 로 인스턴스 dict 를 없애, 선언된 필드도 미선언 이름도
-# 할당할 수 없다는 보장을 유지한다.
+# NamedTuple for import cost. dataclasses pulls in inspect/ast/dis/tokenize/
+# linecache/copy — 8ms just to import on this machine, and the hook path's two
+# processes pay that on every session start (11% of the 150ms budget). The
+# invariant guarantee is the same either way — neither declared fields nor
+# undeclared names can be assigned. typing.NamedTuple forbids overriding
+# __new__, so this subclasses collections.namedtuple instead. __slots__ = ()
+# removes the instance dict, keeping the same guarantee: no declared field and
+# no undeclared name can be assigned.
 _EventBase = collections.namedtuple(
     "Event", "seq epoch author verb ok text arg paths offset length"
 )
 
 
 class Event(_EventBase):
-    """벤더 중립 레코드. 이 필드 목록이 곧 외래 물질의 공격 표면이다.
+    """Vendor-neutral record. This field list is the attack surface for
+    foreign material.
 
-    필드: seq:int epoch:float author:str verb:str ok:bool text:str arg:str
+    Fields: seq:int epoch:float author:str verb:str ok:bool text:str arg:str
     paths:Tuple[str, ...] offset:int length:int
     """
 
@@ -54,7 +59,7 @@ class Event(_EventBase):
 
 
 def tally(events: Iterable[Event]) -> Dict[str, object]:
-    """MORE 슬롯의 공개 의무가 쓰는 집계."""
+    """Tally used by the MORE slot's disclosure duty."""
     by_verb: collections.Counter = collections.Counter()
     by_author: collections.Counter = collections.Counter()
     failures = 0

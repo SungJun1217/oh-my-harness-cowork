@@ -1,46 +1,46 @@
-name: 핸드오프 내용이 잘못됨
-description: GOAL/NEXT 에 사람 말이 아닌 것이 들어갔거나, 하네스 내부 텍스트가 새어 들어왔을 때
+name: Wrong handoff content
+description: Something other than a human turn ended up in GOAL/NEXT, or harness-internal text leaked into the handoff
 labels: [bug, handoff]
 body:
   - type: markdown
     attributes:
       value: |
-        omhc 에서 가장 심각한 버그입니다. 에이전트의 제안이 사람의 지시(`GOAL`/`NEXT`)로
-        둔갑하거나, system-reminder·skill_listing 같은 하네스 내부 텍스트가 핸드오프에
-        실리는 경우입니다(AGENTS.md 불변식 3, 4).
+        This is the most serious kind of omhc bug: an agent's proposal passing as a human
+        instruction (`GOAL`/`NEXT`), or harness-internal text such as system-reminders or
+        skill_listing riding along in the handoff (AGENTS.md invariants 3 and 4).
 
-        **세션 원문은 붙이지 마십시오.** 핸드오프 전체도 필요 없습니다. 어느 slot 이
-        어떤 종류의 텍스트로 채워졌는지만 알려 주시면 됩니다.
+        **Don't paste raw session content**, and the full handoff isn't needed either. Just
+        tell us which slot was filled with what kind of text.
   - type: dropdown
     id: kind
     attributes:
-      label: 어떤 문제인가
+      label: What went wrong
       options:
-        - 에이전트가 한 말이 GOAL 이나 NEXT 에 들어갔다
-        - 짧은 승인("계속 진행해")이 NEXT 가 됐다
-        - 서브에이전트나 사이드체인의 턴이 사람 턴으로 잡혔다
-        - 하네스 내부 텍스트(system-reminder, 첨부, 환경 정보 등)가 실렸다
-        - 기타
+        - Something the agent said ended up in GOAL or NEXT
+        - A short approval ("go ahead") became NEXT
+        - A subagent or sidechain turn was taken as a human turn
+        - Harness-internal text (system-reminder, attachment, environment info, …) was included
+        - Other
     validations:
       required: true
   - type: input
     id: slot
     attributes:
-      label: 문제가 된 slot
+      label: Affected slot
       placeholder: "NEXT"
     validations:
       required: true
   - type: textarea
     id: shape
     attributes:
-      label: 실제로 들어간 텍스트의 종류
-      description: 원문 대신 무엇이었는지 설명해 주십시오. 예를 들어 "직전 에이전트 답변의 마지막 문장", "<system-reminder> 로 시작하는 블록"
+      label: What kind of text got in
+      description: Describe it instead of pasting it, e.g. "the last sentence of the previous agent reply", "a block starting with <system-reminder>"
     validations:
       required: true
   - type: dropdown
     id: direction
     attributes:
-      label: 방향
+      label: Direction
       options:
         - Claude Code → Codex CLI
         - Codex CLI → Claude Code
@@ -49,7 +49,7 @@ body:
   - type: input
     id: versions
     attributes:
-      label: 버전
-      placeholder: "omhc 0.1.13 · Claude Code 2.x · codex-cli 0.156.1"
+      label: Versions
+      placeholder: "omhc 0.1.14 · Claude Code 2.x · codex-cli 0.156.1"
     validations:
       required: true

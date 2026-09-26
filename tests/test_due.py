@@ -64,9 +64,11 @@ class TestDue(unittest.TestCase):
         self.assertIsNotNone(again)
 
     def test_an_ineligible_row_is_skipped_for_the_one_before_it(self):
-        """판정은 호출자가 어댑터에게 묻는다(#21). due 가 entrypoint 어휘를 들고
-        있으면 같은 규칙이 두 모듈에 살면서 한쪽만 갱신되는 반쪽 필터가 된다.
-        부적격 행에서 멈추면 헤드리스 세션 하나가 그 앞의 진짜 세션을 막는다."""
+        """The caller asks the adapter for the judgment (#21). If due held
+        entrypoint vocabulary, the same rule would live in two modules, and one
+        could get updated while the other doesn't — a half-updated filter.
+        Stopping at an ineligible row would let one headless session block the
+        real session before it."""
         self.start("codex-cli", "cx1", 10.0)
         self.start("claude-code", "sdk1", 50.0)
         got = due.due(REPO_KEY, "gajae-code", "g1", 100.0, home=self.home,
@@ -79,8 +81,8 @@ class TestDue(unittest.TestCase):
                                   home=self.home, eligible=lambda mark: False))
 
     def test_eligibility_is_not_asked_for_delivered_or_stale_rows(self):
-        """이미 전달했거나 너무 오래된 행에서는 그대로 멈춘다 — 판정은 파일을
-        여는 일이라 비싸고, 그 앞 행은 더 낡았다."""
+        """Stops outright at an already-delivered or too-stale row — judging is
+        expensive since it opens a file, and the row before it is even older."""
         asked = []
         self.start("codex-cli", "cx1", 10.0)
         self.assertIsNone(due.due(
@@ -89,24 +91,26 @@ class TestDue(unittest.TestCase):
         self.assertEqual(asked, [])
 
     def test_a_legacy_interactive_false_row_is_rechecked(self):
-        """예전 mark 가 적은 `interactive:false` 는 더 이상 보지 않는다. 그 행은
-        mark 시점에 굳어 OMHC_ALLOW_HEADLESS 를 나중에 켜도 되살릴 수 없었다."""
+        """The `interactive:false` an old mark wrote is no longer consulted. That
+        row was frozen at mark time and couldn't be revived even by turning
+        OMHC_ALLOW_HEADLESS on later."""
         self.start("codex-cli", "cx1", 10.0, interactive=False)
         got = due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home,
                       eligible=lambda mark: True)
         self.assertEqual(got.session_id, "cx1")
 
     def test_a_row_without_a_verdict_is_treated_as_interactive(self):
-        """기록이 없으면 사람의 세션으로 본다 — 조용히 잃는 것보다 낫다."""
+        """With no record, treat it as a human session — better than silently losing it."""
         self.start("claude-code", "old-row", 50.0)
         got = due.due(REPO_KEY, "codex-cli", "cx9", 100.0, home=self.home)
         self.assertEqual(got.session_id, "old-row")
 
     def test_due_holds_no_harness_vocabulary(self):
-        """하네스별 **어휘 값**이 코어에 있으면 안 된다.
+        """No per-harness **vocabulary value** may live in the core.
 
-        주석이 그 어휘를 언급하는 것은 정당하다 — 왜 여기 없는지를 설명하는
-        문장이 걸리면 가드에서 겪은 것과 같은 거짓 양성이다. 그래서 값만 본다.
+        A comment mentioning that vocabulary is legitimate — flagging a sentence
+        that explains why it's not here would be the same false positive guard
+        ran into. So only values are checked.
         """
         import ast
         import inspect
@@ -151,7 +155,7 @@ class TestDue(unittest.TestCase):
         )
 
     def test_due_returns_a_single_watermark_in_v1(self):
-        """v2 는 반환형을 List[Watermark] 로 바꾼다. 그 seam 이 이 함수 하나다."""
+        """v2 changes the return type to List[Watermark]. This one function is that seam."""
         self.start("codex-cli", "a", 10.0)
         self.start("gajae-code", "b", 20.0)
         got = due.due(REPO_KEY, "claude-code", "s2", 100.0, home=self.home)
@@ -167,9 +171,9 @@ class TestGate(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_claim_succeeds_exactly_once(self):
-        """실측: SessionStart 훅이 한 세션 안에서 6회 발동했다.
+        """Observed: the SessionStart hook fired 6 times within one session.
 
-        게이트가 없으면 같은 핸드오프가 한 컨텍스트에 6번 들어간다.
+        Without a gate, the same handoff would be injected into one context 6 times.
         """
         self.assertTrue(gate.claim(self.state, "claude-code", "sess-A"))
         for _ in range(5):
@@ -198,7 +202,7 @@ class TestGate(unittest.TestCase):
         os.close(results[1])
         data = os.read(results[0], 64)
         os.close(results[0])
-        self.assertEqual(data.count(b"1"), 1, "정확히 한 프로세스만 선점해야 한다")
+        self.assertEqual(data.count(b"1"), 1, "exactly one process must win the claim")
 
     def test_missing_session_id_is_not_claimable(self):
         self.assertFalse(gate.claim(self.state, "claude-code", ""))
@@ -228,9 +232,9 @@ class TestSessionIdFromHookPayload(unittest.TestCase):
 
 
 class TestReopen(unittest.TestCase):
-    """resume 이 delivered.tsv 에 남기는 reopen 줄(#22). `codex exec resume` 은
-    같은 rollout 에 이어붙고, 그 세션이 이미 전달됐었다면 already_delivered()
-    가 due() 를 멈춰 resumed 턴이 영영 안 나갔다."""
+    """The reopen line resume leaves in delivered.tsv (#22). `codex exec resume`
+    appends to the same rollout, and if that session was already delivered,
+    already_delivered() would stop due(), so the resumed turn would never go out."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -265,7 +269,7 @@ class TestReopen(unittest.TestCase):
                            path="/p", event="start", epoch=10.0)
         due.mark_delivered(self.state, wm, to_harness="claude-code", epoch=20.0)
         due.mark_reopened(self.state, "cx1", "codex-cli", 30.0)
-        # gajae-code 는 애초에 전달받은 적이 없다 — reopen 여부와 무관하게 False.
+        # gajae-code was never delivered to in the first place — False regardless of reopen.
         self.assertFalse(due.already_delivered(self.state, "cx1", "gajae-code"))
 
     def test_last_delivered_skips_a_trailing_reopen(self):
@@ -291,7 +295,7 @@ class TestReopen(unittest.TestCase):
 
 
 class TestLastDeliveryOffset(unittest.TestCase):
-    """#27: reopen 뒤 redelivery 를 막으려면 "얼마나 읽었는지"가 필요하다."""
+    """#27: preventing redelivery after a reopen needs to know "how much was read"."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

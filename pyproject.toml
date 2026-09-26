@@ -1,5 +1,5 @@
-# 의존성 0 이라 표준 setuptools 만으로 충분하다. 버전은 omhc/__init__.py 한 곳에서만
-# 관리한다(릴리스 워크플로가 태그와 이 값이 같은지 검사한다).
+# Zero dependencies, so plain setuptools is enough. The version lives only in
+# omhc/__init__.py (the release workflow checks the tag matches it).
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"

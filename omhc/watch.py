@@ -11,13 +11,13 @@ from . import adapters, fsio, index, locate, pin
 LOCK_NAME = "watch.lock"
 POLL_SECONDS = 5.0
 
-# 유휴 자동 종료. 아무 세션도 자라지 않은 채로 이만큼 지나면 스스로 끝낸다 —
-# 사용자가 요청하지 않은 프로세스가 영구히 떠 있으면 안 된다.
+# Idle auto-exit. Ends itself once this much time has passed with no session
+# growing — a process the user didn't ask for shouldn't stay alive forever.
 IDLE_EXIT_SECONDS = 30 * 60
 
 
 class LockBusy(Exception):
-    """이미 다른 watcher 가 이 레포를 보고 있다."""
+    """Another watcher is already watching this repo."""
 
 
 def _lock_path(state_dir: str) -> str:
@@ -33,7 +33,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 def read_lock(state_dir: str) -> Optional[int]:
-    """살아 있는 watcher 의 pid, 없으면 None. 죽은 락은 청소한다."""
+    """pid of a live watcher, or None. Cleans up a dead lock."""
     path = _lock_path(state_dir)
     try:
         with open(path, encoding="utf-8") as fh:
@@ -63,13 +63,15 @@ def release(state_dir: str) -> None:
         pass
 
 
-# {source_path: (st_mtime, st_size)} — sweep 사이에 유지된다. 변하지 않은 파일을
-# 다시 파싱하지 않기 위한 것이고, 잃어도 정확성에는 영향이 없다(다시 읽을 뿐).
+# {source_path: (st_mtime, st_size)} — kept across sweeps. Exists only to
+# avoid re-parsing an unchanged file; losing it has no effect on correctness
+# (it just gets re-read).
 _SEEN: Dict[str, tuple] = {}
 
 
 def forget(path: Optional[str] = None) -> None:
-    """테스트와 진단용. 경로를 주면 그것만, 안 주면 전부 잊는다."""
+    """For tests and diagnostics. Forgets just this path, or everything if
+    none is given."""
     if path is None:
         _SEEN.clear()
     else:
@@ -77,17 +79,18 @@ def forget(path: Optional[str] = None) -> None:
 
 
 def sweep(repo_root: str, state_dir: str, *, home: Optional[str] = None) -> int:
-    """한 번 훑어 색인을 따라잡는다. 새로 쓴 행 수를 돌려준다.
+    """One sweep to catch the index up. Returns the number of rows written.
 
-    **정확성을 담당하지 않는다.** 이것이 한 번도 돌지 않아도 brief 는 인라인
-    파싱으로 같은 산출물을 만든다 — 느려질 뿐이다. 그래서 데몬이 죽어도 결과가
-    바뀌지 않고, 이득은 "갈아타는 순간 큰 트랜스크립트를 훅 안에서 파싱하지
-    않는다"는 지연시간뿐이다.
+    **Not responsible for correctness.** If this never runs, brief still
+    produces the same result via inline parsing — it just gets slower. So the
+    daemon dying doesn't change the result; the only benefit is latency —
+    "don't parse a big transcript inside the hook at the moment you switch."
     """
     written = 0
-    # detect 와 read 가 같은 home 을 봐야 한다. present() 에 home 을 넘기지 않으면
-    # 탐지는 실제 $HOME 을, 읽기는 지정된 home 을 보게 되어 대체 home 을 가리킨
-    # 데몬이 아무것도 못 찾거나 엉뚱한 곳을 색인한다.
+    # detect and read need to see the same home. Without passing home to
+    # present(), detection would see the real $HOME while reads see the given
+    # home, so a daemon pointed at an alternate home would find nothing or
+    # index the wrong place.
     homes = {aid: home for aid in adapters.REGISTRY} if home else None
     for adapter_id in adapters.present(homes=homes, now=time.time):
         try:
@@ -97,9 +100,10 @@ def sweep(repo_root: str, state_dir: str, *, home: Optional[str] = None) -> int:
             continue
         for ref in refs:
             try:
-                # 파일이 그대로면 읽지 않는다. 5초 폴링 데몬이 정상 상태에서
-                # 3.2MB 트랜스크립트를 매번 재파싱하면 시간당 CPU 4분, 재독
-                # 28GB 가 되는데 새 이벤트는 0건이다.
+                # Don't read if the file is unchanged. A 5-second polling
+                # daemon re-parsing a 3.2MB transcript every sweep in steady
+                # state would burn 4 CPU-minutes/hour and re-read 28GB, for
+                # zero new events.
                 stamp = (ref.epoch, ref.size)
                 if _SEEN.get(ref.source_path) == stamp:
                     continue
@@ -116,12 +120,13 @@ def sweep(repo_root: str, state_dir: str, *, home: Optional[str] = None) -> int:
 
 
 def lag(state_dir: str) -> List[Dict[str, object]]:
-    """세션별로 마지막 색인 이벤트 뒤에 남은 바이트 수.
+    """Bytes remaining after the last indexed event, per session.
 
-    이것은 "데몬이 뒤처졌다"는 뜻이 **아니다**. 세션 파일 꼬리에는 Event 가 되지
-    않는 레코드(Codex 의 world_state / turn_context, Claude 의 attachment 등)가
-    있으므로 정상 상태에서도 0 이 아니다. 유용한 신호는 절대값이 아니라 **한 번
-    훑은 뒤에도 줄지 않는가** 다 — 그때가 기계가 죽은 때다.
+    This does **not** mean "the daemon fell behind." A session file's tail
+    holds records that never become Events (Codex's world_state/turn_context,
+    Claude's attachment, etc.), so this is nonzero in steady state too. The
+    useful signal isn't the absolute value but **whether it stays the same
+    after another sweep** — that's when the machine is actually dead.
     """
     out = []
     directory = os.path.join(state_dir, "index")
@@ -135,9 +140,10 @@ def lag(state_dir: str) -> List[Dict[str, object]]:
         session = name[: -len(".idx")]
         watermark = index.watermark(os.path.join(directory, name))
         source = os.path.join(pin.pinned_dir(state_dir, session), "source.jsonl")
-        # "pinned" 는 pin_session 이 실제로 하드링크를 걸었는지를 뜻한다 — 이게
-        # 없으면 브리핑을 보냈지만 고정에 실패한 세션도 size=0/lag_bytes=0 으로
-        # 보여 status 의 archive 행이 거짓 PASS 를 낸다(리뷰 결함).
+        # "pinned" means pin_session actually made the hardlink. Without this,
+        # a session that got a briefing sent but failed to pin would also
+        # show size=0/lag_bytes=0, making status's archive row a false PASS
+        # (review defect).
         pinned = os.path.exists(source)
         try:
             size = os.path.getsize(source) if pinned else 0
@@ -157,7 +163,7 @@ def run(
     max_sweeps: Optional[int] = None,
     now=time.time,
 ) -> int:
-    """가속기 루프. 유휴 시간이 넘으면 스스로 끝낸다."""
+    """Accelerator loop. Exits itself once the idle timeout is exceeded."""
     root = locate.resolve_repo_root(repo_root)
     state = locate.state_dir(locate.repo_key(root), home=home)
     acquire(state)

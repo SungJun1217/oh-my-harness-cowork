@@ -107,10 +107,10 @@ class TestReadRealFixture(unittest.TestCase):
         self.read = CX.CodexCliAdapter().read_session(ref_for(EXEC))
 
     def test_environment_context_envelope_is_not_a_human_turn(self):
-        """판별자는 둘이다 — 메타데이터 kind 와 봉투 구조.
+        """There are two discriminators — the metadata kind and the envelope structure.
 
-        content_item_kinds 는 실재하지만 payload 최상위가 아니라
-        payload.internal_chat_message_metadata_passthrough 안에 중첩돼 있다.
+        content_item_kinds really exists, but nested under
+        payload.internal_chat_message_metadata_passthrough rather than at the payload's top level.
         """
         for ev in self.read.events:
             if ev.author == "human":
@@ -136,9 +136,9 @@ class TestReadRealFixture(unittest.TestCase):
 @unittest.skipUnless(_repo.have_fixtures(_repo.CODEX_TOOLS, _repo.CODEX_EDIT,
                                          _repo.EXPECTED), MISSING)
 class TestRealToolCalls(unittest.TestCase):
-    """실물(codex-cli 0.156.1, gpt-6-luna) 로 확인한 도구 레코드.
+    """Tool records confirmed on real data (codex-cli 0.156.1, gpt-6-luna).
 
-    골든은 harvest.py 가 어댑터를 부르지 않고 독립 계산한다.
+    The golden values are computed independently by harvest.py, without calling the adapter.
     """
 
     def setUp(self):
@@ -150,12 +150,12 @@ class TestRealToolCalls(unittest.TestCase):
         return [e for e in read.events if e.verb != "said"]
 
     def test_every_shell_command_becomes_one_event_with_its_real_text(self):
-        """이전 매핑은 arguments 가 없는 custom_tool_call 을 읽어 arg 가 비었다."""
+        """The old mapping read the argument-less custom_tool_call, so arg came up empty."""
         self.assertEqual([e.arg for e in self.machine(self.tools)],
                          self.golden["tools"]["commands"])
 
     def test_a_nonzero_exit_marks_the_event_failed(self):
-        """이전 매핑은 출력 텍스트에서 exit_code 를 찾았고 거기엔 없다 → FAIL 영구 불가."""
+        """The old mapping looked for exit_code in the output text, where it never appears -> FAIL was permanently unreachable."""
         failed = [e.arg for e in self.machine(self.tools) if not e.ok]
         self.assertEqual(failed, self.golden["tools"]["failed"])
         self.assertTrue(failed)
@@ -167,12 +167,13 @@ class TestRealToolCalls(unittest.TestCase):
         self.assertTrue(all(e.ok for e in modified))
 
     def test_read_only_commands_are_inspected_not_ran(self):
-        """Codex 에는 읽기 전용 도구가 따로 없고 전부 셸로 간다. parsed_cmd 가 Codex
-        자신의 분류이므로 그것을 따른다 — 안 그러면 Codex 세션에 inspected 가 없다."""
+        """Codex has no separate read-only tool — everything goes through the
+        shell. parsed_cmd is Codex's own classification, so we follow it —
+        otherwise a Codex session would never have inspected."""
         self.assertEqual({e.verb for e in self.machine(self.tools)}, {"inspected"})
 
     def test_the_js_wrapper_is_bookkeeping_not_an_event(self):
-        """custom_tool_call(name=exec) 는 사실의 사본이다. 둘 다 세면 이중 계상된다."""
+        """custom_tool_call(name=exec) is a duplicate of the fact. Counting both would double-count."""
         self.assertEqual(len(self.machine(self.tools)),
                          len(self.golden["tools"]["commands"]))
         self.assertGreater(self.tools.dropped.get("js_exec", 0), 0)
@@ -190,7 +191,7 @@ class TestRealToolCalls(unittest.TestCase):
 
 
 class TestMeasuredShapes(unittest.TestCase):
-    """픽스처 없이도 도는 실측 모양 단위 테스트."""
+    """Unit tests of measured shapes that run without fixtures."""
 
     def _read(self, rows) -> A.SessionRead:
         path = write_rollout(rows)
@@ -242,8 +243,8 @@ class TestMeasuredShapes(unittest.TestCase):
 
 class TestLegacyToolCallShapes(unittest.TestCase):
     """era A (codex-cli 0.141–0.142) — function_call name=exec_command/
-    apply_patch/spawn_agent, 출력은 평문(JSON 아님). 픽스처 없이도 도는 실측
-    모양 단위 테스트(_repo.codex_* 빌더가 정확히 그 텍스트 헤더를 쓴다)."""
+    apply_patch/spawn_agent, output is plain text (not JSON). Unit tests of
+    measured shapes that run without fixtures (the _repo.codex_* builders write that exact text header)."""
 
     def _read(self, rows) -> A.SessionRead:
         path = write_rollout(rows)
@@ -280,7 +281,7 @@ class TestLegacyToolCallShapes(unittest.TestCase):
         self.assertEqual(read.dropped.get("tool_bookkeeping", 0), 1)
 
     def test_a_call_with_no_output_stays_ok_abort(self):
-        rows = _repo.codex_exec_command_rows(["ls"])  # code/running_sid 둘 다 None
+        rows = _repo.codex_exec_command_rows(["ls"])  # code/running_sid both None
         read = self._read([self.META] + rows)
         ran = [e for e in read.events if e.verb == "ran"]
         self.assertEqual(len(ran), 1)
@@ -318,7 +319,7 @@ class TestLegacyToolCallShapes(unittest.TestCase):
         self.assertEqual(modified[0].paths, ("/w/repo/omhc/x.py",))
 
     def test_spawn_agent_maps_to_delegated_and_never_leaks_the_message(self):
-        row = _repo.codex_spawn_agent_row("fix-flaky-test", "여기 비밀 지침이 있다")
+        row = _repo.codex_spawn_agent_row("fix-flaky-test", "여기 비밀 지침이 있다")  # "there's a secret instruction here"
         read = self._read([self.META, row])
         delegated = [e for e in read.events if e.verb == "delegated"]
         self.assertEqual(len(delegated), 1)
@@ -350,16 +351,17 @@ class TestLegacyToolCallShapes(unittest.TestCase):
     def test_agent_message_is_dropped_not_human_or_said(self):
         read = self._read([self.META, {
             "type": "response_item",
-            "payload": {"type": "agent_message", "text": "에이전트 간 메시지"}}])
+            "payload": {"type": "agent_message", "text": "에이전트 간 메시지"}}])  # "inter-agent message"
         self.assertEqual(read.events, ())
         self.assertEqual(read.dropped.get("agent_message"), 1)
         self.assertEqual(read.unparsed, 0)
 
 
 class TestCommandExecutionBenignExitOne(unittest.TestCase):
-    """era B: parsed_cmd 가 전부 읽기이고 출력도 비면 exit 1 은 관용구다(실측 3건).
-    검증용 grep -q 는 보통 parsed_cmd 가 unknown 이라 여기 안 걸린다. 더 넓히지
-    않는 이유는 _item_fact 의 주석(#11)."""
+    """era B: if parsed_cmd is entirely reads and the output is also empty,
+    exit 1 is idiomatic (3 measured cases). A validation `grep -q` usually
+    has parsed_cmd=unknown so it doesn't fall in here. The reason we don't
+    broaden this further is in _item_fact's comment (#11)."""
 
     def _read(self, item):
         rows = [{"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
@@ -386,14 +388,15 @@ class TestCommandExecutionBenignExitOne(unittest.TestCase):
         self.assertEqual([(e.verb, e.ok) for e in read.events], [("ran", False)])
 
     def test_several_inspect_entries_with_empty_output_are_ok(self):
-        # rg … && sed … && sed … 처럼 전부 읽기이고 출력이 없으면 관용구다.
+        # Like `rg ... && sed ... && sed ...` — all reads with no output is idiomatic.
         read = self._read(self._ce(1, [{"type": "search", "cmd": "rg foo"},
                                        {"type": "read", "cmd": "sed -n 1p a"},
                                        {"type": "read", "cmd": "sed -n 1p b"}]))
         self.assertEqual([e.ok for e in read.events], [True])
 
     def test_missing_file_before_a_search_stays_a_failure(self):
-        # sed P && rg … — && 가 끊겨 sed 의 실패가 종료 코드다. 출력이 있으니 실패.
+        # `sed P && rg ...` — the `&&` chain breaks, so sed's failure is the
+        # exit code. There's output, so it's a failure.
         read = self._read(self._ce(
             1, [{"type": "read", "cmd": "sed -n 1p missing"},
                 {"type": "search", "cmd": "rg foo"}],
@@ -401,8 +404,8 @@ class TestCommandExecutionBenignExitOne(unittest.TestCase):
         self.assertEqual([e.ok for e in read.events], [False])
 
     def test_list_then_search_with_output_stays_a_failure(self):
-        # ls -la; rg --files -g … — ls 의 출력이 있어 무해한지 구조만으로는 가를 수
-        # 없다. 알면서 두는 누락이다(#11).
+        # `ls -la; rg --files -g ...` — ls has output, so structure alone
+        # can't tell whether this is benign. A known, deliberate gap (#11).
         read = self._read(self._ce(
             1, [{"type": "list_files", "cmd": "ls -la"},
                 {"type": "list_files", "cmd": "rg --files -g x"}],
@@ -416,15 +419,15 @@ class TestCommandExecutionBenignExitOne(unittest.TestCase):
 
 
 class TestMintShowsRealCodexFacts(unittest.TestCase):
-    """era A 모양 세션이라도 FAIL/DID 가 실제 명령·경로를 보여줘야 한다 —
-    이전 매핑은 arg 가 비어 있었다."""
+    """Even for an era A-shaped session, FAIL/DID must show the real
+    command/path — the old mapping left arg empty."""
 
     def test_fail_and_did_carry_the_real_command_and_path(self):
         from omhc import mint
 
         changed = os.path.join(REPO, "omhc", "x.py")
         rows = ([{"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
-                msg("user", "테스트를 고쳐줘")]
+                msg("user", "테스트를 고쳐줘")]  # "fix the test"
                + _repo.codex_exec_command_rows(["pytest", "-q"], code=1)
                + _repo.codex_apply_patch_rows(
                    ["*** Update File: {}".format(changed)], with_filechange=True))
@@ -440,14 +443,14 @@ class TestMintShowsRealCodexFacts(unittest.TestCase):
 
 
 class TestInteractiveFilter(unittest.TestCase):
-    """서브에이전트/헤드리스 exec/프로그래매틱 앱서버 클라이언트는 절대 핸드오프
-    원천이 되면 안 된다.
+    """A subagent, headless exec, or programmatic app-server client must
+    never become a source for a handoff.
 
-    실물 모양(codex-cli 0.155.1, 이 머신 실측): source={"subagent": {...}},
-    thread_source="subagent", parent_thread_id=<uuid> (서브에이전트) /
-    originator="codex_exec", source="exec" (헤드리스 exec, 샌드박스 rollout 5개) /
-    originator="applecider"(36개)·"splitlane*"(3개), 둘 다 source="vscode" 지만
-    role=user 턴이 "User goal: … Current browser URL: …" 형태의 기계 템플릿이다.
+    Real shapes (codex-cli 0.155.1, measured on this machine): source={"subagent": {...}},
+    thread_source="subagent", parent_thread_id=<uuid> (subagent) /
+    originator="codex_exec", source="exec" (headless exec, 5 sandbox rollouts) /
+    originator="applecider" (36) / "splitlane*" (3), both source="vscode" but
+    the role=user turn is a machine template shaped like "User goal: ... Current browser URL: ...".
     """
 
     def setUp(self):
@@ -495,8 +498,8 @@ class TestInteractiveFilter(unittest.TestCase):
         self.assertTrue(CX._is_interactive(self._meta(self.EXEC_SOURCE)))
 
     def test_applecider_is_not_interactive_by_default(self):
-        """앱서버가 얹은 프로그래매틱 클라이언트다 — role=user 턴은 사람이 아니라
-        "User goal: … Current browser URL: …" 템플릿이다."""
+        """A programmatic client the app server put on top — the role=user
+        turn isn't a human, it's a "User goal: ... Current browser URL: ..." template."""
         self.assertFalse(CX._is_interactive(self._meta(self.APPLECIDER_SOURCE)))
 
     def test_applecider_becomes_interactive_under_the_override(self):
@@ -525,7 +528,7 @@ class TestInteractiveFilter(unittest.TestCase):
         self.assertFalse(CX._is_interactive(self._meta(self.SUBAGENT_SOURCE_DICT)))
 
     def test_garbage_metadata_fails_open_to_interactive(self):
-        """블록리스트라 모르는/이상한 모양은 대화형으로 남는다."""
+        """It's a blocklist, so an unknown/weird shape stays interactive."""
         self.assertTrue(CX._is_interactive(self._meta(self.GARBAGE_SOURCE)))
 
     def test_classify_rejects_a_subagent_rollout(self):
@@ -618,7 +621,7 @@ class TestDefensiveDegradation(unittest.TestCase):
     def test_broken_line_does_not_stop_the_read(self):
         path = write_rollout([
             {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
-            msg("user", "진짜 사람의 말"),
+            msg("user", "진짜 사람의 말"),  # "the real human's words"
         ])
         with open(path, "a", encoding="utf-8") as fh:
             fh.write("{broken\n")
@@ -634,7 +637,7 @@ class TestDefensiveDegradation(unittest.TestCase):
             {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
             {"type": "response_item", "payload": {
                 "type": "message", "role": "assistant", "id": "a1",
-                "content": [{"type": "output_text", "text": "테스트 3개가 실패했다"}]}},
+                "content": [{"type": "output_text", "text": "테스트 3개가 실패했다"}]}},  # "3 tests failed"
         ])
         try:
             read = CX.CodexCliAdapter().read_session(ref_for(path))
@@ -672,8 +675,8 @@ class TestWriteSide(unittest.TestCase):
                 self.assertEqual(fh.read(), "[omhc] hi\n")
 
     def test_no_hook_means_no_pull_channel(self):
-        """훅이 없으면 산출물을 써도 아무도 읽지 않는다 — 그것을 성공으로 보고하면
-        AGENTS.md 폴백이 영원히 발동하지 않는다."""
+        """With no hook, no one reads the artifact even if it's written —
+        reporting that as success would mean the AGENTS.md fallback never fires."""
         with tempfile.TemporaryDirectory() as home:
             with self.assertRaises(A.NoInjectionChannel):
                 CX.CodexCliAdapter(home=home).install_handoff(self._bundle())
@@ -685,9 +688,9 @@ class TestWriteSide(unittest.TestCase):
             self.assertTrue(callable(channels[0]))
 
     def test_install_handoff_collapses_a_stale_agents_md_block(self):
-        """#36: Path A(훅) 가 성공하면 그 옆의 낡은 Path B 구간을 즉시
-        붕괴시킨다 — 안 그러면 다음 Codex 세션이 신선한 훅 핸드오프와 낡은
-        AGENTS.md 지시를 동시에 읽는다."""
+        """#36: when Path A (the hook) succeeds, it must immediately collapse
+        the stale Path B section next to it — otherwise the next Codex
+        session would read both a fresh hook handoff and stale AGENTS.md instructions at once."""
         from omhc import agents_md, managed_block
 
         with tempfile.TemporaryDirectory() as base, \
@@ -727,9 +730,10 @@ class TestWriteSide(unittest.TestCase):
 
 
 class TestOnSessionStartMark(unittest.TestCase):
-    """#36: 이 세션의 mark(startup) 가 "이미 읽힌" AGENTS.md 블록을 붕괴시켜
-    다음 Codex 세션이 못 읽게 한다. resume 은 리뷰 #2 에 따라 건드리지
-    않는다 — "훅보다 먼저 읽는다"는 순서를 startup 에서만 실측했다."""
+    """#36: this session's mark(startup) collapses an "already read"
+    AGENTS.md block so the next Codex session can't read it. resume leaves
+    it untouched per review #2 — the "reads before the hook" ordering was
+    only measured on startup."""
 
     def _bare_repo(self, base: str) -> str:
         root = os.path.join(base, "proj")
@@ -752,9 +756,9 @@ class TestOnSessionStartMark(unittest.TestCase):
             self.assertIsNone(managed_block.installed_captured_at(agents_md.path_for(root)))
 
     def test_block_captured_after_this_mark_epoch_is_kept(self):
-        """같은 SessionStart 안에서 brief(Path B) 가 병렬로 이 세션 몫의
-        블록을 이미 써 놓은 경우(경합) — mark 가 그걸 지우면 이 세션조차
-        핸드오프를 못 읽는다."""
+        """The case where brief (Path B) has already written this session's
+        share of the block in parallel within the same SessionStart (a race)
+        — if mark wiped it, even this session couldn't read the handoff."""
         from omhc import agents_md, managed_block
 
         with tempfile.TemporaryDirectory() as base, \
@@ -799,8 +803,8 @@ class TestOnSessionStartMark(unittest.TestCase):
             self.assertIsNotNone(managed_block.installed_captured_at(agents_md.path_for(root)))
 
     def test_resume_source_never_collapses(self):
-        """리뷰 #2: resume 에서 Codex 가 AGENTS.md diff 를 언제 계산하는지는
-        아직 실측하지 못했다 — startup 만 붕괴시킨다."""
+        """Review #2: it's not yet been measured when Codex computes the
+        AGENTS.md diff on resume — only startup collapses it."""
         from omhc import agents_md, managed_block
 
         with tempfile.TemporaryDirectory() as base, \
@@ -815,9 +819,9 @@ class TestOnSessionStartMark(unittest.TestCase):
             self.assertIsNotNone(managed_block.installed_captured_at(agents_md.path_for(root)))
 
     def test_a_splice_between_marks_judgment_and_the_strip_call_is_not_lost(self):
-        """리뷰 #1 재현: mark 가 "낡았다"고 판정한 직후, 다른 프로세스(같은
-        SessionStart 안에서 병렬로 도는 brief 등)가 새 핸드오프 Y 를 그
-        자리에 써 놓는다 — Y 는 살아남아야 한다."""
+        """Review #1 repro: right after mark judges the block "stale",
+        another process (e.g. brief running in parallel within the same
+        SessionStart) writes a fresh handoff Y in its place — Y must survive."""
         from omhc import agents_md, managed_block
 
         with tempfile.TemporaryDirectory() as base, \
@@ -833,8 +837,8 @@ class TestOnSessionStartMark(unittest.TestCase):
                 calls["n"] += 1
                 value = real(p)
                 if calls["n"] == 1:
-                    # mark 의 판정(첫 호출)이 끝나자마자, 다른 프로세스가
-                    # 이 세션 몫의 새 블록을 이미 써 놓았다고 흉내낸다.
+                    # Right after mark's judgment (the first call) finishes,
+                    # mimic another process having already written a new block for this session.
                     managed_block.splice(p, "[omhc] concurrent Y\n", captured_at=9999.0)
                 return value
 
@@ -845,8 +849,9 @@ class TestOnSessionStartMark(unittest.TestCase):
             self.assertEqual(managed_block.installed_captured_at(path), 9999.0)
 
     def test_a_splice_between_strips_read_and_write_is_not_lost(self):
-        """리뷰 #1 재현: strip_if_captured 자신의 첫 읽기와 실제로 지우는
-        쓰기 사이(재확인 지점)에 새 핸드오프 Y 가 끼어들어도 살아남는다."""
+        """Review #1 repro: even if a new handoff Y sneaks in between
+        strip_if_captured's own first read and the write that actually
+        erases it (the recheck point), it must survive."""
         from omhc import agents_md, managed_block
 
         with tempfile.TemporaryDirectory() as base, \
@@ -861,9 +866,9 @@ class TestOnSessionStartMark(unittest.TestCase):
             def fake(p):
                 calls["n"] += 1
                 if calls["n"] == 2:
-                    # strip_if_captured 의 쓰기 직전 재확인(두 번째 호출) —
-                    # 그 값을 읽기 전에 다른 프로세스가 이미 새로 썼다고
-                    # 흉내낸다.
+                    # The recheck right before strip_if_captured's write (the
+                    # second call) — mimic another process having already
+                    # written new content before that value is read.
                     managed_block.splice(p, "[omhc] concurrent Y\n", captured_at=9999.0)
                 return real(p)
 
@@ -882,7 +887,7 @@ class TestOnSessionStartMark(unittest.TestCase):
                 root, source="startup", epoch=1000.0)
 
     def test_an_internal_failure_is_swallowed(self):
-        """훅 경로에서 불리므로(invariant 2) 무엇이 터져도 던지지 않는다."""
+        """Called from the hook path (invariant 2), so nothing must raise no matter what breaks."""
         from omhc import managed_block
 
         with tempfile.TemporaryDirectory() as base, \
@@ -895,8 +900,7 @@ class TestOnSessionStartMark(unittest.TestCase):
 
 
 class TestInlineTomlHooks(unittest.TestCase):
-    """#32: config.toml 의 인라인 `[[hooks.SessionStart]]` 도 hooks.json 과
-    같은 자격으로 훅 설치로 친다."""
+    """#32: an inline `[[hooks.SessionStart]]` in config.toml counts as a hook install on equal footing with hooks.json."""
 
     def _install_toml(self, home: str) -> None:
         directory = os.path.join(home, ".codex")
@@ -943,9 +947,9 @@ class TestInlineTomlHooks(unittest.TestCase):
         os.chmod(bin_path, 0o755)
 
     def _shipped_hooks(self, home: str):
-        # hooks/codex-hooks.json 이 배포하는 정확한 모양(mark + brief --wire
-        # claude) — hooks_status()/inspect 는 이 전체와 비교하지, has_runnable_call
-        # 처럼 brief 하나만 보지 않는다.
+        # The exact shape shipped by hooks/codex-hooks.json (mark + brief
+        # --wire claude) — hooks_status()/inspect compares against this
+        # whole thing, not just brief alone like has_runnable_call.
         bin_path = os.path.join(home, ".local", "bin", "omhc")
         return [
             {"type": "command", "command": "{} mark --harness codex-cli".format(bin_path)},
@@ -1023,11 +1027,12 @@ class TestInlineTomlHooks(unittest.TestCase):
                 os.path.realpath(repo), trust_level))
 
     def test_project_trust_body_end_is_not_fooled_by_a_multiline_array_bracket(self):
-        # 리뷰 #3 재현: 예전엔 project 본문의 끝을 `^[ \t]*\[` 로 다시 찾았는데,
-        # 이건 #31 이 이미 걸러낸 "여러 줄 배열 값의 원소도 줄 맨 앞에 `[`
-        # 로 올 수 있다" 문제를 그대로 반복한다 — 공유 스캐너를 쓰면
-        # trust_level 이 (가짜 헤더로 오인된 배열 원소 앞이 아니라) 진짜
-        # 다음 헤더 전까지 온전히 본문으로 잡혀야 한다.
+        # Review #3 repro: it used to re-find the end of the project body
+        # with `^[ \t]*\[`, which repeats exactly the problem #31 already
+        # filtered out — "a multi-line array value's element can also start
+        # a line with `[`". Using the shared scanner, trust_level must be
+        # captured as body text all the way to the real next header (not cut
+        # off before an array element mistaken for a fake header).
         with tempfile.TemporaryDirectory() as home, \
                 tempfile.TemporaryDirectory() as repo:
             directory = os.path.join(home, ".codex")
@@ -1069,7 +1074,7 @@ class TestInlineTomlHooks(unittest.TestCase):
     def test_project_level_ignored_when_trust_unknown(self):
         with tempfile.TemporaryDirectory() as home, \
                 tempfile.TemporaryDirectory() as repo:
-            # ~/.codex/config.toml 에 이 레포에 대한 [projects."..."] 항목이 아예 없다
+            # ~/.codex/config.toml has no [projects."..."] entry for this repo at all
             project_dir = os.path.join(repo, ".codex")
             os.makedirs(project_dir, exist_ok=True)
             with open(os.path.join(project_dir, "hooks.json"), "w", encoding="utf-8") as fh:
@@ -1089,29 +1094,30 @@ class TestInlineTomlHooks(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(home, ".codex", "hooks.json")))
 
     def test_hooks_status_reports_differs_not_not_found_for_a_partial_inline_install(self):
-        # 리뷰 #1 재현: brief 는 있지만 mark 도 --wire claude 도 없는 인라인
-        # 설치 — "존재하지만 배포 조각과 다르다" 이지 "없다" 가 아니다.
+        # Review #1 repro: an inline install with brief but no mark and no
+        # --wire claude — this is "exists but differs from the shipped
+        # fragment", not "not found".
         with tempfile.TemporaryDirectory() as home:
-            self._install_toml(home)  # brief 만, mark 없음, --wire claude 없음
+            self._install_toml(home)  # brief only, no mark, no --wire claude
             ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
             self.assertFalse(ok)
             self.assertNotIn("not found", detail)
             self.assertIn("differs from shipped fragment", detail)
 
     def test_hooks_install_does_not_duplicate_a_partial_inline_install(self):
-        # 리뷰 #1 재현: 부분 인라인 설치 위에 `omhc hooks install` 이 hooks.json
-        # 을 겹쳐 쓰면 Codex 가 두 층을 다 읽고 경고하며, 인라인 쪽은 여전히
-        # 매 세션 실패한다 — 대신 hooks.json 을 쓰지 않고 실패로 보고해야
-        # 한다.
+        # Review #1 repro: if `omhc hooks install` overlaid hooks.json on top
+        # of a partial inline install, Codex would read both layers and
+        # warn, and the inline side would keep failing every session —
+        # instead it must not write hooks.json and must report failure.
         with tempfile.TemporaryDirectory() as home:
             self._make_bin(home)
-            self._install_toml(home)  # brief 만 있는 부분 인라인 설치
+            self._install_toml(home)  # a partial inline install with brief only
             out = io.StringIO()
             code = cli.main(["hooks", "install", "--harness", "codex-cli"], home=home, out=out)
             self.assertNotEqual(code, 0)
             self.assertIn("differs", out.getvalue())
             self.assertFalse(os.path.exists(os.path.join(home, ".codex", "hooks.json")))
-            # 재확인해도 여전히 "설치 안 됨" 이 아니라 "다르다" 로 보고돼야 한다.
+            # Rechecking must still report "differs", not "not installed".
             ok, detail = CX.CodexCliAdapter(home=home).hooks_status()
             self.assertFalse(ok)
             self.assertNotIn("not found", detail)
@@ -1130,7 +1136,7 @@ if __name__ == "__main__":
 
 
 class TestMetadataKindDiscriminator(unittest.TestCase):
-    """content_item_kinds 는 payload 최상위가 아니라 메타데이터 안에 중첩돼 있다."""
+    """content_item_kinds is nested inside the metadata, not the payload's top level."""
 
     def _read(self, rows):
         path = write_rollout(rows)
@@ -1149,7 +1155,7 @@ class TestMetadataKindDiscriminator(unittest.TestCase):
     def test_environment_context_kind_is_dropped_even_without_an_envelope(self):
         read = self._read([
             {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
-            self._msg("user", "봉투 없이 온 환경 설명",
+            self._msg("user", "봉투 없이 온 환경 설명",  # "environment description with no envelope"
                       ["environments.environment_context"]),
         ])
         self.assertEqual([e for e in read.events if e.author == "human"], [])
@@ -1158,17 +1164,18 @@ class TestMetadataKindDiscriminator(unittest.TestCase):
     def test_user_text_kind_is_kept(self):
         read = self._read([
             {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
-            self._msg("user", "진짜 사람의 말", ["user.text"]),
+            self._msg("user", "진짜 사람의 말", ["user.text"]),  # "the real human's words"
         ])
         humans = [e for e in read.events if e.author == "human"]
         self.assertEqual(len(humans), 1)
 
     def test_omhcs_own_injected_handoff_is_not_a_human_turn(self):
-        """실측(codex-cli 0.155.1): omhc 가 주입한 표식이 role=user 로 rollout 에
+        """Measured (codex-cli 0.155.1): a marker injected by omhc really
 
-        실제로 나타난다(content_item_kinds=["hooks.additional_context"]). 이걸
-        사람 발화로 잘못 읽으면 다음 핸드오프가 omhc 자신의 표식을 GOAL/NEXT 로
-        착각해 되먹임 루프가 생긴다.
+        shows up in the rollout as role=user
+        (content_item_kinds=["hooks.additional_context"]). Misreading it as
+        human speech would let the next handoff mistake omhc's own marker
+        for GOAL/NEXT, creating a feedback loop.
         """
         read = self._read([
             {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
@@ -1180,7 +1187,7 @@ class TestMetadataKindDiscriminator(unittest.TestCase):
         self.assertIn("kind:hooks.additional_context", read.dropped)
 
     def test_a_new_user_prefixed_kind_is_not_lost(self):
-        """접두 허용이라 새 user.* kind 가 생겨도 사람의 말을 잃지 않는다."""
+        """Prefix allowance means the human's words aren't lost even when a new user.* kind appears."""
         read = self._read([
             {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
             self._msg("user", "미래의 사람 입력", ["user.voice_2099"]),
@@ -1205,8 +1212,8 @@ class TestMetadataKindDiscriminator(unittest.TestCase):
 
 
 class TestHealth(unittest.TestCase):
-    """codex-cli 0.155.1 은 신뢰 안 된 훅을 메시지도 원장 행도 없이 건너뛴다 —
-    이 진단이 그 상태를 행태 증거로 잡아낸다."""
+    """codex-cli 0.155.1 skips an untrusted hook with no message and no
+    ledger row — this diagnosis catches that state through behavioral evidence."""
 
     INSTALL_EPOCH = 1700000000.0  # 2023-11-14T22:13:20Z
 
@@ -1289,11 +1296,12 @@ class TestHealth(unittest.TestCase):
             self.assertIn("ran for the latest session", rows[0][2])
 
     def test_inline_only_install_is_judged_from_config_toml_mtime(self):
-        # #32 리뷰 1 재현: 예전엔 install_epoch 을 언제나 hooks.json 의 mtime
-        # 으로 삼아서, 인라인 전용 설치(hooks.json 자체가 없다)에서 이 stat
-        # 이 ENOENT 로 죽어 이 행이 매번 `----(unknown)` 으로만 남았다 —
-        # 신뢰 안 된 인라인 훅이 조용히 스킵되는 걸 잡아야 할 행이 제 역할을
-        # 못 했다. 이제 실제로 설치된 파일(config.toml)의 mtime 을 쓴다.
+        # #32 review 1 repro: install_epoch used to always be hooks.json's
+        # mtime, so under an inline-only install (hooks.json doesn't even
+        # exist) this stat died with ENOENT and the row stayed
+        # `----(unknown)` every time — the row meant to catch a silently
+        # skipped untrusted inline hook failed at its job. Now it uses the
+        # mtime of whichever file is actually installed (config.toml).
         with tempfile.TemporaryDirectory() as home:
             self._install_toml_hook(home)
             self._rollout(home, "s1", "2023-11-15T00:00:00.000Z")
@@ -1314,14 +1322,15 @@ class TestHealth(unittest.TestCase):
             self.assertEqual(label, "codex hook")
             self.assertFalse(ok)
             self.assertIn("1 consecutive Codex session", detail)
-            # 인라인 설치는 hooks.json 의 hooks.state 신뢰 해시와 다른 메커니즘
-            # 이다 — 그 사실이 힌트로만 남아야지 확정 진단으로 말하면 안 된다.
+            # Inline install is a different mechanism from hooks.json's
+            # hooks.state trust hash — that fact must only surface as a hint,
+            # never stated as a firm diagnosis.
             self.assertIn("hint, not a diagnosis", detail)
 
     def test_pass_when_only_an_older_pre_trust_session_is_missing(self):
-        """리뷰 결함: 신뢰는 config.toml 을 바꾸지 hooks.json 을 바꾸지 않는다 —
-        신뢰 이전 세션이 안 돈 채 남아 있어도, 신뢰 이후(최신) 세션이 돌았다면
-        지금은 신뢰가 성립한 상태이므로 PASS 여야 한다."""
+        """Review defect: trust changes config.toml, not hooks.json — even if
+        a pre-trust session never ran, if a post-trust (newer) session ran,
+        trust holds right now, so it must be PASS."""
         with tempfile.TemporaryDirectory() as home:
             self._install_hook(home)
             self._rollout(home, "before-trust", "2023-11-15T00:00:00.000Z")
@@ -1332,8 +1341,8 @@ class TestHealth(unittest.TestCase):
             self.assertIn("ran for the latest session", rows[0][2])
 
     def test_fail_when_only_the_newest_session_is_missing(self):
-        """오래된 세션들이 다 돌았어도, 가장 최신이 안 돌았으면 지금은 다시
-        신뢰가 깨진 상태이므로 FAIL 이어야 한다."""
+        """Even if all the older sessions ran, if the newest one didn't,
+        trust is broken again right now, so it must be FAIL."""
         with tempfile.TemporaryDirectory() as home:
             self._install_hook(home)
             self._rollout(home, "ran", "2023-11-15T00:00:00.000Z")
@@ -1469,9 +1478,10 @@ class TestHealth(unittest.TestCase):
 
 
 class TestStatusIntegration(unittest.TestCase):
-    """omhc status 가 어댑터 health 행을 실제로 접어 넣는지 — adapters.present()
-    는 실제 $HOME 을 본다(AGENTS.md), 그래서 그 발견 자체는 고정시켜 두고
-    이 테스트가 만드는 임시 $HOME 으로 health() 를 부르는지만 본다."""
+    """Whether omhc status actually folds in an adapter's health row —
+    adapters.present() looks at the real $HOME (AGENTS.md), so that
+    discovery itself is pinned down, and this only checks whether health()
+    is called with the temp $HOME this test builds."""
 
     def setUp(self):
         self.base = tempfile.TemporaryDirectory()
@@ -1483,11 +1493,11 @@ class TestStatusIntegration(unittest.TestCase):
         _repo.git(self.repo, "init", "-q")
         self.root = os.path.realpath(self.repo)
 
-        # 실제 배포 조각 그대로 심는다(+ 실행 가능한 더미 바이너리) — `codex-cli
-        # hooks` 행이 PASS 여야 아래 exit code 단정이 순수하게 health(`codex
-        # hook`) 행만 증명한다(리뷰 결함: 예전엔 `omhc brief` 한 줄뿐이라 hooks
-        # 행도 함께 FAIL 해서 어느 쪽이 code=1 을 냈는지 이 테스트가 증명하지
-        # 못했다).
+        # Plant the exact shipped fragment (+ an executable dummy binary) —
+        # the `codex-cli hooks` row must PASS so the exit-code assertion
+        # below proves purely the health(`codex hook`) row (review defect:
+        # it used to be just one `omhc brief` line, so the hooks row also
+        # FAILed and this test couldn't prove which side produced code=1).
         _repo.plant_hook_install(self.home, "codex-cli")
         hooks_path = os.path.join(self.home, ".codex", "hooks.json")
         os.utime(hooks_path, (1700000000.0, 1700000000.0))
@@ -1531,9 +1541,10 @@ class TestStatusIntegration(unittest.TestCase):
 
 
 class TestHealthMatchesAcrossNestedGitRoots(unittest.TestCase):
-    """리뷰 결함: 세션은 워크트리 루트 자신의 repo 키로 원장에 기록되지만,
-    status 는 그걸 감싼 상위 레포 키로 조회된다 — 필터가 레포로 걸리면 세션이
-    영원히 "안 돈 것"으로 보인다. 실제 cmd_mark → cmd_status 경로로 재현한다."""
+    """Review defect: a session is recorded in the ledger under its own
+    worktree root's repo key, but status queries under the enclosing parent
+    repo's key — if the filter goes by repo, the session looks like it
+    "never ran" forever. Reproduced via the real cmd_mark -> cmd_status path."""
 
     def setUp(self):
         self.base = tempfile.TemporaryDirectory()
@@ -1545,9 +1556,9 @@ class TestHealthMatchesAcrossNestedGitRoots(unittest.TestCase):
         _repo.git(self.repo, "init", "-q")
         self.root = os.path.realpath(self.repo)
 
-        # 자기 .git 을 가진 중첩 디렉터리 — 실물 워크트리(.claude/worktrees/*)와
-        # 같은 모양: resolve_repo_root 가 여기서 멈추고, 이 경로의 repo 키는
-        # 상위 레포의 것과 다르다.
+        # A nested directory with its own .git — the same shape as a real
+        # worktree (.claude/worktrees/*): resolve_repo_root stops here, and
+        # this path's repo key differs from the parent repo's.
         self.nested = os.path.join(self.root, ".claude", "worktrees", "sub")
         os.makedirs(self.nested)
         _repo.git(self.nested, "init", "-q")
@@ -1587,8 +1598,9 @@ class TestHealthMatchesAcrossNestedGitRoots(unittest.TestCase):
         self.assertEqual(code, 0)
 
     def test_a_nested_worktrees_ledger_row_still_counts_as_ran(self):
-        """mark 는 워크트리 쪽 cwd 로 불려 자기 repo 키(다른 키)로 기록한다;
-        status 는 상위 레포에서 불린다. 필터가 레포로 걸리면 이 행이 사라진다."""
+        """mark is called with the worktree-side cwd and records under its
+        own (different) repo key; status is called from the parent repo. If
+        the filter goes by repo, this row disappears."""
         self._mark()
 
         from omhc import ledger, locate
@@ -1607,8 +1619,8 @@ class TestHealthMatchesAcrossNestedGitRoots(unittest.TestCase):
 
 
 class TestHealthMatchesAcrossOmhcRootMarker(unittest.TestCase):
-    """#12: git 이 아닌 프로젝트(`.omhc-root`)에서도 서브디렉터리에서 시작한
-    세션이 `codex hook` 행에서 "안 돈 것"으로 사라지면 안 된다."""
+    """#12: even in a non-git project (`.omhc-root`), a session started from
+    a subdirectory must not disappear from the `codex hook` row as "never ran"."""
 
     def setUp(self):
         self.base = tempfile.TemporaryDirectory()
@@ -1665,7 +1677,7 @@ class TestHealthMatchesAcrossOmhcRootMarker(unittest.TestCase):
 
 
 class TestFirstTableHeader(unittest.TestCase):
-    """리뷰: 줄 맨 앞의 `[` 가 모두 섹션 머리는 아니다."""
+    """Review: not every `[` at the start of a line is a section header."""
 
     def test_headers_and_non_headers(self):
         F = CX._first_table_header
@@ -1676,7 +1688,7 @@ class TestFirstTableHeader(unittest.TestCase):
         self.assertEqual(F('other = [\n  ["a", "b"],\n]\nk = 1\n'), -1)
         self.assertEqual(F('s = """\n[x]\n"""\n'), -1)
         self.assertEqual(F('# [c]\nk = 1\n'), -1)
-        # basic 여러 줄 문자열 안의 \""" 는 끝이 아니다.
+        # An escaped \""" inside a basic multi-line string is not the end.
         self.assertGreaterEqual(F('a = """x \\""" y"""\n[t]\n'), 0)
 
     def test_a_nested_array_value_is_unparseable(self):
@@ -1700,8 +1712,8 @@ class TestFirstTableHeader(unittest.TestCase):
 
 
 class TestRootMarkerHealth(unittest.TestCase):
-    """#31: `.omhc-root` 로만 정해진 프로젝트(=`.git` 없음)에서 Codex 의
-    `project_root_markers` 설정이 `.omhc-root` 를 포함하는지 진단한다."""
+    """#31: for a project defined only by `.omhc-root` (no `.git`), diagnose
+    whether Codex's `project_root_markers` setting includes `.omhc-root`."""
 
     def _omhc_root_repo(self, base: str) -> str:
         root = os.path.join(base, "proj")
@@ -1729,8 +1741,9 @@ class TestRootMarkerHealth(unittest.TestCase):
             fh.write(text)
 
     def test_missing_config_is_uninformative_not_a_fail(self):
-        """리뷰 #1: Path A(훅 설치)가 정상인 보통 설정에서 이 설정은 아무 효과가
-        없으므로 게이팅하면 안 된다 — PASS 아니면 언제나 `----`."""
+        """Review #1: under a normal setup where Path A (hook install) is
+        fine, this setting has no effect, so it must not gate — always
+        `----` unless PASS."""
         with tempfile.TemporaryDirectory() as base, \
              tempfile.TemporaryDirectory() as home:
             root = self._omhc_root_repo(base)
@@ -1782,8 +1795,9 @@ class TestRootMarkerHealth(unittest.TestCase):
             self.assertIn("cannot judge", detail)
 
     def test_key_inside_a_table_is_not_top_level(self):
-        """리뷰 #2: `[table]` 뒤의 키는 그 테이블에 스코프돼 최상위 키가
-        아니다 — 예를 들어 신뢰 테이블 뒤에 사람이 실수로 이어 붙인 경우."""
+        """Review #2: a key after `[table]` is scoped to that table, not a
+        top-level key — e.g. when a human accidentally appends after the
+        trust table."""
         with tempfile.TemporaryDirectory() as base, \
              tempfile.TemporaryDirectory() as home:
             root = self._omhc_root_repo(base)
@@ -1819,8 +1833,8 @@ class TestRootMarkerHealth(unittest.TestCase):
             self.assertTrue(ok)
 
     def test_unreadable_config_is_distinct_from_missing(self):
-        """디렉터리를 그 자리에 두면 open() 이 IsADirectoryError(OSError) 를
-        낸다 — FileNotFoundError 와 다른 사유로 구분돼야 한다."""
+        """Putting a directory in that spot makes open() raise
+        IsADirectoryError (an OSError) — it must be distinguished from FileNotFoundError."""
         with tempfile.TemporaryDirectory() as base, \
              tempfile.TemporaryDirectory() as home:
             root = self._omhc_root_repo(base)
@@ -1833,9 +1847,9 @@ class TestRootMarkerHealth(unittest.TestCase):
             self.assertNotIn("not found", detail)
 
     def test_an_ancestor_git_repo_makes_the_row_disappear(self):
-        """리뷰 #4: `repo_root` 위에 `.git` 조상이 있으면 Codex 기본값으로도
-        그 조상에서부터 AGENTS.md 를 cwd 까지 읽으므로 마커를 더할 필요가
-        없다."""
+        """Review #4: if there's a `.git` ancestor above `repo_root`, even
+        Codex's default reads AGENTS.md from that ancestor down to cwd, so
+        there's no need to add the marker."""
         with tempfile.TemporaryDirectory() as base, \
              tempfile.TemporaryDirectory() as home:
             _repo.git(base, "init", "-q")
@@ -1867,8 +1881,8 @@ class TestRootMarkerHealth(unittest.TestCase):
             self.assertIn("Path A currently delivers", detail)
 
     def test_status_json_key_set_is_unchanged(self):
-        """새 행은 `health` 리스트 안의 원소일 뿐, status --json 의 최상위 키
-        집합을 늘리지 않는다(#19 의 계약)."""
+        """The new row is just an element inside the `health` list — it must
+        not grow status --json's top-level key set (#19's contract)."""
         with tempfile.TemporaryDirectory() as base, \
              tempfile.TemporaryDirectory() as home:
             root = self._omhc_root_repo(base)
@@ -1890,9 +1904,10 @@ class TestRootMarkerHealth(unittest.TestCase):
 
 
 class TestAgentsMdBudget(unittest.TestCase):
-    """#33: Codex 는 AGENTS.md 를 `project_doc_max_bytes` 만큼만 머리부터
-    읽는다 — 예산을 넘겨 설치하려는 Path B 는 claim 하지 말고 outbox 로
-    떨어뜨려야 하고, status 는 이미 넘겨 설치된 구간을 알려야 한다."""
+    """#33: Codex only reads AGENTS.md from the head, up to
+    `project_doc_max_bytes` — a Path B install that would exceed the budget
+    must not claim, and must fall to the outbox instead, while status must
+    report a section that's already installed past budget."""
 
     def _write_config(self, home: str, text: str) -> None:
         os.makedirs(os.path.join(home, ".codex"), exist_ok=True)
@@ -1942,8 +1957,9 @@ class TestAgentsMdBudget(unittest.TestCase):
                 self.assertIn("project_doc_max_bytes", fh.read())
 
     def test_deliver_falls_all_the_way_to_the_outbox_when_over_budget(self):
-        """라우터(deliver)까지 통째로 — install_handoff 도 없고(훅 미설치) Path
-        B 도 예산 초과로 거절되면 보편 바닥(outbox)에 떨어져야 한다."""
+        """All the way through the router (deliver) — with no
+        install_handoff (hook not installed) and Path B also refused for
+        exceeding budget, it must fall to the universal floor (outbox)."""
         from omhc import deliver
 
         with tempfile.TemporaryDirectory() as base, \
@@ -1971,9 +1987,10 @@ class TestAgentsMdBudget(unittest.TestCase):
         return next((r for r in rows if r[0] == "codex agents.md budget"), None)
 
     def test_status_row_is_uninformative_without_an_installed_block(self):
-        """AGENTS.md 의 status 관례: 판정 가능한 진단은 판정할 것이 없어도
-        `----` 로 행을 낸다(SKIP 이 아니다) — 아예 무의미한 레포(공유됨)만
-        행을 생략한다(아래 test_status_row_is_absent_when_shared_with_claude)."""
+        """AGENTS.md's status convention: a judgeable diagnosis emits a
+        `----` row even with nothing to judge (not SKIP) — only a repo where
+        the row is entirely meaningless (shared) omits the row (see
+        test_status_row_is_absent_when_shared_with_claude below)."""
         with tempfile.TemporaryDirectory() as base, \
              tempfile.TemporaryDirectory() as home:
             root = self._repo(base)
@@ -2025,8 +2042,9 @@ class TestAgentsMdBudget(unittest.TestCase):
             self.assertTrue(ok)
 
     def test_declining_over_budget_also_clears_a_stale_installed_block(self):
-        """리뷰 결함: 예산 초과로 거절만 하고 낡은 구간을 그대로 두면, Codex 는
-        outbox 로 떨어진 새 핸드오프 대신 그 낡은 구간을 계속 읽는다."""
+        """Review defect: if it only refuses for exceeding budget and leaves
+        the stale section in place, Codex keeps reading that stale section
+        instead of the new handoff that fell to the outbox."""
         from omhc import agents_md, managed_block
 
         with tempfile.TemporaryDirectory() as base, \
@@ -2068,8 +2086,9 @@ class TestAgentsMdBudget(unittest.TestCase):
             with self.assertRaises(A.NoInjectionChannel):
                 adapter._install_agents_md(bundle)
 
-            # 예산 초과 거절이 shared_with_claude 가드를 우회해 공유 파일을
-            # 건드리면 안 된다 — 낡은 구간이 그대로 남아 있어야 한다.
+            # A budget-exceeded refusal must not bypass the
+            # shared_with_claude guard and touch the shared file — the stale
+            # section must stay untouched.
             self.assertIsNotNone(managed_block.installed_captured_at(agents))
 
     def test_zero_limit_is_read_as_is_not_folded_to_default(self):
@@ -2114,9 +2133,9 @@ class TestAgentsMdBudget(unittest.TestCase):
 
 
 class TestHealthLedgerWindow(unittest.TestCase):
-    """리뷰 결함: ledger.read 의 기본 limit(2000, 머신 전체 공유)이 다른 레포의
-    행으로 채워지면 이 레포/세션의 행이 창 밖으로 밀려날 수 있다. health 에
-    넘기는 원장은 무제한으로 읽어야 한다."""
+    """Review defect: if ledger.read's default limit (2000, shared
+    machine-wide) fills up with another repo's rows, this repo/session's row
+    can get pushed out of the window. The ledger passed into health must be read unbounded."""
 
     def test_more_than_2000_rows_from_another_repo_do_not_hide_a_match(self):
         with tempfile.TemporaryDirectory() as home:
@@ -2159,8 +2178,9 @@ class TestHealthLedgerWindow(unittest.TestCase):
 
 class TestExecOutcomeHeaderOnly(unittest.TestCase):
     def test_exit_line_in_the_body_does_not_override_a_running_header(self):
-        # 본문(Output: 뒤)은 프로그램 출력이다. 거기 찍힌 "Exit code: 0" 이
-        # "running" 헤더를 이기면 write_stdin 의 실패가 원래 이벤트에 닿지 않는다.
+        # The body (after Output:) is program output. If the "Exit code: 0"
+        # printed there overrides the "running" header, write_stdin's
+        # failure never reaches the original event.
         out = CX._parse_exec_outcome(
             "Chunk ID: x\nWall time: 10 seconds\nProcess running with session ID 7\n"
             "Original token count: 5\nOutput:\n[step] Exit code: 0\nExit code: 0\n")
@@ -2169,10 +2189,11 @@ class TestExecOutcomeHeaderOnly(unittest.TestCase):
 
 
 class TestSubagentRolloutWithTwoMetaLines(unittest.TestCase):
-    """실측(0.155.1 sandbox): 서브에이전트 rollout 은 session_meta 가 두 줄이다 —
-    첫 줄이 자기 것(source.subagent·thread_source·parent_thread_id), 둘째 줄이
-    부모의 것 — 그리고 부모의 사람 프롬프트를 user.text 로 다시 담는다. 첫 줄의
-    서브에이전트 표식만이 그 프롬프트가 GOAL 로 세탁되는 것을 막는다."""
+    """Measured (0.155.1 sandbox): a subagent rollout has two session_meta
+    lines — the first is its own (source.subagent / thread_source /
+    parent_thread_id), the second is the parent's — and it re-carries the
+    parent's human prompt as user.text. Only the subagent marker on the
+    first line stops that prompt from being laundered into GOAL."""
 
     def test_the_first_meta_line_decides_and_it_is_never_a_source(self):
         with tempfile.TemporaryDirectory() as home:
@@ -2191,7 +2212,7 @@ class TestSubagentRolloutWithTwoMetaLines(unittest.TestCase):
                     "originator": "codex-tui"}},
                 {"type": "response_item", "payload": {
                     "type": "message", "role": "user",
-                    "content": [{"type": "input_text", "text": "PARENT_GOAL 이거 고쳐줘"}],
+                    "content": [{"type": "input_text", "text": "PARENT_GOAL 이거 고쳐줘"}],  # "fix this"
                     "internal_chat_message_metadata_passthrough": {
                         "content_item_kinds": ["user.text"]}}},
             ]
@@ -2205,17 +2226,18 @@ class TestSubagentRolloutWithTwoMetaLines(unittest.TestCase):
 
 
 class TestReadSessionSince(unittest.TestCase):
-    """#22: `codex exec resume` 은 같은 파일에 이어 쓰고 session_meta 를 다시
-    안 쓴다 — offset 부터만 읽는 이 경로가 훅 예산에서 그 재개를 잡는 유일한
-    길이다(전체 read_session 은 13.8MB 에서 593ms 실측)."""
+    """#22: `codex exec resume` appends to the same file and never writes
+    session_meta again — this path that reads only from an offset onward is
+    the only way to catch that resume within the hook budget (a full
+    read_session measured at 593ms on 13.8MB)."""
 
     def _rollout(self):
         rows = [
             {"type": "session_meta", "payload": {"session_id": "cx1", "cwd": REPO,
                                                   "timestamp": "2026-09-22T16:30:00Z"}},
-            msg("user", "첫 턴"),
-            msg("assistant", "첫 응답"),
-            msg("user", "두 번째 턴"),
+            msg("user", "첫 턴"),  # "first turn"
+            msg("assistant", "첫 응답"),  # "first response"
+            msg("user", "두 번째 턴"),  # "second turn"
         ]
         return write_rollout(rows)
 
@@ -2226,11 +2248,12 @@ class TestReadSessionSince(unittest.TestCase):
             ref = ref_for(path)
             full = adapter.read_session(ref)
             self.assertGreaterEqual(len(full.events), 3)
-            mid = full.events[1]  # 첫 응답
+            mid = full.events[1]  # first response
             since = adapter.read_session_since(ref, mid.offset)
             self.assertIsNotNone(since)
-            # seq 는 이 부분 읽기가 처음부터 다시 매긴다(색인은 이 경로를
-            # 쓰지 않으므로 구현 자유) — 나머지 필드만 비교한다.
+            # seq is renumbered from scratch by this partial read (the index
+            # never uses this path, so it's the implementation's own choice)
+            # — compare only the remaining fields.
             expected = tuple(e._replace(seq=0) for e in full.events
                              if e.offset >= mid.offset)
             got = tuple(e._replace(seq=0) for e in since.events)
@@ -2241,14 +2264,14 @@ class TestReadSessionSince(unittest.TestCase):
             os.unlink(path)
 
     def test_mid_line_offset_skips_the_truncated_record(self):
-        """줄 중간에서 시작하면 그 레코드는 버리고 다음 개행부터 읽는다."""
+        """Starting mid-line discards that record and reads from the next newline onward."""
         path = self._rollout()
         try:
             adapter = CX.CodexCliAdapter()
             ref = ref_for(path)
             full = adapter.read_session(ref)
             second_user = next(e for e in full.events if e.text == "두 번째 턴")
-            # 그 레코드 줄 중간(오프셋+5)에서 시작한다 — 그 레코드는 나오면 안 된다.
+            # Starts in the middle of that record's line (offset+5) — that record must not appear.
             since = adapter.read_session_since(ref, second_user.offset + 5)
             self.assertIsNotNone(since)
             self.assertNotIn("두 번째 턴", [e.text for e in since.events])
@@ -2299,14 +2322,14 @@ class TestReadSessionSince(unittest.TestCase):
             os.unlink(path)
 
     def test_stop_at_human_turn_returns_immediately_after_the_first_match(self):
-        """리뷰 #3: 존재 여부만 필요한 호출자는 첫 사람 턴에서 멈춰야 한다 —
-        그 뒤에 남은 레코드는 읽지 않는다."""
+        """Review #3: a caller who only needs existence must stop at the
+        first human turn — records after that must not be read."""
         rows = [
             {"type": "session_meta", "payload": {"session_id": "cx1", "cwd": REPO,
                                                   "timestamp": "2026-09-22T16:30:00Z"}},
-            msg("user", "첫 사람 턴"),
-            msg("assistant", "그 뒤에 오는 응답 — 안 읽혀야 한다"),
-            msg("user", "그 뒤에 오는 두 번째 사람 턴 — 안 읽혀야 한다"),
+            msg("user", "첫 사람 턴"),  # "first human turn"
+            msg("assistant", "그 뒤에 오는 응답 — 안 읽혀야 한다"),  # "response that follows — must not be read"
+            msg("user", "그 뒤에 오는 두 번째 사람 턴 — 안 읽혀야 한다"),  # "second human turn that follows — must not be read"
         ]
         path = write_rollout(rows)
         try:
@@ -2323,31 +2346,31 @@ class TestReadSessionSince(unittest.TestCase):
         rows = [
             {"type": "session_meta", "payload": {"session_id": "cx1", "cwd": REPO,
                                                   "timestamp": "2026-09-22T16:30:00Z"}},
-            msg("assistant", "에이전트 혼잣말"),
+            msg("assistant", "에이전트 혼잣말"),  # "agent soliloquy"
         ]
         path = write_rollout(rows)
         try:
             adapter = CX.CodexCliAdapter()
             ref = ref_for(path)
             since = adapter.read_session_since(ref, 0, stop_at_human_turn=True)
-            # 에이전트 혼잣말은 사람 턴이 아니므로 멈추지 않는다 — 끝까지
-            # 읽되(agent 의 said 이벤트는 여전히 나온다), 사람 턴은 없다.
+            # Agent soliloquy is not a human turn, so it doesn't stop — reads
+            # to the end (the agent's said event still comes out), but there's no human turn.
             self.assertFalse(any(e.author == "human" for e in since.events))
             self.assertEqual(since.end_offset, os.path.getsize(path))
         finally:
             os.unlink(path)
 
     def test_max_bytes_caps_the_tail_read_and_end_offset_stays_line_aligned(self):
-        """리뷰 #3: 꼬리 크기에 비례해 비용이 늘던 것을 캡으로 막는다 — 캡을
-        넘는 레코드는 아예 안 읽고, end_offset 은 캡 안의 마지막 완전한 줄
-        끝에 멈춘다(레코드 중간이 아니다)."""
+        """Review #3: a cap stops cost growing proportional to tail size — a
+        record beyond the cap is never read at all, and end_offset stops at
+        the end of the last complete line inside the cap (never mid-record)."""
         rows = [
             {"type": "session_meta", "payload": {"session_id": "cx1", "cwd": REPO,
                                                   "timestamp": "2026-09-22T16:30:00Z"}},
         ]
         for i in range(50):
-            rows.append(msg("assistant", "패딩 " * 50))
-        rows.append(msg("user", "캡 밖의 사람 턴"))
+            rows.append(msg("assistant", "패딩 " * 50))  # "padding"
+        rows.append(msg("user", "캡 밖의 사람 턴"))  # "human turn outside the cap"
         path = write_rollout(rows)
         try:
             adapter = CX.CodexCliAdapter()
@@ -2356,7 +2379,7 @@ class TestReadSessionSince(unittest.TestCase):
             since = adapter.read_session_since(ref, 0, max_bytes=200)
             self.assertLess(since.end_offset, full_size)
             self.assertNotIn("캡 밖의 사람 턴", [e.text for e in since.events])
-            # end_offset 직전 바이트는 개행이다(줄 경계 — 레코드 중간이 아니다).
+            # The byte right before end_offset is a newline (a line boundary — never mid-record).
             with open(path, "rb") as fh:
                 content = fh.read()
             self.assertTrue(since.end_offset == 0
@@ -2365,27 +2388,29 @@ class TestReadSessionSince(unittest.TestCase):
             os.unlink(path)
 
     def test_stop_at_human_turn_ignores_a_complete_but_unterminated_human_line(self):
-        """리뷰(3차) #2: 개행이 아직 안 붙은(쓰는 도중일 수 있는) 완전한 JSON
-        사람 턴은 stop_at_human_turn 의 트리거로도, 이벤트로도 세지 않는다 —
-        세면 개행이 마저 붙은 뒤 다음 라운드가 baseline 을 그 줄 앞에 둔 채로
-        같은 턴을 또 찾아 두 번 재전달한다. stop_at_human_turn 이 아닌 호출
-        (read_session 포함)은 이 분기를 안 타므로 영향이 없다."""
+        """Review (round 3) #2: a complete JSON human turn with no trailing
+        newline yet (possibly mid-write) doesn't count either as a
+        stop_at_human_turn trigger or as an event — counting it would mean
+        that once the newline finally lands, the next round finds the same
+        turn again with the baseline still before that line, and redelivers
+        it twice. Calls that aren't stop_at_human_turn (including
+        read_session) don't take this branch, so they're unaffected."""
         rows = [
             {"type": "session_meta", "payload": {"session_id": "cx1", "cwd": REPO,
                                                   "timestamp": "2026-09-22T16:30:00Z"}},
         ]
         path = write_rollout(rows)
         try:
-            boundary = os.path.getsize(path)  # session_meta 줄 끝(개행 포함)
+            boundary = os.path.getsize(path)  # end of the session_meta line (newline included)
 
             human_row = {"timestamp": "2026-09-22T16:30:01Z", "ordinal": 1,
                         "type": "response_item",
                         "payload": {"type": "message", "role": "user", "id": "u1",
                                     "content": [{"type": "input_text",
-                                                "text": "완전하지만 개행 없는 턴"}]}}
+                                                "text": "완전하지만 개행 없는 턴"}]}}  # "complete but newline-less turn"
             line = json.dumps(human_row, ensure_ascii=False).encode("utf-8")
             with open(path, "ab") as fh:
-                fh.write(line)  # 개행 없이 — 쓰는 도중을 흉내
+                fh.write(line)  # no newline — mimics being mid-write
 
             adapter = CX.CodexCliAdapter()
             ref = ref_for(path)
@@ -2393,13 +2418,13 @@ class TestReadSessionSince(unittest.TestCase):
             self.assertEqual(since.events, ())
             self.assertEqual(since.end_offset, boundary)
 
-            # 영향 없음 — stop_at_human_turn 이 아닌 전체 읽기는 그대로 본다.
+            # Unaffected — a full read that isn't stop_at_human_turn still sees it.
             full = adapter.read_session(ref)
             self.assertEqual(len(full.events), 1)
             self.assertEqual(full.events[0].text, "완전하지만 개행 없는 턴")
 
             with open(path, "ab") as fh:
-                fh.write(b"\n")  # 개행이 마저 붙는다
+                fh.write(b"\n")  # the newline finally lands
             since2 = adapter.read_session_since(ref, 0, stop_at_human_turn=True)
             self.assertEqual(len(since2.events), 1)
             self.assertEqual(since2.end_offset, os.path.getsize(path))

@@ -23,7 +23,7 @@ def raw_bytes() -> bytes:
 
 
 def attachment_text(kind: str, field: str) -> str:
-    """픽스처에서 기계장치 본문을 꺼낸다. 테스트가 진짜 적대적 입력을 쓰게 한다."""
+    """Pull a machinery body out of a fixture. Lets the test use genuinely adversarial input."""
     with open(CLAUDE_LIVE, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             try:
@@ -40,7 +40,7 @@ def attachment_text(kind: str, field: str) -> str:
                 return value
             if isinstance(value, list):
                 return "\n".join(str(v) for v in value)
-    raise AssertionError("픽스처에서 {}.{} 를 찾지 못했다".format(kind, field))
+    raise AssertionError("could not find {}.{} in fixture".format(kind, field))
 
 
 def codex_developer_text() -> str:
@@ -60,14 +60,15 @@ def codex_developer_text() -> str:
                 for b in payload.get("content") or []
                 if isinstance(b, dict)
             )
-    raise AssertionError("Codex developer 레코드를 찾지 못했다")
+    raise AssertionError("could not find a Codex developer record")
 
 
 class TestDenylistHygiene(unittest.TestCase):
     def test_no_marker_contains_a_backslash(self):
-        """백슬래시가 섞인 리터럴은 실물과 0회 매칭한다 — 조용히 무효인 차단목록."""
+        """A literal with a stray backslash matches real bytes zero times — a
+        denylist entry that's silently dead."""
         for marker in guard.FOREIGN_MARKERS:
-            self.assertNotIn("\\", marker, "마커에 백슬래시가 있으면 실물과 매칭되지 않는다")
+            self.assertNotIn("\\", marker, "a marker with a backslash never matches real bytes")
 
     def test_markers_are_lowercase_ascii_tags(self):
         for marker in guard.FOREIGN_MARKERS:
@@ -76,20 +77,21 @@ class TestDenylistHygiene(unittest.TestCase):
 
     @unittest.skipUnless(have_fixtures, MISSING)
     def test_every_marker_is_witnessed_in_real_bytes(self):
-        """항목마다 개별 검사한다. 하나만 매칭돼도 통과하는 묶음 단정이면 버그를 놓친다."""
+        """Checks each entry individually. A batch assertion that passes on a
+        single match would let a bug slip through."""
         blob = raw_bytes()
         for marker in guard.FOREIGN_MARKERS:
             with self.subTest(marker=marker):
                 if marker in guard.UNWITNESSED_OK:
                     self.assertTrue(
                         guard.UNWITNESSED_OK[marker],
-                        "UNWITNESSED_OK 항목에는 이유가 있어야 한다",
+                        "an UNWITNESSED_OK entry needs a reason",
                     )
                     continue
                 self.assertIn(
                     marker.encode("utf-8"),
                     blob,
-                    "픽스처에서 목격되지 않은 마커. 실물 근거가 없으면 UNWITNESSED_OK 에 이유와 함께 등재하라",
+                    "marker not witnessed in the fixture. If there is no evidence in the wild, list it in UNWITNESSED_OK with a reason",
                 )
 
 
@@ -113,24 +115,26 @@ class TestEnvelope(unittest.TestCase):
         self.assertFalse(guard.is_envelope(""))
 
     def test_envelope_detection_is_structural_not_a_tag_list(self):
-        """처음 보는 태그도 자동으로 걸려야 한다."""
+        """A never-before-seen tag must be caught automatically too."""
         self.assertTrue(guard.is_envelope("<never_seen_before_2099>x</never_seen_before_2099>"))
 
 
 class TestSafeScopedByProvenance(unittest.TestCase):
     def test_human_text_is_kept_even_with_a_foreign_tool_name(self):
-        """사용자 결정 (a): 사람이 쓴 문장은 외래 툴 이름을 포함해도 유지한다.
+        """User decision (a): a human-written sentence is kept even if it
+        contains a foreign tool name.
 
-        F2/F3 의 위험은 하네스의 명령형 지시를 중계하는 것이고, 사람의 문장은
-        그 사람의 권위다. 그리고 키워드 금지는 거짓 양성을 낸다 — 이 대화의
-        산문에 <system-reminder> 가 146회 등장한다.
+        F2/F3's risk is relaying the harness's imperative instructions, and a
+        human's sentence carries that human's authority. And banning keywords
+        produces false positives — <system-reminder> appears 146 times in this
+        conversation's prose.
         """
         text = "read_codex.py의 function_call_output 파싱이 빈 문자열 반환"
         self.assertTrue(guard.safe(text, "human"))
         self.assertTrue(guard.safe("Bash 로 pytest 돌려줘", "human"))
 
     def test_human_envelope_is_still_dropped(self):
-        """봉투는 사람이 타이핑한 것이 아니라 하네스가 만든 레코드다."""
+        """An envelope is a record the harness built, not something a human typed."""
         self.assertFalse(guard.safe("<command-name>/model</command-name>", "human"))
 
     def test_agent_text_with_a_marker_is_dropped(self):
@@ -140,7 +144,8 @@ class TestSafeScopedByProvenance(unittest.TestCase):
         self.assertFalse(guard.safe("무해해 보이는 문장", "harness"))
 
     def test_synthetic_interrupted_for_tool_use_is_dropped(self):
-        """실물 세션에서 목격된 문자열이다 — 구조적 마커 없이 정확한 텍스트로만 식별된다."""
+        """A string observed in a real session — identified only by exact text,
+        with no structural marker."""
         self.assertFalse(
             guard.safe("[Request interrupted by user for tool use]", "human")
         )
@@ -156,16 +161,17 @@ class TestSafeScopedByProvenance(unittest.TestCase):
 
     @unittest.skipUnless(have_fixtures, MISSING)
     def test_marker_detection_alone_would_have_missed_the_biggest_machinery_blob(self):
-        """실물로 확인된 사실을 회귀 테스트로 고정한다.
+        """Pins a fact confirmed in the wild as a regression test.
 
-        skill_listing 본문 29,958자에는 FOREIGN_MARKERS 중 어느 것도 없다 — 태그가
-        없는 평범한 불릿 목록이다. 그래서 마커 기반 탐지만으로는 통과시킨다.
-        길이 상한이 필요한 이유가 취향이 아니라 측정이라는 근거.
+        The skill_listing body's 29,958 chars contain none of FOREIGN_MARKERS —
+        it's a plain bulleted list with no tags. So marker-based detection alone
+        would let it through. Evidence that a length cap is needed as a measured
+        fact, not a matter of taste.
         """
         body = attachment_text("skill_listing", "content")
         self.assertFalse(
             any(marker in body for marker in guard.FOREIGN_MARKERS),
-            "이 단정이 깨지면 길이 상한 대신 마커로도 잡힌다는 뜻이니 주석을 갱신하라",
+            "if this assertion breaks, markers now catch it too instead of the length cap, so update the comment",
         )
         self.assertGreater(len(body), guard.MAX_DERIVED_CHARS)
 
@@ -182,9 +188,10 @@ class TestSafeScopedByProvenance(unittest.TestCase):
 
 
 class TestHandoffEcho(unittest.TestCase):
-    """#24: 받는 에이전트가 주입된 [omhc] 블록을 인용하면 반대 방향 핸드오프의
-    PLAN? 에 그 블록이 통째로 중첩된다. 진짜 mint() 산출물로 재현한다 — 헤더
-    문구를 손으로 베껴 쓰면 mint 가 실제로 내는 것과 어긋날 수 있다.
+    """#24: if the receiving agent quotes the injected [omhc] block, the
+    reverse-direction handoff's PLAN? nests that whole block. Reproduced with
+    real mint() output — hand-copying the header wording could drift from what
+    mint actually emits.
     """
 
     def _real_handoff_block(self) -> str:
@@ -202,7 +209,7 @@ class TestHandoffEcho(unittest.TestCase):
         ]
         read = A.SessionRead(ref=ref, events=tuple(events), unparsed=0, dropped={})
         out = mint.mint(read, to_adapter_id="codex-cli", budget=900, now=1700000900.0)
-        self.assertTrue(out, "테스트가 재현하려면 mint() 가 실제로 뭔가를 내야 한다")
+        self.assertTrue(out, "for this test to reproduce anything, mint() must actually emit something")
         return out
 
     def test_agent_utterance_quoting_a_real_minted_block_is_dropped(self):
@@ -214,7 +221,7 @@ class TestHandoffEcho(unittest.TestCase):
         self.assertTrue(guard.safe("the [omhc] tool을 써서 컨텍스트를 넘겼다", "agent"))
 
     def test_human_pasting_the_block_is_still_human(self):
-        """사람이 블록을 그대로 붙여 넣어도 사람의 발화라는 사실은 바뀌지 않는다."""
+        """Even if a human pastes the block verbatim, it's still a human utterance."""
         block = self._real_handoff_block()
         self.assertTrue(guard.safe(block, "human"))
 

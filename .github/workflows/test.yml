@@ -1,15 +1,15 @@
-# 지원 하한(3.9)부터 최신까지 전부 돌린다. 개발 머신마다 python3 가 달라서 로컬
-# 한 버전의 그린으로는 "3.9 이상 모든 3.x" 를 보장하지 못한다.
+# Runs every version from the supported minimum (3.9) to the latest. Dev machines have
+# different python3s, so one green local version can't guarantee "every 3.x from 3.9".
 #
-# 픽스처(실제 대화)는 커밋되지 않으므로 그에 의존하는 테스트는 여기서 건너뛴다.
-# 그 몫은 각자 머신에서 harvest.py 후 돌리는 로컬 스위트다.
+# Fixtures (real conversations) are never committed, so tests that need them skip here;
+# they are covered by the local suite after running harvest.py on your own machine.
 name: test
 
 on:
   push:
   pull_request:
 
-# 테스트는 체크아웃만 한다 — GITHUB_TOKEN 에 읽기 외 권한을 주지 않는다
+# Tests only check out the code — the GITHUB_TOKEN gets nothing beyond read
 # (CodeQL actions/missing-workflow-permissions).
 permissions:
   contents: read
@@ -22,7 +22,7 @@ jobs:
         os: [ubuntu-latest]
         python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
         include:
-          # 하드링크·inode·경로 슬러그가 OS 에 따라 다르다. 양 끝 버전만 맥에서 본다.
+          # Hardlinks, inodes and path slugs differ by OS; macOS runs only the two end versions.
           - os: macos-latest
             python: "3.9"
           - os: macos-latest

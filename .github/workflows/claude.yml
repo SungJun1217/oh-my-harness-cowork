@@ -1,14 +1,15 @@
-# 이슈·PR 에서 @claude 로 멘션했을 때만 Claude Code 를 돌린다. 자동 리뷰는 없다.
+# Runs Claude Code only when someone mentions @claude in an issue or PR. No automatic review.
 #
-# 공개 레포라 누구나 댓글을 달 수 있으므로, 멘션한 사람이 OWNER/MEMBER/
-# COLLABORATOR 일 때만 돈다(외부인의 멘션으로 토큰을 쓰지 않게).
+# The repo is public, so anyone can comment; it only runs when the mentioner is an
+# OWNER/MEMBER/COLLABORATOR (so outsiders' mentions don't spend tokens).
 #
-# 인증은 CLAUDE_CODE_OAUTH_TOKEN 시크릿(claude setup-token 으로 발급). 레포의
-# 기본 GITHUB_TOKEN 은 읽기 전용이다 — 댓글·브랜치·PR 쓰기는 id-token 으로 받는
-# Claude GitHub App 토큰이 한다. 그래서 아래 permissions 는 읽기 + id-token 뿐이다.
+# Auth is the CLAUDE_CODE_OAUTH_TOKEN secret (issued by `claude setup-token`). The
+# repo's default GITHUB_TOKEN is read-only — comments, branches and PRs are written
+# with the Claude GitHub App token obtained via id-token, so the permissions below
+# are read + id-token only.
 #
-# issue_comment/issues 이벤트는 기본 브랜치(main)의 워크플로만 돈다. develop 에
-# 있어서는 동작하지 않고, main 으로 릴리스된 뒤부터 동작한다.
+# issue_comment/issues events only run workflows from the default branch (main), so
+# a change here takes effect once it is released to main, not while it sits on develop.
 name: claude
 
 on:
@@ -46,8 +47,8 @@ jobs:
       contents: read
       pull-requests: read
       issues: read
-      actions: read   # PR 에서 CI 결과를 읽게
-      id-token: write # Claude GitHub App 토큰 교환
+      actions: read   # lets it read CI results on PRs
+      id-token: write # exchange for the Claude GitHub App token
     steps:
       - uses: actions/checkout@v7
         with:
