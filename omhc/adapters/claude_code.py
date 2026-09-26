@@ -17,6 +17,7 @@ from ..adapter import (
     InstallReceipt,
     SessionRead,
     SessionRef,
+    SessionSince,
 )
 from ..event import ARG_LIMIT, Event
 from . import _register, allow_headless, install_state_artifact, iso_epoch
@@ -369,26 +370,117 @@ class ClaudeCodeAdapter:
         return refs
 
     def read_session(self, ref: SessionRef) -> SessionRead:
+        events, unparsed, dropped, _end_offset = self._read(ref.source_path, 0)
+        return SessionRead(ref=ref, events=tuple(events), unparsed=unparsed,
+                           dropped=dropped)
+
+    def read_session_since(self, ref: SessionRef, offset: int, *,
+                           max_bytes: Optional[int] = None,
+                           stop_at_human_turn: bool = False) -> Optional[SessionSince]:
+        """Only reads past byte `offset` — same contract as
+        codex_cli.CodexCliAdapter.read_session_since (#42, v2 phase 2
+        prerequisite: a `UserPromptSubmit` check that stats the file every
+        turn can't afford a full read_session, measured 112ms on a 24MB
+        transcript). Since `_read` snaps to a line boundary, `offset` need
+        not be a record boundary.
+
+        `max_bytes`/`stop_at_human_turn` are used only by
+        `cli._reactivate_grown_sessions` — defaults match today's (unlimited)
+        behavior, so `read_session_since(ref, 0)` returns exactly the same
+        events as `read_session(ref)` (proven in code below, and pinned by
+        the conformance suite)."""
+        try:
+            start = max(0, int(offset))
+        except (TypeError, ValueError):
+            start = 0
+        events, unparsed, dropped, end_offset = self._read(
+            ref.source_path, start, max_bytes=max_bytes,
+            stop_at_human_turn=stop_at_human_turn)
+        # _read already snaps to a line boundary and only produces records
+        # from start onward, but filter once more anyway — proves the
+        # contract in code too (must equal read_session restricted to offset>=start).
+        events = tuple(e for e in events if e.offset >= start)
+        return SessionSince(events=events, unparsed=unparsed, dropped=dropped,
+                            end_offset=end_offset)
+
+    def _read(self, path: str, start: int, *, max_bytes: Optional[int] = None,
+             stop_at_human_turn: bool = False):
+        """The parser shared by read_session/read_session_since (never
+        duplicate the whitelist/guard/fork logic, invariant 4). Reads from
+        `start` onward — 0 means from the top. If `start` lands mid-record
+        (the previous byte isn't a newline), skips the rest of that line and
+        starts at the next newline — same reasoning as
+        codex_cli.CodexCliAdapter._read. Never raises — degrades to empty
+        events if the file is missing or corrupt.
+
+        The fourth return slot is `end_offset` — the byte offset right after
+        the **last fully read line** (a final line with no trailing newline
+        is still parsed, same events/unparsed as read_session, but not
+        counted in end_offset — once that record finishes being written, the
+        next read must still see the whole line). `max_bytes` bounds how
+        much of the tail is read; lines past the cap aren't read at all.
+        `stop_at_human_turn` stops as soon as a human `said` event is
+        produced — a complete-but-unterminated human line doesn't count as a
+        match either (same reasoning as codex_cli: counting it would let the
+        next call, once the newline lands, find the same line again and hand
+        it off twice).
+
+        A `forkedFrom`-tagged record (#34: a `/branch`/`--fork-session`/
+        `/fork` copy of the parent's chain) is a copy of content that was
+        already there before this tail started, never new work — while
+        `read_session`'s full pass legitimately uses it as inherited GOAL
+        context (see docs/limits.md, "A Claude Code fork needs a turn of its
+        own"), `stop_at_human_turn` is only ever used to answer "did NEW
+        content appear since this offset" (cli._reactivate_grown_sessions),
+        so it must never let a copied record count as that new turn — the
+        one race this guards is the baseline being captured mid-copy (the
+        common case never sees this, since the very first observation
+        snapshots the whole copied section as its baseline before any growth
+        check ever reads past it, see cli.py's `_reactivate_grown_sessions`).
+        Gated on `stop_at_human_turn` only, so plain reads (including
+        read_session and read_session_since(ref, 0)) are unaffected — parity
+        with read_session holds.
+        """
         events: List[Event] = []
         dropped: Dict[str, int] = {}
         unparsed = 0
         pending: Dict[str, int] = {}  # tool_use_id → index into events
         seq = 0
-        offset = 0
+        offset = start
 
         def bump(key: str) -> None:
             dropped[key] = dropped.get(key, 0) + 1
 
         try:
-            fh = open(ref.source_path, "rb")
+            fh = open(path, "rb")
         except OSError as exc:
-            return SessionRead(ref=ref, events=(), unparsed=0,
-                               dropped={"open_failed": 1, str(exc.errno): 1})
+            return events, 0, {"open_failed": 1, str(exc.errno): 1}, start
 
         with fh:
+            if start > 0:
+                try:
+                    fh.seek(start - 1)
+                    prev = fh.read(1)
+                    if prev != b"\n":
+                        # start lands mid-record — discard the rest of that line.
+                        skipped = fh.readline()
+                        offset = start + len(skipped)
+                except OSError:
+                    return events, 0, {"seek_failed": 1}, start
+            since_start = offset
+            end_offset = offset
             for raw in fh:
-                start = offset
+                if max_bytes is not None and (offset - since_start) >= max_bytes:
+                    # Lines past the cap aren't read at all — offset is
+                    # already parked at the end of the last complete line
+                    # before it, so end_offset is naturally on a line boundary.
+                    bump("max_bytes_cap")
+                    break
+                line_start = offset
                 offset += len(raw)
+                if raw.endswith(b"\n"):
+                    # Only a line ending in a newline was "safely fully read" — see docstring above.
+                    end_offset = offset
                 try:
                     row = json.loads(raw.decode("utf-8", "replace"))
                 except ValueError:
@@ -456,12 +548,20 @@ class ClaudeCodeAdapter:
                     if not guard.safe(text, "human"):
                         bump("guarded_human")
                         continue
+                    if stop_at_human_turn and row.get("forkedFrom"):
+                        # See docstring above — a copied record is never new growth.
+                        bump("forked_copy")
+                        continue
+                    if stop_at_human_turn and not raw.endswith(b"\n"):
+                        continue
                     text = guard.redact_b64(_one_line_limit(text))
                     seq += 1
                     events.append(Event(
                         seq=seq, epoch=epoch, author="human", verb="said", ok=True,
-                        text=text, arg="", paths=(), offset=start, length=len(raw),
+                        text=text, arg="", paths=(), offset=line_start, length=len(raw),
                     ))
+                    if stop_at_human_turn:
+                        return events, unparsed, dropped, end_offset
                     continue
 
                 # assistant
@@ -486,7 +586,7 @@ class ClaudeCodeAdapter:
                         events.append(Event(
                             seq=seq, epoch=epoch, author="agent", verb="said",
                             ok=True, text=text, arg="", paths=(),
-                            offset=start, length=len(raw),
+                            offset=line_start, length=len(raw),
                         ))
                         continue
                     if btype == "tool_use":
@@ -501,7 +601,7 @@ class ClaudeCodeAdapter:
                         events.append(Event(
                             seq=seq, epoch=epoch, author="agent", verb=verb, ok=True,
                             text="", arg=arg, paths=_paths_of(tool_input),
-                            offset=start, length=len(raw),
+                            offset=line_start, length=len(raw),
                         ))
                         tool_id = block.get("id")
                         if isinstance(tool_id, str):
@@ -509,21 +609,7 @@ class ClaudeCodeAdapter:
                         continue
                     bump("block:" + str(btype))
 
-        return SessionRead(ref=ref, events=tuple(events), unparsed=unparsed,
-                           dropped=dropped)
-
-    def read_session_since(self, ref: SessionRef, offset: int, *,
-                           max_bytes: Optional[int] = None,
-                           stop_at_human_turn: bool = False):
-        """Unimplemented (optional method, same pattern as discover/health) —
-        Claude-side live-continue (a new turn appended to the same Claude
-        session after a handoff) isn't detected yet (#22, a remaining
-        limitation noted in the README). The default None means "this
-        adapter can't distinguish", and the caller then falls back to
-        today's full-scan path — this just accepts the arguments and always
-        ignores them (must keep the same keyword shape as the base contract
-        so cli.py can call any adapter without special-casing)."""
-        return None
+        return events, unparsed, dropped, end_offset
 
     @staticmethod
     def _apply_results(content, pending: Dict[str, int], events: List[Event]) -> None:

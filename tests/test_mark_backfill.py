@@ -14,7 +14,7 @@ import time
 import unittest
 from unittest import mock
 
-from omhc import adapters, cli, due, ledger, locate
+from omhc import adapters, brief, cli, due, ledger, locate
 
 from . import _repo
 
@@ -690,10 +690,12 @@ class TestReactivateGrownSessions(unittest.TestCase):
 
     def test_an_adapter_that_cannot_tell_never_gets_a_growth_row(self):
         """Review #2: an adapter where `read_session_since` (per contract)
-        always returns None (Claude, not yet implemented) must leave no
-        seen/grew rows at all even if there's growth — the contract is "this
-        adapter can't tell", not "recheck every time and pile up seen rows
-        while still not knowing". Measured (before the fix): 4 marks → 4 seen rows."""
+        returns None must leave no seen/grew rows at all even if there's
+        growth — the contract is "this adapter can't tell", not "recheck
+        every time and pile up seen rows while still not knowing". Measured
+        (before the fix): 4 marks → 4 seen rows. Both real adapters now
+        implement read_session_since (#42), so this patches the method
+        directly to keep exercising the "can't tell" contract in isolation."""
         now = time.time()
         fake_claude_path = os.path.join(self.h.home, "fake-claude-session.jsonl")
         with open(fake_claude_path, "w", encoding="utf-8") as fh:
@@ -703,6 +705,13 @@ class TestReactivateGrownSessions(unittest.TestCase):
             "event": "start", "epoch": now - 600, "path": fake_claude_path,
             "cwd": self.h.root, "via": "scan", "size": os.path.getsize(fake_claude_path),
         }, home=self.h.home)
+
+        from omhc.adapters import claude_code as CC
+
+        patcher = mock.patch.object(CC.ClaudeCodeAdapter, "read_session_since",
+                                    return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
         for _ in range(4):
             with open(fake_claude_path, "a", encoding="utf-8") as fh:
@@ -775,6 +784,141 @@ class TestReactivateGrownSessions(unittest.TestCase):
         code, out = self.h.mark()
         self.assertEqual(code, 0)
         self.assertEqual(out, "")
+
+
+def _iso_claude(epoch: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(epoch))
+
+
+def _plant_claude(home: str, cwd: str, session_id: str, human: str, epoch: float) -> str:
+    """One real Claude Code session file — mirrors `Harness.plant`'s Codex
+    rollout, but under `~/.claude/projects/<slug>/<session_id>.jsonl` (#42)."""
+    from omhc.adapters import claude_code as CC
+
+    root = os.path.realpath(cwd)
+    directory = os.path.join(home, ".claude", "projects", CC.claude_slug(root))
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, "{}.jsonl".format(session_id))
+    row = {"type": "user", "cwd": root, "entrypoint": "cli", "sessionId": session_id,
+          "timestamp": _iso_claude(epoch), "message": {"content": human}}
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return path
+
+
+def _append_claude_human_turn(path: str, text: str, epoch: float) -> None:
+    row = {"type": "user", "timestamp": _iso_claude(epoch), "message": {"content": text}}
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _append_claude_agent_turn(path: str, text: str, epoch: float) -> None:
+    row = {"type": "assistant", "timestamp": _iso_claude(epoch),
+          "message": {"content": [{"type": "text", "text": text}]}}
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+class TestClaudeReactivateGrownSessions(unittest.TestCase):
+    """#42 (v2 phase 2 prerequisite): the same growth-detection path as
+    TestReactivateGrownSessions, but with Claude as the foreign, growing
+    session and Codex's own `mark` doing the reactivation — the direction
+    docs/limits.md used to call an unfixed limit ("a live-continue into a
+    Claude session isn't detected")."""
+
+    def setUp(self):
+        self.h = Harness()
+        self.addCleanup(self.h.close)
+        patcher = mock.patch.object(cli, "BACKFILL_TIME_BUDGET", 60.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _seed(self, now, human):
+        """A ledger row with `size` already set to the planted content — the
+        same shape `_backfill_foreign_sessions` leaves for Codex (baseline
+        included from the start), so the very next mark call judges growth
+        directly instead of needing an extra "first observation" round."""
+        path = _plant_claude(self.h.home, self.h.root, "cl1", human, now - 600)
+        ledger.append({
+            "repo": self.h.key, "harness": "claude-code", "session": "cl1",
+            "event": "start", "epoch": now - 600, "path": path, "cwd": self.h.root,
+            "via": "scan", "size": os.path.getsize(path),
+        }, home=self.h.home)
+        return path
+
+    def _grew_rows(self, session="cl1"):
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        return [r for r in rows if r.get("harness") == "claude-code"
+               and r.get("session") == session and r.get("grew")]
+
+    def test_growth_with_a_human_turn_is_reactivated(self):
+        now = time.time()
+        path = self._seed(now, "필드 경로부터 다시 확인해줘")
+        _append_claude_human_turn(path, "이제 두 번째 턴도 반영해줘", now)
+        self.h.mark(harness="codex-cli", session_id="cx1")
+        self.assertEqual(len(self._grew_rows()), 1)
+        got = due.due_one(self.h.key, "codex-cli", "cx1", now, home=self.h.home)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.session_id, "cl1")
+
+    def test_next_brief_contains_the_reactivated_turn_even_after_delivery(self):
+        now = time.time()
+        path = self._seed(now, "필드 경로부터 다시 확인해줘")
+        got = due.due_one(self.h.key, "codex-cli", "cx1", now, home=self.h.home)
+        due.mark_delivered(self.h.state, got, to_harness="codex-cli", epoch=now)
+        self.assertIsNone(due.due_one(self.h.key, "codex-cli", "cx1", now, home=self.h.home))
+
+        _append_claude_human_turn(path, "이제 두 번째 턴도 반영해줘", now)
+        self.h.mark(harness="codex-cli", session_id="cx1")
+        self.assertEqual(len(self._grew_rows()), 1)
+        body = brief.compute(my_harness="codex-cli", my_session_id="cx2",
+                             repo_root=self.h.root, home=self.h.home, now=now)
+        self.assertIn("이제 두 번째 턴도 반영해줘", body)
+
+    def test_growth_without_a_human_turn_is_not_reactivated(self):
+        now = time.time()
+        path = self._seed(now, "필드 경로부터 다시 확인해줘")
+        got = due.due_one(self.h.key, "codex-cli", "cx1", now, home=self.h.home)
+        due.mark_delivered(self.h.state, got, to_harness="codex-cli", epoch=now)
+        _append_claude_agent_turn(path, "에이전트 혼잣말", now)
+        self.h.mark(harness="codex-cli", session_id="cx1")
+        self.assertEqual(self._grew_rows(), [])
+        self.assertIsNone(
+            due.due_one(self.h.key, "codex-cli", "cx1", now, home=self.h.home))
+        rows = ledger.read(repo_key=self.h.key, home=self.h.home)
+        seen = [r for r in rows if r.get("harness") == "claude-code"
+               and r.get("session") == "cl1" and r.get("event") == "seen"]
+        self.assertEqual(len(seen), 1, rows)
+
+    def test_a_fork_needs_its_own_turn_to_be_reactivated(self):
+        """#34/#42: a fork copies the parent's chain under a new session_id —
+        even once its own trusted hook has recorded a baseline, that
+        baseline already includes the whole copied section (the common
+        case, see the adapter's `_read` docstring), so only a genuinely new
+        turn of the fork's own reactivates it."""
+        now = time.time()
+        path = _plant_claude(self.h.home, self.h.root, "fork1",
+                            "부모의 목표", now - 600)
+        ledger.append({
+            "repo": self.h.key, "harness": "claude-code", "session": "fork1",
+            "event": "start", "epoch": now - 600, "path": path, "cwd": self.h.root,
+        }, home=self.h.home)
+        self.h.mark(harness="codex-cli", session_id="cx1")  # baseline covers this whole file
+
+        with open(path, "a", encoding="utf-8") as fh:
+            copied = {"type": "user", "timestamp": _iso_claude(now),
+                     "message": {"content": "포크가 복사한 오래된 턴"},
+                     "forkedFrom": {"sessionId": "parent1", "messageUuid": "u9"}}
+            fh.write(json.dumps(copied, ensure_ascii=False) + "\n")
+        self.h.mark(harness="codex-cli", session_id="cx1")
+        self.assertEqual(self._grew_rows("fork1"), [])
+
+        _append_claude_human_turn(path, "포크 자신의 새 지시", now)
+        self.h.mark(harness="codex-cli", session_id="cx1")
+        self.assertEqual(len(self._grew_rows("fork1")), 1)
+        got = due.due_one(self.h.key, "codex-cli", "cx1", now, home=self.h.home)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.session_id, "fork1")
 
 
 @contextlib.contextmanager

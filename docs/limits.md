@@ -125,12 +125,30 @@ landing and the next time the older session is rebaselined (at most one
 `mark` call later) — that growth is inherently ambiguous (size alone
 can't tell whether it happened before or after) and stays absorbed; the
 newer *start* wins for that interval (the older one's next growth,
-after that interval, is judged fresh again — see above). And this is
-Codex→Claude only, because the growth check only runs for adapters that
-implement `read_session_since` — the Claude adapter doesn't yet, so a
-live-continue *into a Claude session* (someone keeps typing in an
-already-delivered Claude session, then switches to a new Codex one)
-isn't detected until it is.
+after that interval, is judged fresh again — see above).
+
+### Live-continue into a Claude session is caught too (#42)
+
+The growth check runs for any adapter that implements
+`read_session_since` — both adapters do now, sharing one per-line core
+(`_read`) between `read_session` and `read_session_since` so the two
+can't drift. Codex's own `mark` stats the ledger's last known size for a
+Claude session and, if it grew, reads only the new tail — a live-continue
+*into* an already-delivered Claude session (someone keeps typing there,
+then switches to a new Codex session) is caught the same way a Codex
+resume is. One Claude-specific wrinkle: a `/branch`/`--fork-session`/
+`/fork` copy (see "A Claude Code fork needs a turn of its own" below)
+starts a brand-new session id whose transcript opens with the parent's
+chain already copied in — that whole copied section is written before
+any observer can see the file, so the very first baseline taken for that
+new session id already covers it (the growth check only ever compares
+against a baseline, never against byte 0 of an already-known session).
+`read_session_since(..., stop_at_human_turn=True)` also refuses to treat
+a `forkedFrom`-tagged copied record as a new human turn even in the one
+race this can't structurally rule out (a baseline captured mid-copy) —
+gated on `stop_at_human_turn` only, so a plain `read_session` still
+inherits the copied section's first human turn as GOAL context, exactly
+as before.
 
 ### `reopen` is a hint, not a guarantee (#27)
 

@@ -61,7 +61,9 @@ Claude isn't logged in).
 | `os.stat` of the other session file | ~0.002 ms |
 | Codex `read_session_since`, 64 KB tail | 0.46 ms |
 | Codex `read_session_since`, 1 MB tail | 7.2 ms |
-| Claude full `read_session`, 24 MB transcript | 112 ms (`read_session_since` isn't implemented for Claude yet) |
+| Claude full `read_session`, 24 MB transcript | 112 ms |
+| Claude `read_session_since` (same 24 MB transcript), 64 KB tail | 0.42 ms |
+| Claude `read_session_since` (same 24 MB transcript), 1 MB tail | 4.7 ms |
 | `index.rows()` full scan, 10k / 100k rows | 20 ms / 254 ms (no seek by offset) |
 
 So Python startup and imports dominate. The read itself is cheap when only the
@@ -155,9 +157,12 @@ PULL  omhc trace omhc/brief.py
 - Capped at 300 bytes. `FILE` is machine-observed, like `DID`.
 - Printed at most once per changed set; the baseline makes repeats impossible.
 
-**Prerequisite:** `read_session_since` for the Claude adapter. Without it the
-Codex-receiving side would have to re-read a whole transcript (112 ms for
-24 MB) every turn. This is an adapter-only change (invariant 9).
+**Prerequisite (done, #42):** `read_session_since` for the Claude adapter.
+Without it the Codex-receiving side would have to re-read a whole transcript
+(112 ms for 24 MB) every turn; measured tails on the same transcript are
+0.42 ms (64 KB) / 4.7 ms (1 MB) — same order of magnitude as Codex's. This
+was an adapter-only change (invariant 9); `omhc turn`, its `UserPromptSubmit`
+fragments and the overlap warning below are still proposed.
 
 **Latency budget:** 150 ms at p95 per human turn, fast path under 80 ms. The
 entry point imports only `ledger`, `fsio` and the other harness's adapter.

@@ -502,8 +502,8 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
         if reader is None:
             continue
         # Review: having the method and this adapter actually rendering a
-        # verdict are different things — an implementation like Claude's,
-        # which always returns None (contractually "can't tell"), would pile
+        # verdict are different things — an adapter whose implementation
+        # always returns None (contractually "can't tell"), would pile
         # up meaningless seen rows on every growth (measured: mark x4 -> seen
         # x4). Check **once** per adapter, and skip the whole adapter if it's
         # None — decided before stat'ing any real path.
