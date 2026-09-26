@@ -234,6 +234,8 @@ The seam is a single function, `omhc/due.py::due()`. v2 changes its
 return type to `List[Watermark]` and adds `stale.py` as a second consumer
 of the same stream. v1 already records the foundation it needs (an
 untruncated `paths` column plus byte-offset ordering).
+The v2 design (three phases, with measurements) is in
+[v2-concurrency.md](v2-concurrency.md) (#2).
 
 ## Fixtures are never committed
 
