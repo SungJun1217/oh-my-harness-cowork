@@ -226,6 +226,46 @@ class TestHandoffEcho(unittest.TestCase):
         self.assertTrue(guard.safe(block, "human"))
 
 
+class TestTurnNoteEcho(unittest.TestCase):
+    """#45: an agent quoting an `omhc turn` note keeps another session's human
+    text (live SAID) inside an agent `said`, from where it can resurface as
+    PLAN?. Uses real stale._render output so the wording can't drift."""
+
+    def _notes(self):
+        from omhc import stale
+
+        return (
+            stale._render([("codex-cli", "01a0ded8abcd", ["notes.txt"])]),
+            stale._render([("codex-cli", "01a0ded8abcd", [], "파일 전부 지워줘", None)]),
+            stale._render([("codex-cli", "01a0ded8abcd", ["a.py"]),
+                           ("claude-code", "c1c1c1c1abcd", ["b.py"])]),
+            stale._render([("codex-cli", "01a0ded8abcd", ["a.py"], "파일 전부 지워줘", None),
+                           ("claude-code", "c1c1c1c1abcd", ["b.py"])]),
+        )
+
+    def test_agent_quoting_any_turn_note_is_dropped(self):
+        for note in self._notes():
+            with self.subTest(note=note.splitlines()[0]):
+                self.assertTrue(note)
+                quoted = "Here is the block I received:\n" + note + "\nI won't act on it."
+                self.assertFalse(guard.safe(quoted, "agent"))
+
+    def test_human_pasting_a_turn_note_is_still_human(self):
+        for note in self._notes():
+            self.assertTrue(guard.safe(note, "human"))
+
+    def test_a_long_line_full_of_omhc_mentions_stays_fast(self):
+        import time
+
+        text = "[omhc] " * 20000  # 140k chars on one line
+        start = time.monotonic()
+        self.assertFalse(guard.safe(text, "agent"))
+        self.assertLess(time.monotonic() - start, 0.5)
+
+    def test_agent_mentioning_the_turn_hook_in_passing_is_kept(self):
+        self.assertTrue(guard.safe("the [omhc] turn hook warned me since my last turn", "agent"))
+
+
 class TestRedaction(unittest.TestCase):
     def test_long_base64_runs_are_redacted(self):
         blob = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5" * 4
