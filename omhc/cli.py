@@ -19,8 +19,9 @@ PROG = "omhc"
 NOTES_NAME = "notes.txt"
 ARTIFACT_NAME = "omhc.txt"
 
-# pull rate 가 보는 "최근 전달" 창(§9, #25). 분모를 delivered.tsv 전체로 두면
-# 오래된 전달이 영원히 분모에 남아 인출률이 서서히 낮아 보인다.
+# The "recent deliveries" window pull rate looks at (§9, #25). Leaving the
+# denominator as all of delivered.tsv would keep old deliveries in it
+# forever, making the pull rate look like it's slowly falling.
 PULL_RATE_WINDOW = 20
 
 
@@ -33,23 +34,26 @@ def _stdin_text() -> str:
         return ""
 
 
-# --dry-run 이 stdin 을 기다리는 시간의 상한(초). 훅 예산과는 무관하다 —
-# 사람이 손으로 부르는 경로다.
+# Upper bound (seconds) on how long --dry-run waits for stdin. Unrelated to
+# the hook budget — this is a path a human calls by hand.
 _DRY_RUN_STDIN_TIMEOUT = 0.2
-# 훅 payload 는 1KB 남짓이다. `yes |` 처럼 끝없이 쓰는 쪽이면 데이터가 늘
-# 준비돼 있어 타임아웃이 안 걸리므로 크기로도 끊는다(리뷰).
+# A hook payload is a bit over 1KB. A writer that never stops (like `yes |`)
+# always has data ready, so the timeout would never fire — cap by size too
+# (review).
 _DRY_RUN_STDIN_CAP = 1 << 20
 
 
 def _dry_run_stdin_text() -> str:
-    """`--dry-run`(`--stdin` 없이)용 stdin 읽기 — 읽되 멈추지는 않는다(#27
-    리뷰). 문서화된 쓰임 하나가 `echo '{"cwd": R}' | omhc brief --dry-run`
-    처럼 다른 cwd 에서 payload 를 파이프로 넘기는 것이라 아예 안 읽으면 그
-    쓰임이 깨진다. 그렇다고 `sys.stdin.read()` 를 그대로 쓰면 파이프의 다른
-    쪽 끝이 한 줄 보내고 열어만 둔 채로 있어도(TTY 가 아니라 isatty() 는
-    False) EOF 를 영영 못 만나 멈춘다. 그래서 select 로 "지금 읽을 게 있는가"
-    만 묻고, 있으면 읽고, 다음 데이터가 타임아웃 안에 안 오면 거기서 멈춘다
-    — EOF(echo 처럼 쓰고 닫음)도 "읽을 게 있다"로 잡혀 즉시 반환된다."""
+    """stdin read for `--dry-run` (without `--stdin`) — reads, but doesn't
+    block forever (#27 review). One documented use pipes a payload from a
+    different cwd, like `echo '{"cwd": R}' | omhc brief --dry-run` — not
+    reading at all would break that. But using plain `sys.stdin.read()`
+    would hang forever waiting for EOF if the other end of the pipe sends one
+    line and just leaves it open (isatty() is False, not a TTY). So this
+    only asks select "is there anything to read right now", reads it if so,
+    and stops if no more data arrives within the timeout — EOF (writing and
+    closing, like echo does) also counts as "something to read" and returns
+    immediately."""
     try:
         if sys.stdin is None or sys.stdin.isatty():
             return ""
@@ -67,8 +71,9 @@ def _dry_run_stdin_text() -> str:
             total += len(chunk)
         return b"".join(chunks).decode("utf-8", errors="replace")
     except (OSError, ValueError):
-        # select 는 Windows 에서 파이프에 못 쓴다; fileno()/read() 도 닫힌
-        # 스트림이면 던질 수 있다. 훅 경로가 아니어도 절대 던지지 않는다.
+        # select doesn't work on pipes on Windows; fileno()/read() can also
+        # raise on a closed stream. Never raise here even though this isn't
+        # the hook path.
         return ""
 
 
@@ -81,55 +86,65 @@ def _state_for(home: Optional[str], start: Optional[str] = None):
 # --- mark -------------------------------------------------------------------
 
 
-# 신뢰되지 않은 Codex 훅은 mark 를 조용히 건너뛴다(실측, codex_cli.py 참고).
-# 그러면 그 Codex 세션은 원장에 영영 없고, due() 는 원장만 읽으므로 Claude
-# 쪽 훅이 멀쩡히 돌아도 Codex→Claude 가 죽는다. 그래서 **Claude 의** mark 가
-# 얹혀서 다른 하네스(Codex)의 세션을 원장에 채운다 — due() 자체는 안 바뀐다.
+# An untrusted Codex hook silently skips mark (measured, see codex_cli.py).
+# That leaves that Codex session out of the ledger forever, and since due()
+# only reads the ledger, Codex->Claude breaks even when Claude's own hook is
+# working fine. So **Claude's** mark piggybacks to backfill the other
+# harness's (Codex's) sessions into the ledger — due() itself is unchanged.
 BACKFILL_CAP = 5
-# #22: cap 을 넘는 초과분과, discover() 의 시간 예산에 밀려 못 본 나머지는
-# 이후 어떤 mark 도 다시 채우지 않는다 — 다음 호출의 newest_start 가 이미
-# 이번에 고른 것 중 가장 최근 것이라 그보다 오래된 미채움 세션은 "원장의
-# 최신 start 보다 오래됨" 판정에 영영 걸린다. 그런데도 무해한 건 두 가지가
-# 겹쳐서다: due() 는 가장 최근 자격 있는 외래 세션 하나만 보면 되고,
-# discover() 는 brief 의 eligible(#21)과 **같은** 헤드리스 필터
-# (allow_headless())를 쓴다 — 그래서 보통 discover() 가 채우는 것과 due() 가
-# 원하는 것이 같은 집합이다. 유일하게 깨지는 경우는 mark 시점과 이후 brief
-# 시점 사이에 OMHC_ALLOW_HEADLESS 가 달라지는 것뿐이다(그러면 그 사이에 생긴
-# 대화형 세션이 헤드리스 더미 뒤에 있다가 채워지지 않은 채로 cap 에 밀릴 수
-# 있다) — 흔치 않은 설정 변경이라 v1 에서는 감수한다.
-# 훅 예산(150ms) 의 일부만 쓴다. 비싼 부분은 discover() 자체(Codex 는 날짜
-# 디렉터리 스캔)이므로 이 deadline 을 discover() 에도 그대로 넘겨 어댑터가
-# 스스로 스캔을 끊게 한다 — 여기서만 재고 있으면 discover() 호출 자체가
-# 늦게 끝나 이 mark 호출이 세션 시작을 지연시킬 수 있다.
+# #22: overflow past the cap, and the rest that discover()'s time budget
+# never got to see, are never backfilled by any later mark — the next
+# call's newest_start is already the most recent of what got picked this
+# round, so an older un-backfilled session is forever caught by "older than
+# the ledger's latest start". This is harmless anyway because two things
+# line up: due() only needs to see the single most recent eligible foreign
+# session, and discover() uses the **same** headless filter
+# (allow_headless()) as brief's eligible (#21) — so what discover() fills in
+# and what due() wants are usually the same set. The only way it breaks is
+# OMHC_ALLOW_HEADLESS changing between the mark and a later brief (then an
+# interactive session that appeared in between could sit behind a headless
+# dummy, never get backfilled, and get pushed out by the cap) — an
+# infrequent config change, accepted for v1.
+# Only spends part of the hook budget (150ms). The expensive part is
+# discover() itself (Codex scans date directories), so this deadline is
+# passed straight through to discover() too, letting the adapter cut its own
+# scan short — measuring only here would let the discover() call itself
+# finish late and delay this mark call, and session start with it.
 BACKFILL_TIME_BUDGET = 0.08
 
-# 한 하네스에서 한 번에 확인하는 최근 세션 수(`_backfill_foreign_sessions` 의
-# 재기준점 찍기, `_reactivate_grown_sessions` 둘 다 쓴다). discover()/
-# list_sessions() 처럼 전체 스캔을 하지 않고(#22: 시작한 지 14일 넘은 세션도
-# 여전히 재개가 잡혀야 한다 — discover() 의 SCAN_DAYS 창 밖이다) 원장에 이미
-# 적힌 path 로만 stat 하므로 20개는 훅 예산 안에서 무시할 만하다.
+# How many recent sessions to check at once for one harness (used both by
+# `_backfill_foreign_sessions`'s rebaselining and `_reactivate_grown_sessions`).
+# Unlike discover()/list_sessions()'s full scan (#22: a session started more
+# than 14 days ago must still be able to have its resume caught — that's
+# outside discover()'s SCAN_DAYS window), this only stats paths already
+# recorded in the ledger, so 20 is negligible within the hook budget.
 REACTIVATE_SCAN_CAP = 20
 
 
 def _ref_repo_key(ref) -> Optional[str]:
-    """이 ref 가 실제로 속한 레포 키. `locate.owning_repo_key` 로 위임한다
-    (원래 이 함수에 있던 로직 — codex_cli.health() 도 같은 필터를 쓴다)."""
+    """The repo key this ref actually belongs to. Delegates to
+    `locate.owning_repo_key` (logic that originally lived in this function —
+    codex_cli.health() uses the same filter)."""
     return locate.owning_repo_key(ref.cwd)
 
 
-# rebase 마커의 event 값. session/path 가 없는(자기 세션이 아닌) 원장 행이므로
-# due()/log 랭크/known_sessions/newest_start/codex health 모두 "event=='start'"
-# 만 보는 기존 필터에 자동으로 걸러진다 — 필드 자체를 안 넣는 편이 "모르는
-# 리더는 무시한다"를 코드로 강제하는 것보다 안전하다(#28).
+# The rebase marker's event value. It's a ledger row with no session/path
+# (it doesn't belong to any one session), so due()/log rank/known_sessions/
+# newest_start/codex health all filter it out automatically via their
+# existing "event=='start'"-only filters — not adding the field at all is
+# safer than enforcing "unknown readers ignore it" purely by convention
+# (#28).
 REBASE_EVENT = "rebase"
 
 
 def _append_rebase_marker(adapter_id: str, key: str, home, now: float) -> None:
-    """`adapter_id` 의 알려진 모든 세션에 대해 "이 지점 이후로 baseline 위치가
-    최소 여기"라고 한 번에 선언하는 행. 개별 seen 행(#22 증상: backfill 마다
-    알려진 세션 수만큼 늘던 것) 대신 이것 하나만 남긴다 — session/path 가
-    없으므로 known_sessions/newest_start/log 랭크/codex health 는 그대로
-    무시한다(모두 event=='start' 나 session 존재를 전제로 거른다)."""
+    """A single row declaring, for every known session of `adapter_id`, "the
+    baseline position is at least here from this point on". Leaves just this
+    one row instead of individual seen rows (#22 symptom: every backfill
+    round used to add one row per known session) — since there's no
+    session/path, known_sessions/newest_start/log rank/codex health all
+    ignore it as-is (all of them filter on event=='start' or on a session
+    field existing)."""
     ledger.append({
         "repo": key, "harness": adapter_id, "event": REBASE_EVENT, "via": "scan",
         "epoch": now,
@@ -137,12 +152,14 @@ def _append_rebase_marker(adapter_id: str, key: str, home, now: float) -> None:
 
 
 def _distinct_sessions_with_path(rows: List[dict], *, exclude=frozenset()) -> List[str]:
-    """`rows` 를 뒤에서부터 훑어 path 있는 distinct session id 를 최신순으로
-    돌려준다 — "이번 라운드에 볼 후보"(writer, 최대 `REACTIVATE_SCAN_CAP`
-    개로 자름)와 "마커가 실제로 덮은 세션 집합"(reader, `own_rows` 를 마커
-    **이전** 구간으로 슬라이스한 뒤 같은 함수로 재구성) 둘 다 반드시 같은
-    순위를 써야 한다(#28 2차 리뷰) — 각자 따로 구현하면 어긋나는 순간
-    "마커가 확인 못 한 세션까지 덮는다"는 바로 그 버그가 재발한다."""
+    """Walks `rows` backward and returns distinct session ids with a path,
+    most-recent first — both "candidates to look at this round" (the
+    writer, cut to at most `REACTIVATE_SCAN_CAP`) and "the set of sessions
+    the marker actually covers" (the reader, reconstructed with the same
+    function after slicing `own_rows` to the segment **before** the marker)
+    must use the same ranking (#28 review round 2) — implementing them
+    separately would reintroduce the exact bug this fixed the moment they
+    diverge: "the marker covers sessions it never actually checked"."""
     out = []
     seen = set()
     for row in reversed(rows):
@@ -157,67 +174,78 @@ def _distinct_sessions_with_path(rows: List[dict], *, exclude=frozenset()) -> Li
 def _rebaseline_after_fresh_start(adapter_id: str, key: str, root: str, home,
                                   own_rows: List[dict], added: set,
                                   now: float, deadline: float) -> None:
-    """리뷰(#22 재검토): 이 라운드가 `adapter_id` 에 더 최신 세션(B)을 방금
-    원장에 채웠다. 다른 기존 세션(A)들의 baseline 이 여전히 B 의 start 행
-    앞에 남아 있으면, 다음 `_reactivate_grown_sessions` 라운드가 A 의
-    "지금 크기"를 그 낡은 baseline 과 통째로 비교한다 — 그 사이(B 가 들어온
-    뒤)에 A 에 생긴 **진짜** 재개까지 "이미 B 에 밀렸다"(superseded)로
-    뭉뚱그려 seen 행으로 흡수해 버리고, 다시는 재판정하지 못한다(그 흡수가
-    실제로는 A 의 유일한 새 턴을 삼킨 것이었어도).
+    """Review (#22 re-examined): this round just backfilled a newer session
+    (B) for `adapter_id` into the ledger. If other existing sessions' (A's)
+    baselines still sit before B's start row, the next
+    `_reactivate_grown_sessions` round compares A's "current size" wholesale
+    against that stale baseline — lumping in even a **genuine** resume that
+    happened to A after B arrived as "already superseded by B", absorbing it
+    into a seen row, and never judging it again (even though what got
+    absorbed was actually A's one new turn).
 
-    B 가 막 들어온 **이 순간**(아직 A 가 더 자라지 않았을 가능성이 높은
-    시점) A 들을 다시 stat 해 seen 행을 B 뒤에 남긴다 — 그러면 이후 A 에
-    생기는 진짜 성장은 이 새 baseline(이미 B 뒤에 있다) 과 비교되어 깨끗하게
-    새 판정을 받는다.
+    At **the very moment** B just arrived (when A is most likely not to have
+    grown further yet), this re-stats the A's and leaves a seen row for them
+    after B — so any real growth in A afterward gets compared against this
+    new baseline (already after B) and judged cleanly.
 
-    리뷰(3차, t5): 이 함수는 B 가 **백필**(discover→known_sessions 에 새로
-    잡힌 경우)로 들어왔을 때만 불린다 — B 가 자기 자신의 신뢰된 훅으로
-    직접 start 행을 남기면 `_backfill_foreign_sessions` 는 그 세션을
-    "이미 안다"고 보고(known_sessions 에 이미 있다) 다시 안 채우므로 이
-    함수가 아예 안 불린다. 그 경로는 `_reactivate_grown_sessions` 안의
-    지연(lazy) 재기준점이 대신 잡는다(그쪽 주석 참고) — 이 함수를 없애지
-    않는 이유는 백필 origin 에서는 **B 가 들어온 바로 그 순간**(아직 A 가
-    안 자랐을 가능성이 가장 높은 시점) 찍으므로, 지연 경로보다 흡수될
-    애매구간(다음 mark 까지의 창)이 짧기 때문이다 — 두 경로가 같은 결과로
-    수렴하지만 이쪽이 더 이르다.
+    Review (round 3, t5): this function is only called when B arrived via
+    **backfill** (newly caught by discover -> known_sessions) — if B leaves
+    its own start row directly through its own trusted hook,
+    `_backfill_foreign_sessions` sees that session as "already known"
+    (already in known_sessions) and doesn't backfill it again, so this
+    function never gets called at all. That path is instead caught by the
+    lazy rebaseline inside `_reactivate_grown_sessions` (see its comment) —
+    this function isn't removed because, on the backfill origin, it stamps
+    at **the exact moment B arrives** (when A is most likely not to have
+    grown yet), so the ambiguous window that could get absorbed (until the
+    next mark) is shorter than the lazy path's — the two paths converge on
+    the same result, but this one gets there earlier.
 
-    #28: 여기서 재기준이 필요한 A 들 중 실제로 자란 적 없는(size 가 그대로인)
-    세션은 개별 seen 행 대신 한 번의 `rebase` 마커로 흡수한다 — 실측(#22):
-    새 Codex 세션 20개가 5개씩 채워지는 backfill 마다 다른 세션 최대 20개를
-    다시 stat 해 seen 행을 남겨 34개가 늘었다. 실제로 자란(agent 혼잣말 등)
-    세션은 여전히 자기 seen 행을 받는다 — **그 행을 마커보다 먼저 쓴다**:
-    마커는 "이 라운드에서 안 자란 것으로 확인된 세션들"에만 해당하고, 자란
-    세션은 자기 위치를 스스로 갱신하므로 마커가 걔들의 판정을 흐리지 않는다.
+    #28: among the A's that need rebaselining here, ones that never actually
+    grew (size unchanged) are absorbed into one `rebase` marker instead of
+    individual seen rows — measured (#22): every backfill round that filled
+    5 of 20 new Codex sessions re-stat'd up to 20 other sessions and left
+    seen rows, adding 34 rows. A session that actually grew (agent
+    monologue, etc.) still gets its own seen row — **written before the
+    marker**: the marker only covers "sessions confirmed not to have grown
+    this round", and a grown session updates its own position, so the marker
+    doesn't cloud its judgment.
 
-    리뷰(#28 1차): 마커는 "**이번에 실제로 훑은** 세션들이 최소 여기까지는
-    안 자란 채 확인됐다" 는 선언이다 — deadline 이 중간에 끊거나(`break`),
-    stat 이 일시적 OSError 로 실패하거나, seen 행 자체가 `ledger.append`
-    상한에 걸려 버려지면, 이번 라운드는 "훑은 것 전부 확인" 이 아니다 —
-    확인 못 한 세션도 마커가 똑같이 덮어버려 그 세션의 실제 위치를 실제보다
-    뒤로(더 최신으로) 잘못 민다. 재현: A 가 B 전에 이미 자란 채(사람 턴 포함)
-    deadline/OSError 때문에 이번 라운드에 확인 안 됐는데 다른 세션(안 자람)
-    때문에 마커가 찍히면, 다음 라운드에 A 의 위치가 마커 뒤로 밀려 그 애매한
-    사전 성장이 (흡수돼야 할 것이) 명확한 재개로 오판된다 — due() 가 B 대신
-    A 를 돌려준다. 그래서 전수 확인 여부(`complete`)를 추적해, 완전할 때만
-    마커 하나로 묶고, 아니면 확인된 만큼만(옛 방식대로) 개별 seen 행을
-    남긴다.
+    Review (#28 round 1): the marker is a declaration that "**the sessions
+    actually scanned this round** were confirmed not to have grown, at least
+    up to here" — if the deadline cuts it off midway (`break`), a stat fails
+    with a transient OSError, or the seen row itself gets dropped by
+    `ledger.append`'s cap, this round is not "everything scanned got
+    confirmed" — applying the marker to an unconfirmed session anyway would
+    wrongly push its position back (to something more recent) than reality.
+    Repro: if A already grew before B (including a human turn) but wasn't
+    confirmed this round due to deadline/OSError, and the marker still gets
+    stamped because of some other session (which didn't grow), then next
+    round A's position gets pushed past the marker, and that ambiguous
+    pre-growth (which should have been absorbed) gets misjudged as a clear
+    resume — due() returns A instead of B. So this tracks whether the round
+    was exhaustive (`complete`), and only folds into one marker when it was;
+    otherwise it leaves individual seen rows (the old way) for only what was
+    confirmed.
 
-    리뷰(#28 2차): `complete` 는 **cap 초과와 무관하다** — cap
-    (`REACTIVATE_SCAN_CAP`)에 걸려 이번 라운드 후보에서 아예 빠진 세션은
-    "확인 못 한 것" 이 아니라 "원래 이번 마커가 아무것도 약속하지 않는
-    것"이다(마커가 덮는 범위 자체가 `_reactivate_grown_sessions` 쪽에서
-    "이번 마커를 쓸 때의 top-N" 으로 재구성된다 — 그쪽 주석 참고). cap 을
-    `complete` 에 얹으면(1차 버전의 실수) 알려진 세션이 20개를 넘는 레포에서
-    영원히 개별 seen 으로 되돌아가 애초에 고치려던 행 폭증이 그대로
-    재현된다(실측: n=25/60 에서 HEAD 와 같은 84행/80seen)."""
+    Review (#28 round 2): `complete` is **unrelated to exceeding the cap** —
+    a session that fell outside this round's candidates entirely because of
+    the cap (`REACTIVATE_SCAN_CAP`) isn't "unconfirmed", it's "this marker
+    never promised anything about it in the first place" (the range the
+    marker covers is itself reconstructed on the `_reactivate_grown_sessions`
+    side as "the top-N at the time this marker was written" — see its
+    comment). Tying the cap to `complete` (a mistake in round 1) would
+    permanently fall back to individual seen rows for any repo with more
+    than 20 known sessions, reproducing exactly the row explosion this was
+    meant to fix (measured: at n=25/60, same 84 rows/80 seen as HEAD)."""
     others = _distinct_sessions_with_path(own_rows, exclude=added)[:REACTIVATE_SCAN_CAP]
     complete = True
-    unchanged = []  # (sid, path, size) — 이 라운드에서 안 자란 것으로 확인됨
+    unchanged = []  # (sid, path, size) — confirmed not to have grown this round
     for sid in others:
         if time.time() > deadline:
             complete = False
             break
-        # 이 세션의 마지막 path/size — 리뷰(3차 #3)의 fallback 으로 쓴다.
+        # This session's last path/size — used as the fallback for review (round 3 #3).
         path = None
         prior_size = None
         for row in own_rows:
@@ -235,17 +263,19 @@ def _rebaseline_after_fresh_start(adapter_id: str, key: str, root: str, home,
         try:
             cur_size = os.stat(path).st_size
         except OSError:
-            # 일시적 실패 — 이 세션의 "안 자람" 을 확인 못 했다(#28 리뷰).
+            # Transient failure — couldn't confirm this session "didn't grow" (#28 review).
             complete = False
             continue
-        # fallback: 이전에 알던 baseline 이 있으면 그것 — 64KB 안에 개행을
-        # 못 찾아도 baseline 이 레코드 중간으로 밀리지 않는다. 없으면 None
-        # (size 그대로). 0 으로 대체하면 처음부터 다시 읽어 옛 사람 턴으로
-        # 거짓 재활성화한다(리뷰에서 재현).
+        # fallback: the previously known baseline, if any — so the baseline
+        # doesn't get pushed mid-record even when no newline is found within
+        # 64KB. None if there isn't one (leaves size as-is). Substituting 0
+        # would re-read from the start and falsely reactivate on an old human
+        # turn (reproduced in review).
         aligned = fsio.line_aligned_size(path, cur_size, fallback=prior_size)
         if prior_size is not None and aligned == prior_size:
-            # 안 자랐다 — complete 로 밝혀지면 이 세션은 마커 하나로 충분하다
-            # (#28). 아니라면 아래에서 옛 방식(개별 seen)으로 되돌린다.
+            # Didn't grow — if this round turns out complete, one marker
+            # suffices for this session (#28). Otherwise falls back below to
+            # the old way (individual seen).
             unchanged.append((sid, path, aligned))
             continue
         if not ledger.append({
@@ -270,14 +300,15 @@ def _rebaseline_after_fresh_start(adapter_id: str, key: str, root: str, home,
 def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
                                 home, now: float, *,
                                 deadline: Optional[float] = None) -> Dict[str, set]:
-    """`deadline` 을 안 주면 이 호출 하나만의 예산으로 스스로 잰다(예전 동작,
-    독립 호출·테스트 호환용). `cmd_mark` 는 `_reactivate_grown_sessions` 와
-    **같은** 예산을 나눠 써야 훅 시간을 두 배로 쓰지 않으므로 자신의
-    deadline 을 넘겨준다.
+    """If `deadline` isn't given, times itself off this call's own budget
+    (the old behavior, kept for standalone calls/test compatibility).
+    `cmd_mark` needs to share the **same** budget as
+    `_reactivate_grown_sessions` instead of doubling the hook time, so it
+    passes its own deadline through.
 
-    반환값: {adapter_id: {새로 채운 session_id, ...}} — `_reactivate_grown_sessions`
-    가 이걸로 "이번 mark 가 이 하네스에 더 최신 세션을 방금 채웠다"(조건 b)를
-    판정한다."""
+    Returns: {adapter_id: {newly backfilled session_id, ...}} —
+    `_reactivate_grown_sessions` uses this to judge "this mark just
+    backfilled a newer session for this harness" (condition b)."""
     if deadline is None:
         deadline = time.time() + BACKFILL_TIME_BUDGET
     fresh: Dict[str, set] = {}
@@ -298,23 +329,26 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
         known_sessions = {str(r.get("session")) for r in own_rows if r.get("session")}
         newest_start = 0.0
         for r in own_rows:
-            # grew 행의 epoch 는 세션의 실제 시작 시각이 아니라 재개를 감지한
-            # "now" 다(_reactivate_grown_sessions) — 이걸 newest_start 에 섞으면
-            # 아직 못 채운, 진짜로 더 오래된 세션이 "이미 최신보다 오래됨"
-            # 판정에 걸려 영영 안 채워진다.
+            # A grew row's epoch is not the session's actual start time — it's
+            # the "now" when the resume was detected (_reactivate_grown_sessions)
+            # — mixing this into newest_start would make a genuinely older,
+            # not-yet-backfilled session get caught by "already older than
+            # the latest" and never backfilled.
             if r.get("event") == "start" and not r.get("grew"):
                 newest_start = max(newest_start, float(r.get("epoch") or 0.0))
 
-        # 먼저 자격 있는 것만 걸러 **전체를 놓고** 정렬한다 — 오래된 것부터
-        # 자르면(리뷰 결함) 8개 중 5개가 죄다 옛것이 되어 due() 가 최신 대신
-        # 4번째로 최신인 세션을 돌려준다. 최신 N개를 골라야 한다.
+        # First filter to only the eligible ones, then sort **over the whole
+        # set** — cutting from the oldest end first (a review defect) would
+        # leave 5 of 8 all old, so due() would return the 4th-most-recent
+        # session instead of the latest. The newest N must be selected.
         #
-        # "이미 아는 세션"은 **id 로만** 거른다(known_sessions) — epoch 로
-        # 거르지 않는다. session_meta.timestamp 는 초 단위라 같은 초에 시작한
-        # 서로 다른 두 세션이 있을 수 있고, 그걸 epoch 로 판정했다면(#22,
-        # 반개구간 <=) id 가 다른데도 하나가 죽는다. 그래서 진짜 새 것인지는
-        # newest_start 와 **엄격히** 비교하고(<), 이미 원장에 있는지는 id 로
-        # 따로 본다.
+        # "Already known" is filtered by **id only** (known_sessions) — not
+        # by epoch. session_meta.timestamp is in whole seconds, so two
+        # distinct sessions can start in the same second; judging by epoch
+        # (#22, half-open <=) would kill one of them even though the ids
+        # differ. So genuinely-new is judged **strictly** against
+        # newest_start (<), and "already in the ledger" is checked separately
+        # by id.
         eligible = []
         for ref in refs:
             if not ref.session_id or ref.session_id in known_sessions:
@@ -329,12 +363,14 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
         eligible.sort(key=lambda r: r.epoch)
         selected = eligible[-BACKFILL_CAP:]
 
-        # 고른 뒤에는 **오름차순으로 붙인다** — 원장의 append 순서가 시작
-        # 순서와 일치해야 due() 가(원장을 거꾸로 읽어 "가장 최근"을 고른다)
-        # 진짜 최신 세션을 돌려준다. 이미 최신 N개로 골랐으므로 여기서부터는
-        # 시간 예산으로 중간에 끊지 않는다 — 끊으면 방금 고른 최신 세션이
-        # 아니라 그보다 오래된 것만 남을 수 있다(리뷰 결함). 어차피 최대
-        # BACKFILL_CAP 줄만 쓰므로 비용은 무시할 만하다.
+        # Once picked, append **in ascending order** — the ledger's append
+        # order needs to match start order for due() (which reads the ledger
+        # backward to pick "the most recent") to return the actually latest
+        # session. Since the newest N are already picked, the time budget
+        # doesn't cut this loop short from here on — cutting it short could
+        # leave only the older ones instead of the just-picked latest session
+        # (a review defect). Only up to BACKFILL_CAP rows get written anyway,
+        # so the cost is negligible.
         for ref in selected:
             row = {
                 "repo": key,
@@ -344,93 +380,111 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
                 "epoch": ref.epoch,
                 "path": ref.source_path,
                 "cwd": root,
-                # health() 가 이 값을 보고 "훅이 실제로 돌았다" 는 증거에서 뺀다
-                # (codex_cli.py) — 백필이 신뢰 없는 훅을 가려버리면 안 된다.
+                # health() excludes this value from the evidence for "the
+                # hook actually ran" (codex_cli.py) — backfill must not be
+                # able to disguise an untrusted hook.
                 #
-                # #22: 이 세션들은 실제 시작 시각이 이 mark 자신의 시작 행보다
-                # 앞서더라도 원장에는 이 행 **뒤에** 붙는다(mark 는 자기 행부터
-                # 적고 백필은 그다음이라). due() 는 하네스별로 원장을 훑으므로
-                # (harness == my_harness 인 행은 건너뜀) 무해하다 — 영향은
-                # 같은 하네스 내부의 append 순서뿐인데, 여기서 붙이는 건
-                # 다른 하네스 행이다.
+                # #22: even though these sessions' real start times may
+                # precede this mark's own start row, they get appended
+                # **after** it in the ledger (mark writes its own row first,
+                # backfill comes next). due() scans the ledger per-harness
+                # (skipping rows where harness == my_harness), so this is
+                # harmless — the only effect is on append order within the
+                # same harness, but what's appended here belongs to a
+                # different harness.
                 "via": "scan",
-                # `_reactivate_grown_sessions` 의 baseline — discover() 가 이미
-                # os.path.getsize 로 읽은 값이라 추가 stat 비용이 없다.
+                # Baseline for `_reactivate_grown_sessions` — discover()
+                # already read this via os.path.getsize, so there's no extra
+                # stat cost.
                 "size": ref.size,
             }
             if ledger.append(row, home=home):
                 fresh.setdefault(adapter_id, set()).add(ref.session_id)
 
         if fresh.get(adapter_id):
-            # 방금 이 하네스에 새 세션을 채웠다 — 다른 기존 세션들의
-            # baseline 을 그 자리에서 바로 B 뒤로 옮긴다(리뷰 #1, 위
-            # _rebaseline_after_fresh_start 참고).
+            # Just backfilled a new session for this harness — move other
+            # existing sessions' baselines to right after B, on the spot
+            # (review #1, see _rebaseline_after_fresh_start above).
             _rebaseline_after_fresh_start(adapter_id, key, root, home, own_rows,
                                           fresh[adapter_id], now, deadline)
     return fresh
 
 
-# 늘어난 꼬리를 얼마나 읽을지의 상한. 실측(17.7MB 꼬리): 396.6ms — 캡 없이
-# 읽으면 늘어난 크기에 그대로 비례해 훅 예산(150ms)을 넘긴다. 1MB 는 같은
-# 실측 비율(~22.4us/KB)로 약 22ms — stop_at_human_turn 이 보통 훨씬 일찍
-# 끊어 주므로 이 캡은 "사람 턴이 하나도 없는 큰 성장"의 최악 경우만 막는다.
+# Cap on how much of a grown tail to read. Measured (17.7MB tail): 396.6ms —
+# without a cap, reading scales directly with the growth and blows through
+# the hook budget (150ms). 1MB is about 22ms at the same measured rate
+# (~22.4us/KB) — stop_at_human_turn usually cuts things off much earlier, so
+# this cap only guards the worst case: "a big growth with no human turn in
+# it at all".
 REACTIVATE_TAIL_CAP = 1_000_000
 
 
 def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
                                home, now: float, deadline: float,
                                fresh: Dict[str, set]) -> None:
-    """#22 마지막 구멍: 신뢰 안 된 Codex 훅에서 `codex exec resume` 은 새
-    rollout 을 만들지 않고 **같은 파일에 이어 쓴다** — `session_meta` 도 다시
-    안 쓴다. `_backfill_foreign_sessions` 는 discover() 의 첫 줄 시작 시각으로
-    순서를 매기므로 이 재개를 못 본다(원본 시작 시각이 그대로다); 이미
-    전달됐던 세션이면 `already_delivered` 가 due() 를 거기서 멈춘다.
+    """#22's last gap: on an untrusted Codex hook, `codex exec resume`
+    doesn't create a new rollout — it **appends to the same file** — and
+    doesn't rewrite `session_meta` either. `_backfill_foreign_sessions`
+    orders by discover()'s first-line start time, so it misses this resume
+    (the original start time is unchanged); if the session was already
+    delivered, `already_delivered` stops due() right there.
 
-    파일 크기 성장은 "뭔가 바뀌었다"만 알려준다(불변식 6: 순서의 근거가
-    아니라 변화 감지 신호일 뿐이다 — 원장 append 순서가 여전히 유일한 순서
-    기준이다). 성장분에 사람의 새 턴이 있는지는 `read_session_since` 로
-    직접 확인한다(에이전트 혼잣말·turn_aborted 만으로는 재개로 보지 않는다).
+    File size growth only tells us "something changed" (invariant 6: it's a
+    change-detection signal, not an ordering basis — ledger append order is
+    still the only source of order). Whether the growth contains a new human
+    turn is confirmed directly via `read_session_since` (agent monologue,
+    turn_aborted alone aren't treated as a resume).
 
-    `fresh`(이번 mark 가 `_backfill_foreign_sessions` 로 방금 채운 세션들)에
-    이 하네스가 있으면 건너뛴다 — 같은 호출에서 더 최신 세션이 이미 들어왔다면
-    재개 행을 그 뒤에 또 얹지 않는다(원장 append 순서가 due() 의 "가장 최근"
-    판정이므로, 얹으면 방금 채운 더 최신 세션 대신 재개된 낡은 세션이 이긴다).
+    Skipped if this harness is in `fresh` (sessions this mark just backfilled
+    via `_backfill_foreign_sessions`) — if a newer session already came in
+    during the same call, a resume row isn't stacked after it too (ledger
+    append order is what due() uses to judge "most recent", so stacking it
+    would let the resumed old session win over the just-backfilled newer
+    one).
 
-    #28: 조건 (a) 에서 superseded 이면서 안 자란 세션도 매 mark 마다 개별
-    seen 행을 받았다(신뢰된 훅 B 뒤에서 지연 재기준이 매번 돈다) — 그런
-    세션들은 `_append_rebase_marker` 하나로 묶는다. 자란 세션(안 자란 것과
-    갈리는 그 자리)은 여전히 자기 seen 행을 마커보다 먼저 받는다.
+    #28: under condition (a), a session that's superseded but didn't grow
+    used to get its own seen row on every single mark (the lazy rebaseline
+    behind a trusted hook B runs every time) — such sessions get folded into
+    one `_append_rebase_marker` instead. A grown session (the one case that
+    splits off from "didn't grow") still gets its own seen row, written
+    before the marker.
 
-    리뷰(#28 1차): deadline 이 세션 중간에 끊거나(`break`), stat 이 일시적
-    OSError 로 실패하거나, seen/grew 행이 `ledger.append` 상한에 걸려
-    버려지면 이번 라운드는 "훑은 것 전부 확인" 이 아니다 — 확인 못 한
-    세션에도 마커가 똑같이 적용되면 그 세션의 위치를 실제보다 앞당겨(마커
-    뒤로) 잘못 민다. 그래서 `_rebaseline_after_fresh_start` 와 같은
-    `complete` 규칙을 쓴다 — 완전할 때만 마커, 아니면 확인된 만큼만 개별
-    seen.
+    Review (#28 round 1): if the deadline cuts a session off midway
+    (`break`), a stat fails with a transient OSError, or a seen/grew row gets
+    dropped by `ledger.append`'s cap, this round is not "everything scanned
+    got confirmed" — applying the marker to an unconfirmed session anyway
+    would wrongly push its position forward (past the marker). So this uses
+    the same `complete` rule as `_rebaseline_after_fresh_start` — a marker
+    only when complete, otherwise individual seen rows for only what was
+    confirmed.
 
-    리뷰(#28 2차): `complete` 는 cap(`REACTIVATE_SCAN_CAP`) 초과와 무관하다
-    — cap 은 대신 **읽는 쪽**(`marker_covers`, 아래)에서 다룬다. 마커는
-    "이 하네스의 알려진 세션 전부" 가 아니라 "**그 마커를 쓸 당시 top-N**
-    (같은 순위 함수로 뽑은)이 안 자란 채 확인됐다" 는 뜻이다 — 그래서
-    어떤 세션의 baseline 위치에 마커를 반영해도 되는지는, 그 세션이 마커
-    **작성 시점**의 top-N 에 있었는지로 판정해야 한다(`own_rows` 를 마커
-    이전 구간으로 슬라이스해 같은 `_distinct_sessions_with_path` 로
-    재구성 — writer 가 실제로 훑은 후보와 정확히 같은 집합이 나온다: 그
-    구간 안에서 이미 top-N 안이었던 세션이 이 라운드에 자라 새 행을 얻어도
-    같은 top-N **안에서** 순위만 바뀔 뿐 다른 세션을 밀어내지 않는다 —
-    cap 밖에 있던 세션은 애초에 이 라운드에 후보가 아니었으므로 새 행을
-    받을 수 없다).
+    Review (#28 round 2): `complete` is unrelated to exceeding the cap
+    (`REACTIVATE_SCAN_CAP`) — the cap is instead handled on the **reading
+    side** (`marker_covers`, below). A marker doesn't mean "all of this
+    harness's known sessions" — it means "**the top-N at the time this
+    marker was written** (picked by the same ranking function) were
+    confirmed not to have grown". So whether a given session's baseline
+    position may be advanced by the marker has to be judged by whether that
+    session was in the top-N **at the marker's write time**
+    (reconstructed by slicing `own_rows` to before the marker and running
+    the same `_distinct_sessions_with_path` — this yields exactly the same
+    set the writer actually scanned: a session that was already in the
+    top-N within that segment, and grows this round to get a new row, only
+    shifts rank **within** that same top-N, it doesn't push another session
+    out — a session outside the cap was never a candidate this round to
+    begin with, so it can't get a new row).
 
-    재현(리뷰 2차, "x-far"): cap 밖에 있던 세션이 B 전에 이미 자란 채(사람
-    턴 포함) 이번 마커에 확인된 적이 없는데, 나중에 자기 훅으로 재진입하며
-    `own_rows` 맨 뒤에 새 start 행을 얻으면 — 그 행은 "마커 **이후**" 구간에
-    있으므로 마커 작성 시점 top-N 재구성(`own_rows[:last_marker_pos]`)에는
-    안 잡힌다. `sid in marker_covers` 가 False 로 남아 baseline 위치가 그대로
-    유지되고, superseded 판정이 여전히 정확하다 — due() 는 그 애매한 사전
-    성장을 재개로 오판하지 않는다.
+    Repro (review round 2, "x-far"): a session outside the cap had already
+    grown before B (including a human turn), was never confirmed by this
+    marker, but later re-enters via its own hook and gets a new start row
+    appended to the end of `own_rows` — that row sits in the segment
+    **after** the marker, so it's not caught by the top-N reconstruction at
+    marker-write time (`own_rows[:last_marker_pos]`). `sid in marker_covers`
+    stays False, the baseline position is left unchanged, and the
+    superseded judgment stays accurate — due() doesn't misjudge that
+    ambiguous prior growth as a resume.
 
-    훅 경로이므로 절대 던지지 않는다 — 호출자(cmd_mark)가 통째로 감싼다.
+    Hook path, so never raises — the caller (cmd_mark) wraps it entirely.
     """
     rows = ledger.read(repo_key=key, home=home)
     for adapter_id in sorted(adapters.REGISTRY):
@@ -447,11 +501,12 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
         reader = getattr(inst, "read_session_since", None)
         if reader is None:
             continue
-        # 리뷰: 메서드가 있다는 것과 이 어댑터가 실제로 판정을 낸다는 것은
-        # 다르다 — Claude 처럼 항상 None 을 돌려주는(계약상 "구분할 수
-        # 없다") 구현이면 매 성장마다 의미 없는 seen 행만 쌓인다(측정: mark
-        # 4번 → seen 4번). 어댑터당 **한 번만** 확인하고, None 이면 이
-        # 어댑터는 통째로 건너뛴다 — 실제 경로를 stat 하기 전에 결정한다.
+        # Review: having the method and this adapter actually rendering a
+        # verdict are different things — an implementation like Claude's,
+        # which always returns None (contractually "can't tell"), would pile
+        # up meaningless seen rows on every growth (measured: mark x4 -> seen
+        # x4). Check **once** per adapter, and skip the whole adapter if it's
+        # None — decided before stat'ing any real path.
         try:
             probe = reader(
                 SessionRef(adapter_id=adapter_id, session_id="", source_path="",
@@ -467,33 +522,36 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
         if not own_rows:
             continue
 
-        # 이 라운드에서 "안 자랐다" 로 확인될 세션들의 자리를 한 번에 미는
-        # 마커의 위치(#28) — session/path 가 없어 위 known_sessions·newest_start
-        # 류의 필터에 안 걸리지만, 여기서는 baseline **위치**(조건 a) 계산에
-        # 쓴다.
+        # Position of the marker that advances, all at once, the position of
+        # sessions confirmed "didn't grow" this round (#28) — having no
+        # session/path keeps it out of the known_sessions/newest_start-style
+        # filters above, but it's used here to compute baseline **position**
+        # (condition a).
         last_marker_pos = -1
         for i, row in enumerate(own_rows):
             if row.get("event") == REBASE_EVENT:
                 last_marker_pos = i
 
-        # #28 2차 리뷰: 이 마커가 실제로 덮는 세션 집합 — 마커를 **쓸
-        # 당시**의 top-N 을, 그때와 같은 순위 함수로 own_rows 를 마커
-        # 이전 구간(`[:last_marker_pos]`)만 잘라 재구성한다(위 함수
-        # docstring 의 "x-far" 재현 참고). 마커가 없으면(아직 한 번도 안
-        # 찍혔으면) 당연히 아무것도 안 덮는다.
+        # #28 review round 2: the set of sessions this marker actually
+        # covers — reconstructed by cutting own_rows to just the segment
+        # before the marker (`[:last_marker_pos]`) and applying the same
+        # ranking function to get the top-N **at write time** (see the "x-far"
+        # repro in this function's docstring above). If there's no marker
+        # (never stamped yet), it covers nothing, naturally.
         marker_covers = (
             set(_distinct_sessions_with_path(
                 own_rows[:last_marker_pos])[:REACTIVATE_SCAN_CAP])
             if last_marker_pos >= 0 else set()
         )
 
-        # 이 하네스의 최근 distinct 세션(최신 먼저), path 있는 것만 — no
-        # discover(), no 날짜 창. 14일 전에 시작한 세션도 여전히 원장에
-        # path 를 들고 있으면 재개를 잡는다.
+        # This harness's recent distinct sessions (most recent first), only
+        # those with a path — no discover(), no date window. A session
+        # started 14 days ago still gets its resume caught as long as the
+        # ledger still holds a path for it.
         recent_sessions = _distinct_sessions_with_path(own_rows)[:REACTIVATE_SCAN_CAP]
-        complete = True  # cap 은 더 이상 completeness 에 영향 없다(#28 2차).
+        complete = True  # the cap no longer affects completeness (#28 round 2).
 
-        unchanged = []  # (sid, path, size) — 이 라운드에서 안 자란 것으로 확인됨
+        unchanged = []  # (sid, path, size) — confirmed not to have grown this round
         for sid in recent_sessions:
             if time.time() > deadline:
                 complete = False
@@ -507,8 +565,8 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
                 if row.get("path"):
                     path = row.get("path")
                 if "size" in row:
-                    # 가비지 size 도 mark 를 깨면 안 된다 — 건너뛰고 이전
-                    # baseline 을 유지한다.
+                    # Garbage size must not break mark either — skip it and
+                    # keep the previous baseline.
                     try:
                         baseline = int(row["size"])
                         baseline_pos = i
@@ -519,64 +577,75 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
             try:
                 cur_size = os.stat(path).st_size
             except OSError:
-                # 일시적 실패 — 이 세션의 "안 자람" 을 확인 못 했다(#28 리뷰).
+                # Transient failure — couldn't confirm this session "didn't grow" (#28 review).
                 complete = False
                 continue
 
             if baseline is None:
-                # 첫 관측 — 재개 여부를 아직 모른다. 다음 mark 부터 비교할
-                # 기준만 남긴다. os.stat 크기를 그대로 쓰지 않고 줄 경계로
-                # 스냅한다(리뷰) — 레코드 중간을 baseline 으로 잡으면 그
-                # 레코드가 마저 쓰인 뒤 skip-to-newline 로직이 통째로
-                # 건너뛴다.
+                # First observation — resume status unknown yet. Just leaves
+                # a baseline for the next mark to compare against. Snaps to
+                # a line boundary instead of using the raw os.stat size
+                # (review) — a baseline mid-record would make the
+                # skip-to-newline logic skip the whole record once it
+                # finishes being written.
                 if not ledger.append({
                     "repo": key, "harness": adapter_id, "session": sid,
                     "event": "seen", "via": "scan",
-                    # 첫 관측이라 이전 baseline 이 없다. 0 으로 대체하지
-                    # 않는다 — 다음 판정이 처음부터 읽어 원래의 사람 턴으로
-                    # 옛 내용을 다시 넘긴다(리뷰에서 재현). 못 찾으면 size
-                    # 그대로(64KB 넘는 레코드를 쓰는 중일 때만, 알려진 한계).
+                    # First observation, so there's no prior baseline. Don't
+                    # substitute 0 — the next judgment would read from the
+                    # start and re-surface an old human turn as if it were
+                    # new (reproduced in review). If none is found, leaves
+                    # size as-is (a known limitation only while writing a
+                    # record over 64KB).
                     "size": fsio.line_aligned_size(path, cur_size),
                     "epoch": now, "path": path, "cwd": root,
                 }, home=home):
                     complete = False
                 continue
 
-            # 조건 (a): baseline 이후 같은 하네스의 **다른** 세션 start 행이
-            # 붙었다면(어떤 경로로 그 행이 생겼든 — 이 하네스의 백필이든,
-            # 그 세션 자신의 신뢰된 훅이든) 이미 더 최신 것에 밀린 세션이다
-            # — 되살리지 않는다. 리뷰(3차, t5): **자라지 않았어도** 이 검사를
-            # 한다 — 안 그러면 baseline 이 B 의 start 행보다 앞에 영원히
-            # 남아, B 가 신뢰된 훅으로 직접 들어와 `_rebaseline_after_fresh_start`
-            # 가 못 본 경우 이 세션은 다시는 판정되지 않는다(그 훅이 원장에
-            # 적는 순간엔 이 함수가 아예 안 불린다 — args.harness 가 그
-            # 하네스 자신이라 `_reactivate_grown_sessions` 의 대상에서 원천
-            # 빠진다).
+            # Condition (a): if a **different** session's start row for the
+            # same harness landed after this baseline (however it got there
+            # — this harness's own backfill, or that session's own trusted
+            # hook), this session has already been superseded by something
+            # newer — don't reactivate it. Review (round 3, t5): this check
+            # runs **even if nothing grew** — otherwise the baseline would
+            # sit before B's start row forever, and if B entered directly
+            # through a trusted hook that `_rebaseline_after_fresh_start`
+            # never saw, this session would never get judged again (the
+            # moment that hook writes to the ledger, this function isn't
+            # even called — args.harness is that harness itself, so it's
+            # excluded from `_reactivate_grown_sessions`'s targets from the
+            # start).
             #
-            # 그렇다고 그냥 넘어가면(옛 버그) 이 baseline 이 영원히 그대로
-            # 남아 이후 어떤 mark 도 이 세션을 다시는 판정하지 못한다 —
-            # seen 행으로 기준만 올려서 흡수한다. B 이후에 A 가 **다시**
-            # 자라면(baseline 이 그 seen 행 뒤로 옮겨졌으므로 B 의 start 행
-            # 보다 앞이 아니다) 그건 새 판정으로 다시 잡힌다.
+            # Just skipping past it (the old bug) would leave this baseline
+            # unchanged forever, and no later mark could ever judge this
+            # session again — so it's absorbed by raising the baseline via a
+            # seen row. If A grows **again** after B (the baseline is now
+            # past that seen row, no longer before B's start row), that gets
+            # caught fresh as a new judgment.
             #
-            # **알려진 한계:** B 의 start 행과 이 라운드 사이에 A 가 이미
-            # 자랐다면(자라지 않은 경우와 달리) 그 성장이 B 전인지 후인지
-            # 알 도리가 없다 — size 하나로는 순서를 못 가리므로 흡수한다
-            # (README 의 남은 한계).
+            # **Known limitation:** if A had already grown between B's start
+            # row and this round (unlike the "didn't grow" case), there's no
+            # way to tell whether that growth was before or after B — size
+            # alone can't order them, so it's absorbed (a remaining
+            # limitation, noted in the README).
             #
-            # #28: baseline **위치** 는 이 세션 자신의 마지막 size 행이거나,
-            # (이 세션이 이전 라운드에 "안 자랐다"로 확인돼 마커로 흡수됐을
-            # 수 있으므로) 그보다 나중일 수 있는 이 하네스의 마지막 rebase
-            # 마커 — 둘 중 더 뒤엣것이다. 마커 뒤에는 이 세션의 진짜 위치가
-            # 최소 거기까지 왔다는 뜻이라, 그 뒤에 생긴 성장을 애매함 없이
-            # 바로 판정할 수 있다(마커 자신은 이 세션이 실제로 자랐는지는
-            # 모른다 — 그래서 size 는 안 건드리고 위치 계산에만 쓴다).
+            # #28: baseline **position** is whichever is later — this
+            # session's own last size row, or this harness's last rebase
+            # marker (which can be later, since this session may have been
+            # confirmed "didn't grow" and absorbed by a marker in a previous
+            # round). After the marker, this session's real position is at
+            # least that far along, so growth after it can be judged
+            # unambiguously (the marker itself doesn't know whether this
+            # session actually grew — so size is left untouched and only
+            # used for position math).
             #
-            # #28 2차: 단, 그 마커가 **이** 세션을 실제로 덮었을 때만
-            # (`marker_covers`, 위) — 안 그러면 마커를 쓸 당시 cap 밖에
-            # 있어 확인된 적 없는 세션("x-far")이 나중에 자기 훅으로
-            # 재진입하는 것만으로 애매한 사전 성장이 명확한 재개로
-            # 둔갑한다(리뷰 재현, 위 함수 docstring).
+            # #28 round 2: but only if that marker actually covered **this**
+            # session (`marker_covers`, above) — otherwise a session that was
+            # outside the cap and never confirmed at marker-write time
+            # ("x-far") could turn its ambiguous prior growth into a clear
+            # resume just by re-entering later through its own hook (review
+            # repro, this function's docstring above).
             effective_pos = (
                 max(baseline_pos, last_marker_pos)
                 if sid in marker_covers else baseline_pos
@@ -590,16 +659,18 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
                     if not ledger.append({
                         "repo": key, "harness": adapter_id, "session": sid,
                         "event": "seen", "via": "scan",
-                        # fallback=이전 baseline(리뷰 3차 #3) — 못 찾아도
-                        # baseline 이 뒤로(레코드 중간 쪽) 밀리지 않는다.
+                        # fallback=previous baseline (review round 3 #3) —
+                        # even if not found, the baseline doesn't get pushed
+                        # backward (mid-record).
                         "size": fsio.line_aligned_size(path, cur_size,
                                                        fallback=baseline),
                         "epoch": now, "path": path, "cwd": root,
                     }, home=home):
                         complete = False
                 else:
-                    # 안 자랐다 — complete 로 밝혀지면 개별 seen 대신 이
-                    # 라운드가 끝날 때 한 번의 마커로 흡수한다(#28).
+                    # Didn't grow — if this round turns out complete, absorb
+                    # via one marker at the end of the round instead of an
+                    # individual seen row (#28).
                     unchanged.append((sid, path, baseline))
                 continue
             if cur_size <= baseline:
@@ -619,19 +690,20 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
             except Exception:
                 since = None
             if since is None:
-                # 이 라운드는 판정할 수 없다 — baseline 을 건드리지 않고
-                # 다음 mark 에서 다시 시도한다(잘못된 baseline 을 남기는
-                # 것보다 안전하다).
+                # Can't judge this round — leaves the baseline untouched and
+                # retries on the next mark (safer than leaving a wrong
+                # baseline).
                 continue
             found_human_turn = any(
                 ev.verb == "said" and ev.author == "human" for ev in since.events
             )
 
             if found_human_turn:
-                # 리뷰: `cur_size` 가 아니라 `since.end_offset` 을 쓴다 — 마지막
-                # 줄이 개행 없이 끝났으면(막 쓰는 중이었을 수 있다) 그 레코드는
-                # 아직 안전히 다 읽은 게 아니라서 baseline 에 넣으면 다음 읽기가
-                # 그 줄을 통째로 건너뛴다(리뷰 #2).
+                # Review: uses `since.end_offset`, not `cur_size` — if the
+                # last line ended without a newline (may still be mid-write),
+                # that record hasn't been safely read in full, so putting it
+                # into the baseline would make the next read skip that whole
+                # line (review #2).
                 if not ledger.append({
                     "repo": key, "harness": adapter_id, "session": sid,
                     "event": "start", "via": "scan", "size": since.end_offset,
@@ -645,12 +717,13 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
                     pass
                 continue
 
-            # 성장은 있었지만 사람의 턴이 아니다(에이전트 혼잣말,
-            # turn_aborted, task_complete 등) — 리뷰: `since.end_offset` 을
-            # 쓴다(`cur_size` 가 아니라). 캡(`max_bytes`)에 걸려 꼬리 전부를
-            # 못 읽었으면 `end_offset` 이 실제로 읽은 데까지만 반영하므로,
-            # 다음 mark 가 못 읽은 나머지를 이어서 본다 — `cur_size` 를 그대로
-            # 썼다면 그 사이에 있었을 수도 있는 사람 턴을 영영 건너뛴다.
+            # There was growth, but not a human turn (agent monologue,
+            # turn_aborted, task_complete, etc.) — review: uses
+            # `since.end_offset` (not `cur_size`). If the cap (`max_bytes`)
+            # kept the whole tail from being read, `end_offset` reflects only
+            # what was actually read, so the next mark picks up the rest —
+            # using `cur_size` as-is would permanently skip over any human
+            # turn that might be in between.
             if not ledger.append({
                 "repo": key, "harness": adapter_id, "session": sid,
                 "event": "seen", "via": "scan", "size": since.end_offset,
@@ -672,17 +745,20 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
 
 def _recent_hook_start(key: str, harness: str, session: str, home,
                        now: float) -> bool:
-    """이 세션의 start 행 중 **훅이 쓴**(via:"scan" 아닌) 것이 due() 가 보는
-    창 안에 있고, 나이 기한의 절반보다 젊은가(#30 리뷰).
+    """Is there a **hook-written** (not via:"scan") start row for this
+    session within due()'s window, and younger than half the age limit
+    (#30 review)?
 
-    - 창: due() 와 같은 기본 limit 으로 읽는다. 창 밖으로 밀려난 행을 근거로
-      건너뛰면 due() 에는 그 세션이 아예 안 보인다.
-    - via:"scan" 은 세지 않는다: backfill 이 대신 적은 행만 있으면 훅이 실제로
-      돈 증거(codex health)를 남겨야 한다.
-    - 나이: due() 는 세션의 가장 최근 start 행 epoch 로 나이를 잰다. compact 행을
-      전혀 안 남기면 며칠째 쓰는 세션이 MAX_AGE 를 넘겨 빠진다 — 절반보다
-      오래됐으면 남겨 나이를 갱신한다(기한 판정일 뿐 순서 기준이 아니다).
-    못 읽으면 False — 모르면 행을 남기는 쪽(예전 동작)이다."""
+    - Window: read with the same default limit as due(). Skipping based on a
+      row pushed outside the window would make due() not see that session at
+      all.
+    - via:"scan" doesn't count: if only a backfill-written row exists, a hook
+      still needs to leave evidence it actually ran (codex health).
+    - Age: due() ages a session by its most recent start row's epoch. Never
+      leaving a compact row would drop a session in use for days once it
+      exceeds MAX_AGE — if it's older than half that, leave one to refresh
+      the age (this is only a deadline judgment, not an ordering basis).
+    False if unreadable — when in doubt, leave the row (the old behavior)."""
     try:
         for r in ledger.read(home=home, repo_key=key):
             if (r.get("event") == "start" and r.get("harness") == harness
@@ -696,7 +772,8 @@ def _recent_hook_start(key: str, harness: str, session: str, home,
 
 
 def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
-    """세션 시작을 원장에 남긴다. 훅이 부른다. 약 220바이트 한 줄."""
+    """Records a session start in the ledger. Called by the hook. About one
+    220-byte line."""
     raw = args.stdin if args.stdin is not None else _stdin_text()
     payload = {}
     if raw:
@@ -709,7 +786,7 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     start = str(payload.get("cwd") or "") or None
     root, key, state = _state_for(home, start)
     if locate.refused_root(root):
-        # 훅 경로다 — 원장에 아무것도 남기지 않고 조용히 나간다(invariant 2).
+        # Hook path — leave nothing in the ledger and exit quietly (invariant 2).
         return 0
     session = gate.session_id_from_hook_payload(raw) or ""
     row = {
@@ -721,42 +798,51 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
         "path": str(payload.get("transcript_path") or ""),
         "cwd": root,
     }
-    # 사람이 대화한 세션인지는 여기서 판정하지 않는다(#21). SessionStart 시점에는
-    # Claude 트랜스크립트가 아직 쓰이지 않아 판정이 늘 fail-open 했고, Codex 는
-    # rollout 이 없으면 영구히 비대화형으로 적힐 수 있었다. 판정은 brief 시점에
-    # 어댑터가 실제 파일을 보고 내린다(brief.compute 가 due 에 넘기는 eligible).
+    # Whether a session had a human turn isn't judged here (#21). At
+    # SessionStart time, Claude's transcript isn't written yet so the
+    # judgment always had to fail open, and Codex could be permanently
+    # marked non-interactive if it had no rollout yet. The judgment happens
+    # at brief time instead, once the adapter can look at the real file
+    # (the eligible set brief.compute passes to due).
     #
-    # 자동 압축 뒤 SessionStart 가 source:"compact" 로 같은 세션에서 다시
-    # 발화한다(Codex 실측, #30). 새 사람 턴이 아니므로 훅이 최근에 이미 적은
-    # 세션이면 start 행을 또 남기지 않는다(조건은 _recent_hook_start) — 게이트와 brief 의 재전달 조건 덕분에 해는
-    # 없었지만 머신 공용 원장만 불린다. 원장에 없는 세션(세션 도중에 omhc 를
-    # 설치해 startup 을 놓친 경우)이면 이 행이 첫 기록이므로 남긴다.
+    # After auto-compaction, SessionStart fires again on the same session
+    # with source:"compact" (measured on Codex, #30). That's not a new human
+    # turn, so if the hook already left a row for this session recently, no
+    # new start row is left (condition: _recent_hook_start) — the gate and
+    # brief's redelivery conditions kept this harmless, but it was still
+    # inflating the machine-wide shared ledger for nothing. If the session
+    # isn't in the ledger yet (e.g. omhc was installed mid-session and
+    # missed startup), this row is its first record, so it's still left.
     compact = str(payload.get("source") or "") == "compact"
     if not (compact and session and _recent_hook_start(
             key, args.harness, session, home, row["epoch"])):
         ledger.append(row, home=home)
-    # SessionStart 의 `source` 어휘는 Claude Code 와 Codex 가 공유한다(둘 다
-    # 실측). "resume" 은 같은 세션에 새 턴이 이어붙었다는 뜻이다 — 그 세션이
-    # 이미 다른 하네스에 전달됐었다면 due() 가 already_delivered() 에서 멈춰
-    # resumed 턴을 영영 못 내보낸다(#22). "compact" 는 같은 신호를 주지 않는다
-    # — 컨텍스트만 압축했을 뿐 사람의 새 턴이 없으므로 재전달할 것이 없다.
-    # 이 reopen 은 여전히 "다시 열렸을 수 있다"는 힌트일 뿐이다 — 빈 프롬프트
-    # resume 은 source:"resume" 을 내면서도 새 사람 턴을 안 남기고, mark/brief
-    # 동시 실행이면 이 reopen 이 brief 가 방금 내보낸 턴 뒤에 붙을 수도 있다
-    # (#27). 그래도 지운다고 브리지를 고치는 게 아니다 — due() 가 이 세션을
-    # 다시 후보로 보게 하는 유일한 신호가 이것이기 때문이다. 실제로 새로운지는
-    # brief.compute 가 delivered.tsv 의 offset(5번째 열)과 이 세션의 사람 said
-    # 이벤트를 비교해 판정한다 — mark 는 "후보로 볼까"만 결정하고, brief 는
-    # "보낼 게 있나"를 결정한다. 둘의 책임이 다르다.
+    # SessionStart's `source` vocabulary is shared between Claude Code and
+    # Codex (both measured). "resume" means a new turn was appended to the
+    # same session — if that session had already been delivered to the other
+    # harness, due() would stop at already_delivered() and never surface the
+    # resumed turn (#22). "compact" doesn't carry the same signal — it only
+    # compressed context, with no new human turn, so there's nothing to
+    # redeliver. This reopen is still only a hint that "it may have reopened"
+    # — an empty-prompt resume emits source:"resume" without leaving a new
+    # human turn, and if mark/brief run concurrently this reopen could even
+    # land after the turn brief just delivered (#27). Still, removing this
+    # wouldn't fix the bridge — it's the only signal that gets due() to look
+    # at this session as a candidate again. Whether it's actually new is
+    # judged by brief.compute, comparing delivered.tsv's offset (5th column)
+    # against this session's human said events — mark only decides "should
+    # this be a candidate", brief decides "is there anything to send". The
+    # two have different responsibilities.
     if session and str(payload.get("source") or "") == "resume":
         try:
             due.mark_reopened(state, session, args.harness, row["epoch"])
         except Exception:
             pass
-    # 다른 하네스의 세션을 원장에 백필한다(위 주석). 훅 경로이므로 실패해도
-    # mark 자체는 항상 exit 0, 빈 stdout 이어야 한다(invariant 2). 두 백필
-    # 단계(신규 세션 스캔, 재개 감지)가 같은 훅 예산을 나눠 쓴다 — 따로 재면
-    # 합쳐 두 배를 쓴다.
+    # Backfills the other harness's sessions into the ledger (see comment
+    # above). Hook path, so even on failure mark itself must always exit 0
+    # with empty stdout (invariant 2). The two backfill phases (new-session
+    # scan, resume detection) share the same hook budget — timing each
+    # separately would double the total spent.
     try:
         if not due.is_off(state):
             deadline = time.time() + BACKFILL_TIME_BUDGET
@@ -766,25 +852,26 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
                                        row["epoch"], deadline, fresh)
     except Exception:
         pass
-    # 어떤 omhc 호출에서든 오래된 AGENTS.md 구간을 붕괴시킨다.
+    # Collapses a stale AGENTS.md block on any omhc call.
     try:
         agents_md.collapse(root)
     except Exception:
         pass
-    # 이 하네스가 세션 시작 시 자기 훅보다 먼저 AGENTS.md 류를 읽는 경우(#36),
-    # "이미 읽혔으니 지운다" 판단은 하네스별 지식이라 어댑터에 위임한다(선택
-    # 메서드, discover/health 와 같은 패턴 — adapter.py 의
-    # on_session_start_mark 참고). compact 는 새 사람 턴이 아니라 이미 읽던
-    # 세션이 이어지는 것뿐이므로 부르지 않는다 — 그 세션이 이미 소비한 블록을
-    # compact 때마다 다시 판정할 이유가 없다.
+    # When this harness reads AGENTS.md-style files before its own hook fires
+    # at session start (#36), the judgment "it's already been read, so drop
+    # it" is harness-specific knowledge, so it's delegated to the adapter (an
+    # optional method, the same pattern as discover/health — see
+    # on_session_start_mark in adapter.py). Not called on compact — that's
+    # not a new human turn, just the same session continuing, so there's no
+    # reason to re-judge a block that session already consumed.
     if not compact:
         try:
             adapters.get(args.harness, home=home).on_session_start_mark(
                 root, source=str(payload.get("source") or ""), epoch=row["epoch"])
         except Exception:
             pass
-    # 오래된(24시간 넘은) omhc outbox 파일을 지운다(#36) — 훅 경로이므로
-    # 값싼 것만 한다(listdir 하나, 없으면 즉시 리턴).
+    # Removes old (>24h) omhc outbox files (#36) — hook path, so only the
+    # cheap version (one listdir, returns immediately if empty).
     try:
         deliver.prune_outbox(root, now=time.time())
     except Exception:
@@ -810,7 +897,7 @@ def cmd_note(args, *, home=None, out=sys.stdout, err=None) -> int:
     if not text:
         out.write("nothing to note\n")
         return 0
-    # 쓴 시각을 붙인다 — 7일이 지난 메모는 핸드오프에 붙지 않는다(#36).
+    # Attaches the write time — a note older than 7 days doesn't ride along in the handoff (#36).
     with open(path, "a", encoding="utf-8") as fh:
         fh.write("{:.0f}\t{}\n".format(time.time(), text.replace("\t", " ")))
     with open(path, encoding="utf-8", errors="replace") as fh:
@@ -824,20 +911,25 @@ def cmd_note(args, *, home=None, out=sys.stdout, err=None) -> int:
 
 def _record_pull(key: str, state: str, via: str, home, session: Optional[str] = None,
                  tag: Optional[str] = None) -> None:
-    """`show`/`log`/`trace` 로 산출물을 인출했다는 행을 원장에 남긴다. §9 인출률 회계.
+    """Records in the ledger that `show`/`log`/`trace` pulled an artifact.
+    §9 pull-rate accounting.
 
-    `harness` 키를 절대 넣지 않는다 — due() 는 event=="start" 만 보고,
-    backfill 은 harness+start 로 own_rows 를 거르고, codex health() 도
-    event=="start" 만 "훅이 돌았다"는 증거로 센다. 이 세 곳 중 어디에도
-    pull 행이 섞여 들면 안 된다. 실패는 show/log/trace 의 결과에 영향을 주면
-    안 되므로 통째로 삼킨다(훅 경로는 아니지만 fail-open 을 유지한다).
+    Never adds a `harness` key — due() only looks at event=="start",
+    backfill filters own_rows by harness+start, and codex health() also
+    counts only event=="start" as evidence "the hook ran". A pull row must
+    never get mixed into any of those three. Failure here must never affect
+    show/log/trace's result, so it's swallowed entirely (not the hook path,
+    but fail-open is kept anyway).
 
-    show 는 실제로 읽은 세션을 넘긴다. `#N` 은 옛 세션의 색인에 떨어질 수 있어
-    "가장 최근 전달" 로 두면 보지 않은 세션의 인출률이 오른다. trace 도
-    마찬가지다 — 화면에 실제로 찍힌 매치의 세션들을 하나씩 넘긴다(#35 리뷰:
-    매치가 0건이거나 모호하면 아예 호출하지 않는다 — "가장 최근 전달"로
-    근사하면 안 본 세션까지 인출률에 잡힌다). 대상이 하나로 정해지지 않는
-    log 만 가장 최근 전달 세션(delivered.tsv 마지막 줄)에 돌린다."""
+    show passes the session it actually read. `#N` can land in an old
+    session's index, so approximating with "most recently delivered" would
+    inflate the pull rate for a session never actually looked at. Same for
+    trace — it passes each session that had a match actually printed on
+    screen (#35 review: if there are zero matches or they're ambiguous, this
+    isn't called at all — approximating with "most recently delivered" would
+    count an unseen session toward the pull rate). Only log, whose target
+    isn't narrowed to one session, is charged to the most recently delivered
+    session (delivered.tsv's last line)."""
     try:
         session = session or due.last_delivered(state)
         if not session:
@@ -868,12 +960,14 @@ def _all_session_ids(state: str) -> List[str]:
 
 
 def _unique_prefix_len(ids: List[str], minlen: int = 8) -> int:
-    """이 id 들을 서로 구분하는 가장 짧은 접두 길이(>=minlen). Codex 의 UUIDv7 은
-    앞 8자가 ~65초마다만 바뀌어 고정폭 8자 자르기로는 같은 레포에서 짧게 연달아
-    시작한 세션들이 자주 충돌한다(#15c). 13자쯤이 보기 좋은 상한이지만 그건
-    표시상 취향일 뿐이다 — 그 안에서 안 갈리면 유일해질 때까지 계속 늘린다.
-    안 그러면 log 가 찍은 ref 를 show 가 "모호하다"며 거부하면서, 정작 후보
-    목록에는 똑같은 문자열이 두 번 찍히는 리뷰 결함이 생긴다."""
+    """The shortest prefix length (>=minlen) that tells these ids apart.
+    Codex's UUIDv7 only changes its first 8 chars every ~65 seconds, so a
+    fixed 8-char cut collides often for sessions started in quick succession
+    in the same repo (#15c). Around 13 chars is a nice-looking cap, but
+    that's purely a display preference — it keeps growing past that until
+    unique if it still hasn't split them. Otherwise `show` would reject a
+    ref `log` just printed as "ambiguous", while the candidate list itself
+    shows the same string twice (a review defect)."""
     uniq = list(dict.fromkeys(ids))
     n = minlen
     longest = max((len(i) for i in uniq), default=minlen)
@@ -883,15 +977,17 @@ def _unique_prefix_len(ids: List[str], minlen: int = 8) -> int:
 
 
 def _session_log_rank(key: str, state: str, home):
-    """`log` 의 세션 정렬 근거를 주는 랭크 함수.
+    """The ranking function that gives `log`'s session ordering basis.
 
-    최우선은 delivered.tsv 등장 순(due.delivered_order — last_delivered() 와
-    같은 소스라 log 의 끝이 `show '#N'` 의 기본 세션과 일치한다). 원장 첫
-    `start` 행 등장 순은 **못 쓴다** — mark 가 제 세션을 먼저 적고 나서
-    backfill 이 더 일찍 시작한 외래 세션을 뒤늦게 적으므로(cmd_mark), 마킹된
-    세션과 백필된 세션의 쌍마다 원장 등장 순이 실제 전달 순과 뒤집힌다(#18
-    리뷰 결함). 전달된 적 없는 세션(watch 로만 색인된 경우)은 원장 첫 start
-    행 순서로, 그것도 없으면 색인 파일명 순으로 결정적으로 둔다."""
+    Top priority is delivered.tsv appearance order (due.delivered_order —
+    the same source as last_delivered(), so log's tail matches `show '#N'`'s
+    default session). Ledger first-`start`-row order **can't** be used —
+    mark writes its own session's row first and only backfills the earlier-
+    started foreign session afterward (cmd_mark), so for every marked/
+    backfilled session pair, ledger appearance order is inverted relative to
+    actual delivery order (#18 review defect). A session never delivered
+    (only indexed by watch) falls back deterministically to ledger
+    first-start-row order, and failing that, index filename order."""
     delivered_rank = {sid: i for i, sid in enumerate(due.delivered_order(state))}
     ledger_rank = {}
     for i, row in enumerate(ledger.read(home=home, limit=0, repo_key=key)):
@@ -900,8 +996,9 @@ def _session_log_rank(key: str, state: str, home):
         session = row.get("session")
         if session and session not in ledger_rank:
             ledger_rank[session] = i
-    # 색인 파일명(=세션 id) 오름차순 — 위 두 근거가 다 없는 세션끼리도 흔들리지
-    # 않는 순서가 필요하다(_index_files 가 이미 그렇게 정렬해서 준다).
+    # Ascending index filename (=session id) order — even sessions with
+    # neither ordering basis above need a stable order among themselves
+    # (_index_files already sorts them that way).
     fallback_rank = {sid: n for n, sid in enumerate(_all_session_ids(state))}
 
     def _rank(session):
@@ -928,8 +1025,8 @@ def cmd_log(args, *, home=None, out=sys.stdout) -> int:
         session = os.path.basename(path)[: -len(".idx")]
         for row in index.rows(path):
             rows.append((session, row))
-    # 세션은 _session_log_rank 순, 세션 안에서는 색인 seq 순 — 타임스탬프는
-    # 순서의 근거로 쓰지 않는다(불변식 6, #18).
+    # Sessions in _session_log_rank order, within a session by index seq —
+    # timestamps aren't used as an ordering basis (invariant 6, #18).
     rows.sort(key=lambda pair: (_session_rank(pair[0]), pair[1].seq))
 
     if args.verb:
@@ -939,22 +1036,24 @@ def cmd_log(args, *, home=None, out=sys.stdout) -> int:
         rows = [r for r in rows if needle in r[1].arg.lower()]
     if args.file:
         rows = [r for r in rows if any(args.file in p for p in r[1].paths)]
-    # falsy-zero 검사를 쓰면 `--last 0` 이 전부를 쏟는다 — F7 이 막으려던 바로 그
-    # 무한 출력이다. 음수도 앞에서 자르는 엉뚱한 동작이 된다.
+    # A falsy-zero check would make `--last 0` dump everything — the exact
+    # unbounded output F7 exists to prevent. A negative value would also
+    # produce a nonsensical cut from the front.
     if args.last is not None and args.last >= 0:
         rows = rows[len(rows) - args.last :] if args.last else []
 
-    # 이 배치가 아니라 상태 디렉터리 전체에서 유일하게 만든다 — 안 그러면
-    # 필터링으로 짧아진 접두사가 화면 밖의 다른 세션과 겹칠 수 있고, 그 ref 를
-    # `show` 에 그대로 넘기면 모호해진다(#10).
+    # Made unique across the whole state directory, not just this batch —
+    # otherwise a prefix shortened by filtering could collide with another
+    # session that's off-screen, and passing that ref straight to `show`
+    # would make it ambiguous (#10).
     n = _unique_prefix_len(_all_session_ids(state)) if rows else 8
 
     for session, row in rows:
         ref = "{}#{}".format(session[:n], row.seq)
         content = row.arg or ",".join(row.paths)
         if not content and row.verb == "said":
-            # index 는 본문을 담지 않는다(아카이브 이중화 방지) — 빈 줄 대신
-            # 힌트를 보여준다(#15a).
+            # The index doesn't hold body text (to avoid duplicating the
+            # archive) — show a hint instead of a blank line (#15a).
             content = "(text: omhc show {})".format(ref)
         out.write(
             "{} {} {} {}\n".format(
@@ -972,19 +1071,20 @@ def cmd_log(args, *, home=None, out=sys.stdout) -> int:
 # --- trace ------------------------------------------------------------------
 
 
-# 기본은 `modified` 만 — sessionwiki 의 파일→세션 역인덱스처럼 "이 파일을 고친
-# 세션" 이 1차 질문이다. `--all` 은 이 파일이 **언급된** 흔적(읽거나 돌린 명령의
-# 인자에 나온 경로)까지 넓힌다 — `inspected`/`ran` 은 파일을 바꾸지 않았어도
-# `paths` 를 채우는 유일한 다른 두 동사다(codex_cli.py `_item_fact`,
-# claude_code.py `_paths_of`).
+# Default is `modified` only — like sessionwiki's file->session reverse
+# index, "which session touched this file" is the primary question. `--all`
+# widens it to traces where this file was merely **mentioned** (a path in a
+# read, or in a command's arguments) — `inspected`/`ran` are the only other
+# two verbs that populate `paths` even without modifying a file
+# (codex_cli.py `_item_fact`, claude_code.py `_paths_of`).
 _TRACE_DEFAULT_VERBS = frozenset({"modified"})
 _TRACE_ALL_VERBS = frozenset({"modified", "inspected", "ran"})
 
 
 def _norm_posix(path: str) -> Tuple[str, ...]:
-    """경로를 '/' 로 쪼갠 세그먼트로. 접미사 비교(끝에서부터 몇 조각이
-    같은가)의 단위 — os.sep 이 다른 곳(윈도우 Codex 로그 등)에서도 문자열
-    그대로 비교할 수 있다."""
+    """Splits a path into '/'-delimited segments. The unit for suffix
+    comparison (how many trailing segments match) — lets a comparison work
+    on the raw string even where os.sep differs (e.g. Windows Codex logs)."""
     return tuple(seg for seg in path.replace("\\", "/").split("/") if seg not in ("", "."))
 
 
@@ -995,26 +1095,29 @@ def _path_suffix_match(target_segs: Tuple[str, ...], candidate: str) -> bool:
 
 
 def _normalize_against(base: str, raw: str) -> str:
-    """`raw` 를 절대경로로 접는다(realpath) — 상대경로면 `base` 기준.
-    파일이 지금 없어도(지워진 옛 커밋) realpath 는 정규화만 하고 던지지 않는다."""
+    """Folds `raw` into an absolute path (realpath) — relative to `base` if
+    it's a relative path. Even if the file doesn't currently exist (an old,
+    deleted commit), realpath only normalizes and doesn't raise."""
     p = raw if os.path.isabs(raw) else os.path.join(base, raw)
     return os.path.realpath(p)
 
 
 def cmd_trace(args, *, home=None, out=sys.stdout) -> int:
-    """`<path>` 를 건드린 색인된 이벤트를 세션을 넘나들며 찾는다(#35, sessionwiki
-    `trace` 선례). 색인은 전달 시점이나 `watch` 가 세우므로, 아직 한쪽 하네스도
-    이 레포에서 전달·감시된 적 없으면 아무리 최근에 고친 파일도 안 보인다 —
-    그 사실 자체를 결과 메시지가 알린다."""
+    """Finds indexed events that touched `<path>`, across sessions (#35,
+    following sessionwiki's `trace` precedent). The index is only built at
+    delivery time or by `watch`, so if neither harness has ever delivered or
+    been watched in this repo, even a file changed just now won't show up —
+    the result message itself says so."""
     root, key, state = _state_for(home)
     reason = locate.refused_root(root)
     if reason:
         out.write("{}\n".format(reason))
         return 1
 
-    # 인자는 cwd 기준 상대/절대 둘 다일 수 있고, 색인에 적힌 경로는 레포 루트
-    # 기준 상대(Codex FileChange 의 diff 헤더)이거나 절대(Claude Code 의
-    # file_path)일 수 있다 — 양쪽을 realpath 로 접어 같은 잣대로 비교한다.
+    # The argument can be relative to cwd or absolute, and the path recorded
+    # in the index can be relative to the repo root (Codex FileChange's diff
+    # header) or absolute (Claude Code's file_path) — both are folded via
+    # realpath to compare on the same footing.
     target_abs = _normalize_against(os.getcwd(), args.path)
     target_segs = _norm_posix(args.path)
 
@@ -1026,18 +1129,21 @@ def cmd_trace(args, *, home=None, out=sys.stdout) -> int:
             session_harness.setdefault(row["session"], row.get("harness") or "?")
 
     exact: List[Tuple[str, object]] = []
-    # 정규화된 절대경로 -> 그 파일을 언급한 (session, row) 목록. 정확히 일치하는
-    # 게 하나도 없을 때만 접미사 매칭으로 넘어가고, 그마저 서로 다른 파일 여럿에
-    # 걸치면(모호) 아예 쓰지 않는다 — 잘못된 파일의 이력을 보여주는 것보다
-    # "없다"고 하는 편이 안전하다(가이드: "unambiguous 할 때만 허용").
+    # normalized absolute path -> list of (session, row) that mentioned that
+    # file. Falls back to suffix matching only when there's no exact match at
+    # all, and even then, never uses it if it spans multiple distinct files
+    # (ambiguous) — better to say "nothing" than to show the wrong file's
+    # history (guideline: "allow only when unambiguous").
     #
-    # 리뷰(#35): 행 하나가 서로 다른 두 접미사-일치 경로를 동시에 담을 수 있다
-    # (예: paths=("omhc/adapters/__init__.py", "omhc/__init__.py"), 둘 다
-    # `__init__.py` 로 끝난다) — 첫 매치에서 멈추면 그 행이 실은 두 후보 파일
-    # 중 무엇을 가리키는지 모른다는 사실이 사라져, 다른 행이 그중 하나만 담아도
-    # "버킷이 하나뿐이다"로 잘못 판정된다(재현: repro 세션 s1/s2). 그래서
-    # 일치하는 **모든** 경로를 각자의 버킷에 넣는다 — 같은 행이 여러 버킷에
-    # 나뉘어 들어가도 상관없다(모호하면 애초에 아무 버킷도 안 쓴다).
+    # Review (#35): a single row can contain two different suffix-matching
+    # paths at once (e.g. paths=("omhc/adapters/__init__.py",
+    # "omhc/__init__.py"), both ending in `__init__.py`) — stopping at the
+    # first match would lose the fact that this row doesn't know which of
+    # two candidate files it actually refers to, and a different row
+    # containing just one of them would wrongly be judged "there's only one
+    # bucket" (repro: sessions s1/s2). So every matching path goes into its
+    # own bucket — the same row can land split across multiple buckets, and
+    # that's fine (if ambiguous, no bucket is used at all to begin with).
     suffix_buckets: Dict[str, List[Tuple[str, object]]] = {}
     for idx_path in _index_files(state):
         session = os.path.basename(idx_path)[: -len(".idx")]
@@ -1065,9 +1171,10 @@ def cmd_trace(args, *, home=None, out=sys.stdout) -> int:
             candidates = sorted(
                 locate.relativize(root, p) or p for p in suffix_buckets)
             if args.json:
-                # JSON 스트림에 안내 문장을 섞지 않는다(리뷰) — 소비자가 후보로
-                # 다시 물을 수 있게 객체로 낸다. 결과 목록(배열)과 모양이 달라
-                # 모호함을 빈 결과와 헷갈리지 않는다.
+                # Don't mix a guidance sentence into the JSON stream (review)
+                # — emit an object so the consumer can re-query with the
+                # candidates. Its shape differs from the result list (array),
+                # so ambiguity isn't confused with an empty result.
                 out.write(json.dumps({"ambiguous": candidates}, ensure_ascii=False) + "\n")
             else:
                 out.write("ambiguous: {} matches {} — pass a longer path\n".format(
@@ -1089,19 +1196,23 @@ def cmd_trace(args, *, home=None, out=sys.stdout) -> int:
                 "are indexed\n".format(args.path))
         return 0
 
-    # #35 리뷰: pull 회계는 **실제로 화면에 찍힌** 세션에만 붙인다 — 매치가
-    # 0건이거나 모호해도 due.last_delivered() 로 떨어지면 "가장 최근 전달"이
-    # 매번 인출된 것처럼 인출률이 부풀어 README 설명("실제로 파본 세션")과
-    # 어긋난다(리뷰). `log` 는 대상이 하나로 안 좁혀져 그 근사를 쓰지만, trace
-    # 는 이미 세션이 좁혀져 있으니 근사할 이유가 없다.
+    # #35 review: pull accounting is charged only to sessions **actually
+    # printed on screen** — falling back to due.last_delivered() even with
+    # zero matches or ambiguity would inflate the pull rate as if "most
+    # recently delivered" got pulled every time, contradicting the README's
+    # description ("a session actually looked at") (review). `log` uses that
+    # approximation because its target isn't narrowed to one session, but
+    # trace already has its sessions narrowed down, so there's no reason to
+    # approximate.
     delivered = set(due.delivered_order(state))
     for session in dict.fromkeys(s for s, _ in matches):
         if session in delivered:
             _record_pull(key, state, "trace", home, session=session)
 
-    # `log`(#10)과 같은 이유로 이 배치가 아니라 상태 디렉터리 전체에서 유일하게
-    # 만든다 — 필터로 짧아진 접두사가 화면 밖 다른 세션과 겹치면 그 ref 를
-    # `show` 에 넘겼을 때 모호해진다.
+    # Made unique across the whole state directory, not just this batch, for
+    # the same reason as `log` (#10) — a prefix shortened by filtering could
+    # collide with another off-screen session, making that ref ambiguous
+    # once passed to `show`.
     n = _unique_prefix_len(_all_session_ids(state))
 
     if args.json:
@@ -1143,15 +1254,17 @@ _SEQ_REF_RE = re.compile(r"^([^#]*)#(\d+)$")
 
 
 def _default_log_session(state: str) -> Optional[str]:
-    """pull 회계가 `log` 를 돌리는 세션 — 가장 최근 전달된 세션(due.last_delivered,
-    §9). `log` 자체엔 "기본 세션" 이 없다(색인 전부를 나열한다); `#N` 만 받았을 때
-    그 회계 규칙을 그대로 재사용해 하나로 좁힌다(#10)."""
+    """The session pull accounting charges `log` to — the most recently
+    delivered session (due.last_delivered, §9). `log` itself has no "default
+    session" (it lists the whole index); when given just `#N`, this reuses
+    that same accounting rule to narrow it to one (#10)."""
     return due.last_delivered(state)
 
 
 def _resolve_seq_ref(state: str, prefix: str, seq: int):
-    """`#N` 또는 `<prefix>#N` 을 (entry, note) 로 푼다. note 는 자동으로 고른
-    세션을 사람에게 알려줄 문구, 없으면 None. 못 풀면 (None, error message)."""
+    """Resolves `#N` or `<prefix>#N` to (entry, note). note is the sentence
+    telling the human which session got auto-picked, or None. On failure,
+    (None, error message)."""
     ids = _all_session_ids(state)
     note = None
     if prefix:
@@ -1159,8 +1272,8 @@ def _resolve_seq_ref(state: str, prefix: str, seq: int):
         if not matches:
             return None, "unknown session prefix {!r}".format(prefix)
         if len(matches) > 1:
-            # 접두사로 줄이면 그 자체가 다시 모호해질 수 있다(리뷰 결함) — 후보는
-            # 항상 전체 id 로 보여준다.
+            # Shortening by prefix could itself be ambiguous again (a review
+            # defect) — candidates are always shown as full ids.
             candidates = ", ".join(sorted(matches))
             return None, "ambiguous session prefix {!r}; candidates: {}".format(
                 prefix, candidates)
@@ -1208,8 +1321,9 @@ def cmd_show(args, *, home=None, out=sys.stdout, err=None) -> int:
         return 1
 
     if note:
-        # stdout 은 원본 바이트 그대로여야 한다(`omhc show '#3' --full | jq .` 가
-        # 깨지면 안 된다) — 자동으로 고른 세션을 알리는 메모는 stderr 로만 보낸다.
+        # stdout must be the raw original bytes as-is (`omhc show '#3'
+        # --full | jq .` must not break) — a note about the auto-picked
+        # session goes to stderr only.
         err.write("# {}\n".format(note))
 
     source = _pinned_path(state, entry["session_id"], entry.get("source_path") or "")
@@ -1222,12 +1336,14 @@ def cmd_show(args, *, home=None, out=sys.stdout, err=None) -> int:
         raw = fh.read(entry["length"] if not args.full else -1)
     buf = getattr(out, "buffer", None)
     if buf is not None:
-        # 진짜 stdout — 원본 바이트를 그대로 쓴다(`show '#3' --full | jq .` 가
-        # 깨지면 안 된다). 없는 줄바꿈을 붙이지 않는다: 그 자체가 원본 바이트다.
+        # A real stdout — writes the raw bytes as-is (`show '#3' --full | jq
+        # .` must not break). Doesn't add a missing newline: it's raw bytes
+        # as they are.
         buf.write(raw)
     else:
-        # 테스트의 io.StringIO 처럼 .buffer 가 없는 스트림 — 텍스트로만 비교할
-        # 수 있으므로 디코드하고, 사람이 읽기 좋게 줄바꿈을 보정한다.
+        # A stream with no .buffer, like a test's io.StringIO — can only be
+        # compared as text, so decode it and fix up the newline for human
+        # readability.
         out.write(raw.decode("utf-8", "replace"))
         if not raw.endswith(b"\n"):
             out.write("\n")
@@ -1238,9 +1354,10 @@ def cmd_show(args, *, home=None, out=sys.stdout, err=None) -> int:
 # --- status -----------------------------------------------------------------
 
 
-# 세 값만 쓴다: True(PASS, 게이팅), False(FAIL, 게이팅), None(`----`, 게이팅
-# 안 함). SKIP 이 아니다 — "아직 아무 일도 안 일어났다"를 실패로도 성공으로도
-# 위장하지 않고 그대로 보여주려는 세 번째 라벨이다(#8).
+# Only three values are used: True (PASS, gating), False (FAIL, gating),
+# None (`----`, non-gating). Not SKIP — this is a third label meant to show
+# "nothing has happened yet" as itself, without disguising it as either
+# success or failure (#8).
 def _verdict_word(verdict: Optional[bool]) -> str:
     if verdict is True:
         return "PASS"
@@ -1254,10 +1371,10 @@ def _check(out, label: str, verdict: Optional[bool], detail: str) -> None:
 
 
 def _status_json_empty() -> dict:
-    """`status --json` 의 최상위 키 전부를 빈 값으로. `/` 처럼 진단을 못 내는
-    경로가 쓴다. 정상 경로에 키를 더하면 여기에도 더해야 한다 —
-    test_status 가 두 경로의 키 집합이 같은지 확인한다(#19 리뷰: #25 가 더한
-    키가 `/` 에서만 빠졌다)."""
+    """All of `status --json`'s top-level keys, empty. Used by a path that
+    can't produce diagnostics, like `/`. Any key added to the normal path
+    must be added here too — test_status checks that both paths' key sets
+    match (#19 review: a key #25 added was missing only on the `/` path)."""
     return {
         "repo_root": None, "repo_key": None, "state_dir": None,
         "adapters": [], "ledger_rows": 0, "ledger_rejects": 0,
@@ -1276,16 +1393,19 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     root, key, state = _state_for(home)
     reason = locate.refused_root(root)
     if reason:
-        # `/` 에서의 status 는 오사용이다 — SKIP 이 아니라 게이팅되는 FAIL 로
-        # 보여준다. state 가 이미 있다면(예전에 잘못 돈 흔적) 고아라고 알린다.
-        # 정상 경로의 나머지 진단(ledger.read, adapters.present, health, ...)은
-        # 전부 `root` 에 걸려 있어 `/` 에서 의미가 없다 — text/json 이 여기서만
-        # 갈라지는 최소한의 필드(refused, orphaned_state)를 덧붙인다.
+        # status at `/` is a misuse — shown as a gating FAIL, not SKIP. If
+        # state already exists (a trace of a prior wrong run), reports it as
+        # orphaned. The rest of the normal path's diagnostics
+        # (ledger.read, adapters.present, health, ...) all hinge on `root`
+        # and are meaningless at `/` — the minimal fields where text/json
+        # diverge here (refused, orphaned_state) are added on top.
         orphaned = state if os.path.isdir(state) else None
         if args.json:
-            # 정상 경로와 같은 최상위 키 집합을 유지한다 — 빈 값이라도 있어야
-            # 소비자가 `/` 에서만 KeyError 로 죽지 않는다(#19). 값 자체는 의미가
-            # 없다(정상 경로의 진단은 전부 `root` 에 걸려 있어 여기선 못 낸다).
+            # Keeps the same top-level key set as the normal path — even
+            # empty values need to be there so a consumer doesn't KeyError
+            # only on `/` (#19). The values themselves are meaningless
+            # (the normal path's diagnostics all hinge on `root` and can't be
+            # produced here).
             payload = _status_json_empty()
             payload.update({
                 "repo_root": root, "repo_key": key, "state_dir": state,
@@ -1299,25 +1419,30 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
                 out.write("orphaned state dir: {}\n".format(orphaned))
         return 1
     installed = adapters.present(now=time.time)
-    # 원장은 아래 health_rows 를 위해 어차피 무제한으로 한 번 더 읽어야 한다
-    # (전역 세션 id 때문에 레포로 못 거름) — 10만 행에서 파싱만 약 0.5초라
-    # 두 번 읽으면 배가된다(#25). 한 번 무제한으로 읽고, 이 레포용 rows 는
-    # read(repo_key=key) 가 하던 것과 같은 규칙(필터 먼저, limit 은 나중에)을
-    # 메모리에서 재현한다 — 안 그러면 여러 레포를 오가는 사람에게서 이 레포의
-    # 행이 다른 레포 행들에 밀려 슬라이스 밖으로 나간다.
+    # The ledger needs to be read unlimited once more anyway, for the
+    # health_rows below (global session ids mean it can't be filtered by
+    # repo) — parsing alone takes about 0.5s at 100k rows, so reading it
+    # twice would double that (#25). Reads it unlimited once, and
+    # reconstructs this repo's rows in memory using the same rule
+    # read(repo_key=key) used (filter first, limit last) — otherwise, for
+    # someone bouncing between multiple repos, this repo's rows would get
+    # pushed out of the slice by other repos' rows.
     all_rows = ledger.read(home=home, limit=0)
     rows = [r for r in all_rows if r.get("repo") == key][-ledger.DEFAULT_LIMIT:]
     artifact = os.path.join(state, ARTIFACT_NAME)
 
-    # #22: append() 가 상한을 못 맞춰 조용히 버린 행. "최근" 만 게이팅한다 —
-    # 예전에 한 번 있었지만 그 뒤로 반복되지 않았다면 사람이 영원히 못 지우는
-    # FAIL 을 보게 하면 안 된다(off switch/archive 행과 같은 원칙,
-    # due.MAX_AGE_SECONDS 를 재사용한다). `bytes > ledger.MAX_LINE` 도 함께
-    # 본다 — 상한을 올려 고친 뒤라면(#22 리뷰) 예전에 적힌 행이 지금 상한으로는
-    # 이미 들어가므로 "고쳤다" 라는 사실을 cap 을 따로 저장하지 않고도 안다.
-    # `session` 으로 distinct 해서 센다 — `_note_rejection` 이 재시도마다 같은
-    # (repo, harness, session) 을 또 적지 않게 막지만, 그 방어가 생기기 전에
-    # 이미 쌓인 중복 줄까지 한 세션을 여러 번 버려진 것처럼 부풀리면 안 된다.
+    # #22: rows silently dropped by append() failing to meet the cap. Only
+    # "recent" ones gate — if it happened once in the past but never
+    # recurred since, a human shouldn't be stuck seeing a FAIL they can never
+    # clear (same principle as the off switch/archive row, reusing
+    # due.MAX_AGE_SECONDS). Also checks `bytes > ledger.MAX_LINE` — if the
+    # cap was already raised to fix this (#22 review), an old row that now
+    # fits under the current cap tells us "already fixed" without needing to
+    # store the cap separately. Counted distinct by `session` —
+    # `_note_rejection` already stops writing the same (repo, harness,
+    # session) again on retry, but even duplicate lines that piled up before
+    # that guard existed shouldn't inflate one session into looking like it
+    # was dropped multiple times.
     rejected_now = time.time()
     recent_rejected = [
         r for r in ledger.read_rejected(home=home, repo_key=key)
@@ -1330,18 +1455,20 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
         for i, r in enumerate(recent_rejected)
     }
 
-    # watch.lag 가 정확히 이 계산을 소유한다. 두 벌로 두면 고정 레이아웃이
-    # 바뀔 때 한쪽만 고쳐진다.
+    # watch.lag owns this calculation exactly. Keeping two copies would risk
+    # only one getting updated when the pin layout changes.
     lag_rows = watch.lag(state)
 
-    # X = 최근 PULL_RATE_WINDOW 번 전달 중 최소 한 번 인출된 세션 수(중복
-    # 제거), N = 그 창의 전달 횟수(§9 "pulled X of N injections"). injections
-    # 는 별도로 delivered.tsv 전체 줄 수(archive 행 판정용)를 유지한다.
+    # X = number of distinct sessions pulled at least once among the last
+    # PULL_RATE_WINDOW deliveries, N = that window's delivery count (§9
+    # "pulled X of N injections"). injections separately keeps the full
+    # delivered.tsv line count (used for the archive row's judgment).
     pull_sessions = {r.get("session") for r in rows
                       if r.get("event") == "pull" and r.get("session")}
     delivered = os.path.join(state, due.DELIVERED_NAME)
-    # append 순서 그대로 모은다 — delivered.tsv 의 epoch 필드는 타임스탬프라
-    # 거꾸로 갈 수 있으므로(불변식 6) 정렬 기준이 아니라 줄 순서 자체를 쓴다.
+    # Collected in append order as-is — delivered.tsv's epoch field is a
+    # timestamp that can go backward (invariant 6), so line order itself is
+    # used instead of it as a sort key.
     delivered_order: List[str] = []
     if os.path.exists(delivered):
         with open(delivered, encoding="utf-8", errors="replace") as fh:
@@ -1349,69 +1476,82 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
                 if not line.strip():
                     continue
                 parts = line.split("\t")
-                # reopen 줄은 전달이 아니다 — 세면 resume 만 하고 아직 다시
-                # 전달되지 않은 세션이 injections/pull rate 분모에 낀다(#22).
+                # A reopen line isn't a delivery — counting it would let a
+                # session that merely resumed and hasn't been redelivered yet
+                # sneak into the injections/pull-rate denominator (#22).
                 if len(parts) >= 2 and parts[1] == due.REOPEN_MARKER:
                     continue
                 delivered_order.append(parts[0])
     injections = len(delivered_order)
 
-    # pull rate 의 분모를 delivered.tsv 전체로 두면, 한 레포를 오래 쓸수록
-    # 분모만 무한정 자라 인출률이 서서히 낮아 보인다(#25) — 오래된 전달의
-    # pull 행은 이미 원장 창(rows, DEFAULT_LIMIT) 밖으로 밀려났는데 분모는
-    # 안 줄기 때문이다. 그래서 "최근 N번 전달 중 몇 번 인출됐는가"로 분모
-    # 자체를 최근 N 개로 묶는다. 세션 id 로 맞춘다 — pull 행이 session 필드를
-    # 이미 들고 있어(위 pull_sessions) 위치 기반 근사가 필요 없다.
+    # Leaving the pull rate's denominator as all of delivered.tsv would make
+    # it grow unboundedly the longer a repo is used, so the rate would look
+    # like it's slowly dropping (#25) — an old delivery's pull row already
+    # gets pushed outside the ledger window (rows, DEFAULT_LIMIT), but the
+    # denominator wouldn't shrink to match. So the denominator itself is
+    # bound to the last N via "how many of the last N deliveries were
+    # pulled". Matched by session id — a pull row already carries the
+    # session field (pull_sessions above), so no position-based approximation
+    # is needed.
     recent_window = delivered_order[-PULL_RATE_WINDOW:]
     recent_injections = len(recent_window)
     recent_sessions = {s for s in recent_window if s}
     recent_pulls = len(recent_sessions & pull_sessions)
-    # JSON 의 `pulls` 는 예전 뜻(전체 전달 중 인출된 세션 수)을 유지한다 —
-    # `pulls / injections` 로 비율을 내는 소비자가 창 도입으로 조용히 틀리지
-    # 않게, 창 안의 값은 `recent_pulls` / `recent_injections` 짝으로 따로 낸다.
+    # JSON's `pulls` keeps its old meaning (sessions pulled out of all
+    # deliveries) — so a consumer computing a ratio as `pulls / injections`
+    # doesn't silently go wrong once the window is introduced; the
+    # windowed value is reported separately as the `recent_pulls` /
+    # `recent_injections` pair.
     pulls = len({s for s in delivered_order if s} & pull_sessions)
 
-    # AGENTS.md 가 CLAUDE.md 와 공유되면 Codex Path B 는 절대 쓰면 안 된다 —
-    # 그 파일을 공유 배선 만들기 *전에* 심어 둔 낡은 관리 구간만 실패 사유다.
+    # If AGENTS.md is shared with CLAUDE.md, Codex Path B must never be used
+    # — the only failure reason is a stale managed block planted *before*
+    # that file became shared wiring.
     shared = agents_md.shared_with_claude(root)
     leaked = bool(shared) and managed_block.installed_captured_at(
         agents_md.path_for(root)) is not None
 
-    # 선택적 어댑터 진단(예: codex 신뢰 안 된 훅). 세션 id 는 전역 유일이므로
-    # 레포로 거르지 않은 all_rows(위에서 이미 무제한으로 읽어 둔 것)를 그대로
-    # 넘긴다 — 위 rows 처럼 이 레포로 미리 거르면 자기 .git 을 가진 중첩
-    # 워크트리·서브모듈에서 시작한 세션이 다른 repo 키로 기록돼 여기서 영원히
-    # "안 돈 것"으로 보인다. limit(기본 2000, 머신 전체 공유)이 14일 창을 못
-    # 덮을 수 있다는 게 알려진 한계다 — 개인용 도구고 status 는 훅 경로가
-    # 아니므로 필요하면 여기서만 무제한으로 읽는다. 한 어댑터가 죽어도 나머지
-    # status 가 죽으면 안 되므로 어댑터별로 감싼다.
+    # Optional adapter diagnostics (e.g. Codex's untrusted hook). Session ids
+    # are globally unique, so all_rows (already read unlimited above), not
+    # filtered by repo, is passed straight through — pre-filtering by this
+    # repo like `rows` above does would make a session started inside a
+    # nested worktree/submodule with its own .git (recorded under a
+    # different repo key) look permanently "never ran" here. It's a known
+    # limitation that the limit (default 2000, shared machine-wide) may not
+    # cover a 14-day window — this is a personal tool and status isn't the
+    # hook path, so it's read unlimited here when needed. Wrapped per adapter
+    # so one adapter dying doesn't kill the rest of status.
     health_rows = []
     for adapter_id in installed:
         try:
             inst = adapters.get(adapter_id, home=home)
         except Exception:
-            # 어댑터 생성 자체가 안 되면 health 를 판정할 근거가 없다.
+            # If the adapter itself can't even be constructed, there's no basis to judge health.
             continue
         try:
             health_rows.extend(getattr(inst, "health", lambda *a: ())(root, all_rows))
         except Exception:
             pass
 
-    # hooks 행은 `installed`(detect() 로 감지된 것)보다 넓다 — curl 설치
-    # 직후, 하네스가 한 번도 안 돌아 detect() 가 보는 세션 디렉터리가 아직
-    # 없어도 설정 디렉터리(~/.claude, ~/.codex)는 있을 수 있고, 그 경우도
-    # "설치됐는지" 는 여전히 보여줘야 한다(hook_config_targets, #7 리뷰 1).
-    # health 와 독립이다 — 한쪽이 죽어도 다른 쪽 행은 여전히 나와야 한다
-    # (리뷰 결함: 예전엔 health 의 예외가 hooks 판정 자체를 건너뛰었다).
+    # The hooks row covers more than `installed` (what detect() found) —
+    # right after a curl install, before the harness has ever run, detect()'s
+    # session directory may not exist yet, but the harness's own config
+    # directory (~/.claude, ~/.codex) may already exist if it was run before
+    # or a human created it in advance, and "is it installed" still needs to
+    # be shown in that case (hook_config_targets, #7 review 1). Independent
+    # of health — one dying must not suppress the other's row too (a review
+    # defect: health's exception used to skip the hooks judgment itself).
     hook_rows = []
     for adapter_id in hook_config_targets(home):
         try:
             inst = adapters.get(adapter_id, home=home)
             hc = getattr(inst, "hook_config", lambda: None)()
             if hc is not None:
-                # 어댑터가 `hooks_status()` 를 구현하면(예: codex-cli — hooks.json
-                # 뿐 아니라 config.toml 의 인라인 [hooks] 도 보는 판정, #32) 그걸
-                # 쓴다 — 코어(hookconf.inspect)는 hooks.json 한 위치만 안다.
+                # If the adapter implements `hooks_status()` (e.g. codex-cli
+                # — a judgment that also looks at config.toml's inline
+                # [hooks], not just hooks.json, #32), use that — the core
+                # (hookconf.inspect) only knows about one hooks.json
+                # location.
                 custom = getattr(inst, "hooks_status", None)
                 if callable(custom):
                     ok, detail = custom()
@@ -1420,14 +1560,15 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
                     ok, detail = hookconf.inspect(hc.config_path, fragment, inst.home)
                 hook_rows.append(("{} hooks".format(adapter_id), ok, detail))
         except Exception as exc:
-            # 조용히 버리지 않는다 — 판정이 죽었다는 사실 자체가 FAIL 행이다
-            # (예: hooks/ 디렉터리가 없어 load_fragment 가 실패한 경우).
+            # Doesn't drop this silently — the judgment itself dying is a
+            # FAIL row (e.g. load_fragment failing because hooks/ doesn't exist).
             hook_rows.append(("{} hooks".format(adapter_id), False,
                               "cannot check hooks ({})".format(exc)))
     watcher = watch.read_lock(state)
 
-    # 행을 한 번만 만들고 텍스트·JSON 이 같은 목록을 렌더한다 — 따로 만들면
-    # 한쪽만 고쳐질 수 있다(#8, status --json 이 항상 exit 0 이던 결함).
+    # Rows are built once and text/JSON render the same list — building them
+    # separately risks fixing only one (#8, the old defect where
+    # status --json always exited 0).
     checks = []
     checks.append(("adapters", bool(installed), ", ".join(installed) or "none found"))
     checks.append(("ledger", None,
@@ -1443,14 +1584,16 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     else:
         checks.append(("ledger rejects", None, "none recently"))
 
-    # lag_rows 의 size/lag_bytes 는 pinned/<sid>/source.jsonl 이 없어도 0 으로
-    # 나온다 — "size 0" 과 "고정 성공, 꼬리 0바이트" 를 구분 못 하면 고정이
-    # 실패한 세션도 archive PASS 로 보인다(리뷰 결함). watch.lag 의 `pinned` 로
-    # 실제 존재 여부를 본다.
+    # lag_rows's size/lag_bytes come out as 0 even when pinned/<sid>/source.jsonl
+    # doesn't exist — without distinguishing "size 0" from "pinned
+    # successfully, zero-byte tail", a session whose pinning failed would
+    # also show archive PASS (a review defect). watch.lag's `pinned` is used
+    # to check whether it actually exists.
     pinned_rows = [r for r in lag_rows if r.get("pinned")]
     unpinned_rows = [r for r in lag_rows if not r.get("pinned")]
-    # 고정폭 8자는 Codex UUIDv7 앞 8자가 ~65초마다만 바뀌어 자주 충돌한다
-    # (#15c) — 이 레포에 지금 보이는 id 들 사이에서만 유일하면 된다.
+    # A fixed 8 chars collides often, since Codex's UUIDv7 only changes its
+    # first 8 chars every ~65 seconds (#15c) — only needs to be unique among
+    # the ids currently visible in this repo.
     archive_n = _unique_prefix_len([r["session"] for r in lag_rows]) if lag_rows else 8
     if pinned_rows:
         archive_verdict = True
@@ -1461,10 +1604,10 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
             archive_detail += "; unpinned: " + ", ".join(
                 r["session"][:archive_n] for r in unpinned_rows)
     elif injections:
-        # 핀은 brief.compute 가 전달 *후에만* 만든다(brief.py) — 원장 행은
-        # 있지만 아직 한 번도 전달받지 못한 사람에게 archive 를 영영 FAIL 로
-        # 두면 안 되지만, 전달은 됐는데(injections>0) 핀이 하나도 없다면
-        # 진짜 결함이다.
+        # brief.compute only creates a pin *after* delivery (brief.py) — a
+        # person with a ledger row but no delivery yet must not be left
+        # seeing archive as a permanent FAIL, but if a delivery did happen
+        # (injections>0) and there's no pin at all, that's a genuine defect.
         archive_verdict = False
         archive_detail = "{} injections but nothing pinned".format(injections)
         log_path = os.path.join(locate.omhc_root(home), brief.GUARD_LOG)
@@ -1551,14 +1694,15 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
 
 
 def cmd_brief(args, *, home=None, out=sys.stdout) -> int:
-    # --dry-run 은 사람이 손으로 확인하려고 부르는 경로다(훅은 --dry-run 을
-    # 절대 넘기지 않는다). 문서화된 쓰임 하나가 `echo '{"cwd": R}' | omhc brief
-    # --dry-run` 처럼 다른 cwd 에서 payload 를 파이프로 넘기는 것이라, 아예 안
-    # 읽으면 그 쓰임이 깨진다(리뷰). 그렇다고 `_stdin_text()` 를 그대로 쓰면
-    # 파이프의 다른 쪽 끝이 열려만 있고 아직 아무것도 안 쓴 채면(TTY 가 아니라
-    # isatty() 는 False) EOF 를 기다리며 멈춘다(#27). `_dry_run_stdin_text()`
-    # 는 select 로 "지금 읽을 게 있는가"만 먼저 물어 그 사이를 가른다. 실제
-    # 훅 경로(dry_run=False)는 오늘과 똑같이 그대로 읽는다.
+    # --dry-run is a path a human calls by hand to check things (a hook
+    # never passes --dry-run). One documented use pipes a payload from a
+    # different cwd, like `echo '{"cwd": R}' | omhc brief --dry-run` — not
+    # reading at all would break that (review). But using plain
+    # `_stdin_text()` would hang waiting for EOF if the other end of the pipe
+    # is just left open having written nothing yet (isatty() is False, not a
+    # TTY) (#27). `_dry_run_stdin_text()` splits that gap by asking select
+    # "is there anything to read right now" first. The real hook path
+    # (dry_run=False) still reads exactly as it does today.
     if args.dry_run and args.stdin is None:
         stdin_text = _dry_run_stdin_text()
     else:
@@ -1580,9 +1724,10 @@ def cmd_brief(args, *, home=None, out=sys.stdout) -> int:
 
 
 def _adapters_with_hook_config(home) -> List[str]:
-    """`hook_config()` 를 구현한(=SessionStart 훅 개념이 있는) 등록된 어댑터
-    id 전부. 감지 여부와 무관하다 — `--harness` 없이 아무 대상도 못 찾았을 때
-    "이 중에서 골라라" 로 보여줄 목록이다."""
+    """Every registered adapter id that implements `hook_config()` (i.e. has
+    the notion of a SessionStart hook). Unrelated to detection — this is the
+    list shown as "pick from these" when no target could be found without
+    `--harness`."""
     ids = []
     for adapter_id in sorted(adapters.REGISTRY):
         try:
@@ -1595,16 +1740,18 @@ def _adapters_with_hook_config(home) -> List[str]:
 
 
 def hook_config_targets(home) -> List[str]:
-    """`hook_config()` 가 있고, 이 머신에서 그 하네스가 감지됐거나(`detect()`)
-    설정 디렉터리가 이미 있는 어댑터 id 들. `omhc status` 의 `<adapter-id>
-    hooks` 행과 `omhc hooks install` 의 기본 대상이 이 규칙을 공유한다.
+    """Adapter ids that have `hook_config()` and either got detected on this
+    machine (`detect()`) or already have a config directory. `omhc status`'s
+    `<adapter-id> hooks` row and `omhc hooks install`'s default target share
+    this rule.
 
-    curl 설치 직후, 어느 하네스도 아직 한 번도 안 돈 시점에는 `detect()` 가
-    보는 세션 디렉터리(`~/.claude/projects`, `~/.codex/sessions`)가 없다 —
-    하지만 하네스 자신의 설정 디렉터리(`~/.claude`, `~/.codex`)는 그 하네스를
-    한 번이라도 실행했거나 사람이 미리 만들어 뒀다면 존재할 수 있다. 이 규칙이
-    없으면 첫 사용자에게 `hooks install` 이 "찾은 게 없다"며 조용히 아무 일도
-    안 하고, `status` 도 훅 행 자체를 안 보여준다(#7 리뷰 1)."""
+    Right after a curl install, before any harness has ever run, the session
+    directory detect() looks at (`~/.claude/projects`, `~/.codex/sessions`)
+    doesn't exist yet — but the harness's own config directory
+    (`~/.claude`, `~/.codex`) may exist if it was ever run before, or a
+    human created it in advance. Without this rule, `hooks install` would
+    silently do nothing to a first-time user, saying "found nothing", and
+    `status` wouldn't show the hooks row at all (#7 review 1)."""
     ids = []
     for adapter_id in sorted(adapters.REGISTRY):
         try:
@@ -1624,12 +1771,12 @@ def hook_config_targets(home) -> List[str]:
 
 
 def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
-    """`omhc hooks install|uninstall`. status 의 `<adapter-id> hooks` 행이
-    가리키는 그 설치를 실제로 한다. 코어는 벤더 이름을 모른다 — 대상은
-    `hook_config()` 를 구현한, 이 머신에 감지됐거나 설정 디렉터리가 있는
-    어댑터들이다."""
+    """`omhc hooks install|uninstall`. Actually performs the install that
+    status's `<adapter-id> hooks` row points at. The core doesn't know
+    vendor names — the targets are adapters that implement `hook_config()`
+    and were either detected on this machine or have a config directory."""
     if not getattr(args, "hooks_action", None):
-        # argparse 관례: 동작 없이 부르면 사용법은 stderr, exit 2(#19).
+        # argparse convention: called with no action, usage goes to stderr, exit 2 (#19).
         (err or sys.stderr).write(
             "usage: omhc hooks install|uninstall [--harness ID]\n")
         return 2
@@ -1660,14 +1807,16 @@ def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
             if args.hooks_action == "install":
                 fragment = hookconf.load_fragment(hc.fragment_name)
                 custom_status = getattr(inst, "hooks_status", None)
-                # 어댑터가 `inline_hook_present()` 를 구현하면(codex-cli —
-                # config.toml 의 인라인 [hooks] 도 실행 가능한 omhc 호출을 담을
-                # 수 있다, #32) 그걸로 "hooks.json 이 아닌 다른 층에 이미 있는가"
-                # 를 먼저 묻는다 — "존재" 와 "배포 조각과 똑같은가" 는 다른
-                # 질문이다(리뷰 #1): 존재하면 그 층이 깨져 있어도(예: mark 가
-                # 빠짐) hooks.json 에 겹쳐 쓰지 않는다 — 겹치면 하네스가 두
-                # 층을 다 로드하고 경고하는 상태가 된다. 대신 깨져 있으면
-                # 그 사실을 알리고 exit 를 실패로 표시한다.
+                # If the adapter implements `inline_hook_present()`
+                # (codex-cli — config.toml's inline [hooks] can also hold a
+                # runnable omhc call, #32), this asks first whether one
+                # already exists in a layer other than hooks.json —
+                # "exists" and "matches the shipped fragment" are different
+                # questions (review #1): if it exists, even if that layer is
+                # broken (e.g. missing mark), this doesn't overlay
+                # hooks.json on top of it — overlaying would leave the
+                # harness loading both layers and warning. Instead, if it's
+                # broken, this reports that and marks the exit as a failure.
                 inline_present = getattr(inst, "inline_hook_present", None)
                 if callable(inline_present) and inline_present():
                     ok, detail = (custom_status() if callable(custom_status)
@@ -1706,9 +1855,11 @@ def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
                 out.write("{}: {} -- {}\n".format(
                     adapter_id, "PASS" if ok else "FAIL", detail))
                 if not ok:
-                    # 파일은 이미 (다시) 쓰였다 — 그런데도 재검사가 FAIL 이면
-                    # (예: 바이너리를 아직 못 찾음) 사람이 고쳐야 할 문제가
-                    # 남아 있다는 뜻이므로 exit code 로도 알린다(#7 리뷰 2).
+                    # The file has already been (re)written — if the
+                    # re-check still FAILs anyway (e.g. the binary still
+                    # can't be found), a problem remains for the human to
+                    # fix, so this also signals it via the exit code
+                    # (#7 review 2).
                     had_error = True
             else:
                 changed = hookconf.strip(hc.config_path)
@@ -1721,7 +1872,7 @@ def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
         except hookconf.HookConfigError as exc:
             out.write("{}: {}\n".format(adapter_id, exc))
             had_error = True
-        except Exception as exc:  # 트레이스백은 절대 안 보여준다 — 훅 경로는 아니지만 이 명령도 사람용이다.
+        except Exception as exc:  # never show a traceback — not the hook path, but this command is also for humans.
             out.write("{}: unexpected error ({})\n".format(adapter_id, exc))
             had_error = True
 
@@ -1744,8 +1895,8 @@ def cmd_clear(args, *, home=None, out=sys.stdout) -> int:
     if os.path.exists(artifact):
         os.unlink(artifact)
         removed.append(artifact)
-    # #22 리뷰: 원인을 고친(예: MAX_LINE 을 올린) 뒤에도 `ledger rejects` 가
-    # 영원히 FAIL 로 남으면 안 된다 — 이 레포의 거부 기록만 지운다.
+    # #22 review: once the cause is fixed (e.g. MAX_LINE raised), `ledger
+    # rejects` must not stay FAIL forever — clears only this repo's reject record.
     rejected_cleared = ledger.clear_rejected(key, home=home)
     if rejected_cleared:
         removed.append("{} ledger reject row(s)".format(rejected_cleared))
@@ -1760,7 +1911,7 @@ def cmd_clear(args, *, home=None, out=sys.stdout) -> int:
 
 
 def cmd_watch(args, *, home=None, out=sys.stdout) -> int:
-    """가속기 데몬. 정확성을 담당하지 않으므로 죽어도 결과가 바뀌지 않는다."""
+    """Accelerator daemon. Not responsible for correctness, so its death doesn't change the result."""
     root, _key, state = _state_for(home)
     reason = locate.refused_root(root)
     if reason:
@@ -1797,35 +1948,35 @@ def cmd_watch(args, *, home=None, out=sys.stdout) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog=PROG, description="하네스 간 작업 이어가기")
+    parser = argparse.ArgumentParser(prog=PROG, description="Carries working context across harnesses")
     sub = parser.add_subparsers(dest="command")
 
-    p = sub.add_parser("brief", help="훅 경로: 전달할 표식을 stdout 으로")
+    p = sub.add_parser("brief", help="Hook path: prints the handoff to stdout")
     p.add_argument("--harness", required=True)
     p.add_argument("--budget", type=int, default=brief.mint.BUDGET)
     p.add_argument("--wire", default="", choices=("", "claude", "cursor", "sdk"),
-                   help="주입 JSON 형식. 기본값은 --harness 에서 유도한다")
+                   help="Injection JSON format. Defaults to what --harness implies")
     p.add_argument("--force", action="store_true")
     p.add_argument("--text", action="store_true")
     p.add_argument("--dry-run", action="store_true",
-                   help="본문만 텍스트로 보이고 게이트·아카이브·전달을 건드리지 않는다")
+                   help="Shows only the body as text; leaves gate/archive/delivery untouched")
     p.add_argument("--stdin", default=None, help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_brief)
 
-    p = sub.add_parser("mark", help="세션 시작을 원장에 기록")
+    p = sub.add_parser("mark", help="Records a session start in the ledger")
     p.add_argument("--harness", required=True)
     p.add_argument("--event", default="start", choices=("start", "end"))
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--stdin", default=None, help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_mark)
 
-    p = sub.add_parser("show", help="표식의 태그로 원본 바이트를 조회")
-    p.add_argument("target", help="E1 같은 표식 태그, 또는 `omhc log` 가 출력한 "
-                   "<session>#N / #N 참조")
+    p = sub.add_parser("show", help="Looks up the original bytes for a handoff tag")
+    p.add_argument("target", help="A tag like E1, or the "
+                   "<session>#N / #N reference `omhc log` prints")
     p.add_argument("--full", action="store_true")
     p.set_defaults(func=cmd_show)
 
-    p = sub.add_parser("log", help="색인된 이벤트를 한 줄씩")
+    p = sub.add_parser("log", help="Indexed events, one per line")
     p.add_argument("--last", type=int, default=30)
     p.add_argument("--grep", default="")
     p.add_argument("--verb", default="")
@@ -1834,46 +1985,47 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "trace",
-        help="파일을 건드린 색인된 이벤트를 두 하네스 세션을 넘나들며 보인다",
-        description="색인된 세션 중 이 파일을 건드린 이벤트를 `show` 로 열 수 있는 "
-                     "참조와 함께 오래된 순으로(최신이 마지막 줄, `log` 와 같은 "
-                     "순서) 나열한다. 색인은 전달 시점이나 `omhc watch` 가 세우므로, "
-                     "아직 전달·감시된 적 없는 세션은 여기 안 잡힌다. `watch` 로만 "
-                     "색인되고 아직 원장에 start 행이 없는 세션은 하네스 칸이 `?` 로 "
-                     "나온다.")
-    p.add_argument("path", help="상대·절대경로 모두 가능")
+        help="Shows indexed events that touched a file, across both harnesses' sessions",
+        description="Lists indexed events that touched this file, with references "
+                     "`show` can open, oldest first (most recent on the last line, "
+                     "same order as `log`). The index is only built at delivery time "
+                     "or by `omhc watch`, so a session never delivered or watched "
+                     "isn't caught here. A session that's only been indexed by `watch` "
+                     "and has no start row in the ledger yet shows `?` in the harness "
+                     "column.")
+    p.add_argument("path", help="Relative or absolute path, either works")
     p.add_argument("--all", action="store_true",
-                   help="modified 뿐 아니라 inspected/ran 언급까지 포함")
+                   help="Includes inspected/ran mentions too, not just modified")
     p.add_argument("--last", type=int, default=30)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_trace)
 
-    p = sub.add_parser("note", help="메모를 남긴다 (에이전트도 부를 수 있다)")
+    p = sub.add_parser("note", help="Leaves a note (an agent can call this too)")
     p.add_argument("text", nargs="+")
     p.set_defaults(func=cmd_note)
 
-    p = sub.add_parser("status", help="유일한 사람용 대시보드")
+    p = sub.add_parser("status", help="The one human dashboard")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_status)
 
-    p = sub.add_parser("watch", help="가속기 데몬 (선택. 없어도 결과는 같다)")
+    p = sub.add_parser("watch", help="Accelerator daemon (optional — the result is the same without it)")
     p.add_argument("--stop", action="store_true")
-    p.add_argument("--once", action="store_true", help="한 번만 훑고 끝낸다")
+    p.add_argument("--once", action="store_true", help="Sweeps once and exits")
     p.add_argument("--poll", type=float, default=watch.POLL_SECONDS)
     p.add_argument("--idle-exit", type=float, default=watch.IDLE_EXIT_SECONDS,
                    dest="idle_exit")
     p.set_defaults(func=cmd_watch)
 
-    p = sub.add_parser("clear", help="설치된 표식을 제거")
+    p = sub.add_parser("clear", help="Removes installed handoff artifacts")
     p.set_defaults(func=cmd_clear)
 
-    p = sub.add_parser("hooks", help="omhc 자신의 SessionStart 훅을 설치/제거")
+    p = sub.add_parser("hooks", help="Installs/removes omhc's own SessionStart hooks")
     p.set_defaults(func=cmd_hooks, hooks_action=None)
     hooks_sub = p.add_subparsers(dest="hooks_action")
-    p_install = hooks_sub.add_parser("install", help="감지된 하네스에 훅을 병합")
+    p_install = hooks_sub.add_parser("install", help="Merges hooks into detected harnesses")
     p_install.add_argument("--harness", default=None)
     p_install.set_defaults(func=cmd_hooks)
-    p_uninstall = hooks_sub.add_parser("uninstall", help="omhc 자신의 훅만 제거")
+    p_uninstall = hooks_sub.add_parser("uninstall", help="Removes only omhc's own hooks")
     p_uninstall.add_argument("--harness", default=None)
     p_uninstall.set_defaults(func=cmd_hooks)
 
@@ -1887,10 +2039,12 @@ def main(argv=None, *, home=None, out=None) -> int:
         parser.print_help(out or sys.stdout)
         return 0
     stream = out or sys.stdout
-    # --harness 를 **여기서** 해소한다. 자유 문자열로 흘려보내면 오타가 세 깊이에서
-    # 서로 다르게 조용히 열화된다 — 와이어 표는 기본값으로 떨어지고, 같은 벤더
-    # 단축이 매칭을 멈추고, adapters.get 은 brief 의 bare except 안에서 터져
-    # 아무것도 출력하지 않는다. 경계에서 한 번 실패하는 것이 낫다.
+    # --harness is resolved **here**. Letting a free-form string flow through
+    # would degrade a typo silently, differently at three different depths —
+    # the wire table would fall back to its default, the same vendor
+    # shorthand would stop matching, and adapters.get would raise inside
+    # brief's bare except and print nothing. Better to fail once, at the
+    # boundary.
     harness = getattr(args, "harness", None)
     if harness:
         try:

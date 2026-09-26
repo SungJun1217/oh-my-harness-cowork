@@ -64,7 +64,7 @@ class TestRecords(unittest.TestCase):
 class TestRegistry(unittest.TestCase):
     def test_registry_holds_classes_not_instances(self):
         for key, value in adapters.REGISTRY.items():
-            self.assertTrue(isinstance(value, type), "{} 은 클래스여야 한다".format(key))
+            self.assertTrue(isinstance(value, type), "{} must be a class".format(key))
 
     def test_adapter_ids_match_module_stem_convention(self):
         for key in adapters.REGISTRY:
@@ -92,7 +92,7 @@ class TestRegistry(unittest.TestCase):
                 pass
 
             def detect(self):
-                raise RuntimeError("한 어댑터의 나쁜 하루가 전체를 죽이면 안 된다")
+                raise RuntimeError("one adapter's bad day must not kill everything")
 
         adapters.REGISTRY["fake"] = FakeAdapter
         adapters.REGISTRY["boom"] = Exploding
@@ -106,15 +106,16 @@ class TestRegistry(unittest.TestCase):
             del adapters.REGISTRY["fake"]
             del adapters.REGISTRY["boom"]
 
-    # v1 어댑터 2개가 실제로 등재됐는지는 tests/test_registry_v1.py 가 본다
-    # (어댑터 구현 태스크에서 추가된다). 태스크마다 스위트가 그린이어야 하므로
-    # 여기서는 계약만 검증한다.
+    # Whether the two v1 adapters are actually registered is checked by
+    # tests/test_registry_v1.py (added in the adapter implementation task). Since
+    # the suite must stay green after every task, only the contract is checked here.
 
 
 class TestExceptions(unittest.TestCase):
     def test_declared_exceptions_share_a_base(self):
-        """선언된 예외만 둔다. 어느 어댑터도 던지지 않는 예외는 계약이 아니라
-        희망이다 — 모르는 모양은 unparsed 로 계상하는 것이 문서화된 설계다."""
+        """Only declared exceptions exist. An exception no adapter ever throws
+        is a hope, not a contract — the documented design is to count unknown
+        shapes as unparsed."""
         for exc in (A.AdapterUnavailable, A.NoInjectionChannel):
             self.assertTrue(issubclass(exc, A.OmhcAdapterError))
 

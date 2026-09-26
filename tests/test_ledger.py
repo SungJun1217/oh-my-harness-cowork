@@ -26,7 +26,7 @@ class TestLedger(unittest.TestCase):
         self.assertEqual(rows[0]["harness"], "claude")
 
     def test_lines_stay_under_the_line_cap(self):
-        """장식용 필드(cwd)를 줄여 상한에 맞춘다."""
+        """Shortens a decorative field (cwd) to fit under the cap."""
         ok = ledger.append(
             {"repo": "k", "harness": "claude", "session": "s", "event": "start",
              "path": "/p" * 60, "cwd": "/very/long/cwd" * 20},
@@ -37,8 +37,8 @@ class TestLedger(unittest.TestCase):
             self.assertLessEqual(len(fh.readline()), ledger.MAX_LINE)
 
     def test_a_realistic_long_home_row_now_fits(self):
-        """#22: 긴 HOME(실측 ~80~100자)에서 Claude 백필 경로가 옛 400바이트
-        상한을 넘겨 조용히 버려졌다. 800바이트 상한에서는 들어가야 한다."""
+        """#22: with a long HOME (observed ~80-100 chars), the Claude backfill path
+        exceeded the old 400-byte cap and was silently dropped. It must fit under the 800-byte cap."""
         home = "/Users/" + "u" * 70
         root = os.path.join(home, "Projects", "some-repo-name")
         slug = "-" + root.strip("/").replace("/", "-")
@@ -55,8 +55,9 @@ class TestLedger(unittest.TestCase):
         self.assertEqual(row["path"], path)
 
     def test_identity_fields_are_never_truncated(self):
-        """path 와 session 을 자르면 문법상 유효하지만 아무것도 가리키지 않는
-        줄이 되어 핸드오프가 조용히 실패하고 guard.log 에도 남지 않는다."""
+        """Truncating path or session yields a line that's syntactically valid
+        but points to nothing, so the handoff fails silently and doesn't even
+        show up in guard.log."""
         path = "/home/user/work/clients/acme/monorepo/" + "x" * 80
         session = "s" * 36
         ledger.append(
@@ -74,12 +75,12 @@ class TestLedger(unittest.TestCase):
              "event": "start", "path": "/p" * 400},
             home=self.home,
         )
-        self.assertFalse(ok, "맞출 수 없으면 쓰지 않고 False 를 돌려줘야 한다")
+        self.assertFalse(ok, "if it can't fit, must return False without writing")
         self.assertEqual(ledger.read(home=self.home), [])
 
     def test_a_refusal_is_recorded_for_status_to_show(self):
-        """#22: 호출자가 append() 의 반환값을 버려도, 거부 자체는
-        ledger.rejected 에 남아 `omhc status` 가 보여줄 수 있다."""
+        """#22: even if the caller discards append()'s return value, the refusal
+        itself remains in ledger.rejected for `omhc status` to show."""
         ok = ledger.append(
             {"repo": "k", "harness": "codex-cli", "session": "s" * 36,
              "event": "start", "path": "/p" * 400},
@@ -93,9 +94,10 @@ class TestLedger(unittest.TestCase):
         self.assertEqual(ledger.read_rejected(home=self.home, repo_key="other"), [])
 
     def test_retrying_the_same_unfittable_session_does_not_pile_up_rejects(self):
-        """#22 리뷰: known_sessions 는 원장에 실제로 들어간 행만 세므로, 못 들어간
-        세션은 mark 마다 다시 시도된다. 매번 새 거부 줄을 남기면 하나의 세션이
-        "N 번 버려짐" 으로 부풀고 파일도 무한히 자란다."""
+        """#22 review: known_sessions counts only rows that actually made it into
+        the ledger, so a session that didn't make it is retried on every mark. If
+        every retry left a new reject line, a single session would inflate into
+        "dropped N times" and the file would grow without bound."""
         record = {"repo": "k", "harness": "codex-cli", "session": "s" * 36,
                   "event": "start", "path": "/p" * 400}
         for _ in range(5):
@@ -125,8 +127,8 @@ class TestLedger(unittest.TestCase):
         self.assertEqual(len(ledger.read_rejected(home=self.home, repo_key="other")), 1)
 
     def test_repo_filter_is_applied_before_the_line_limit(self):
-        """원장은 머신 전체가 공유하는 한 파일이다. 먼저 자르면 이 레포의 줄이
-        창 밖으로 밀려나 핸드오프가 조용히 멈춘다."""
+        """The ledger is one file shared by the whole machine. Truncating first
+        would push this repo's line out of the window, silently stalling the handoff."""
         for i in range(50):
             ledger.append({"repo": "other-repo", "harness": "claude",
                            "session": "o{}".format(i), "event": "start"},

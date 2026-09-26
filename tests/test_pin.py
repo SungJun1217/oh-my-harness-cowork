@@ -10,7 +10,7 @@ from . import _repo
 
 
 def ref_for(path: str):
-    # 사이드카 디렉터리 이름이 session_id 에서 나온다 — 테스트가 "sess1" 을 심는다.
+    # The sidecar directory name derives from session_id — the test plants "sess1".
     return _repo.ref_for("claude-code", path, session_id="sess1", cwd="/repo")
 
 
@@ -54,9 +54,10 @@ class TestPin(unittest.TestCase):
         self.assertEqual(os.stat(self.src).st_ino, os.stat(second).st_ino)
 
     def test_sidecar_tool_results_are_pinned_too(self):
-        """큰 tool_result 는 <persisted-output> 스텁으로 치환되고 내용이 외부화된다.
+        """A large tool_result is replaced with a <persisted-output> stub and its
+        content is externalized.
 
-        사이드카를 같이 고정하지 않으면 스텁이 해소되지 않는다.
+        If the sidecar isn't pinned alongside it, the stub can never be resolved.
         """
         sidecar_dir = os.path.join(self.tmp.name, "sess1", "tool-results")
         os.makedirs(sidecar_dir)
@@ -85,16 +86,17 @@ class TestPin(unittest.TestCase):
         self.assertEqual(result.error, "")
 
     def test_cross_device_failure_is_reported_not_silent(self):
-        """실측 조건: 이 머신의 /tmp 는 tmpfs(dev=35), 홈은 dev=66305 다.
+        """Condition observed in the wild: on this machine, /tmp is tmpfs (dev=35),
+        home is dev=66305.
 
-        조용히 None 을 돌려주면 아카이브가 없는 것을 아무도 모른다.
+        Silently returning None means nobody notices the archive doesn't exist.
         """
         home_src = os.path.join(os.path.expanduser("~"), ".omhc-pin-probe.jsonl")
         with open(home_src, "w", encoding="utf-8") as fh:
             fh.write("{}\n")
         try:
             if os.stat(home_src).st_dev == os.stat("/tmp").st_dev:
-                self.skipTest("이 머신에서는 /tmp 와 홈이 같은 장치다")
+                self.skipTest("on this machine /tmp and home are the same device")
             result = pin.pin_session_result(self.state, ref_for(home_src))
             self.assertFalse(result.linked)
             self.assertIsNone(result.path)

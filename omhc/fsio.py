@@ -4,13 +4,14 @@ import os
 import tempfile
 from typing import Optional
 
-# PIPE_BUF 는 파이프 전용이라(POSIX, macOS 는 512) 여기 쓰기엔 근거가 아니다
-# (#22). 일반 파일에 O_APPEND 로 연 fd 에 대한 **단일 write(2) 호출**은
-# POSIX 상 "파일 끝으로 이동 + 쓰기" 가 하나의 원자 연산이라고 보장된다 —
-# 크기 상한이 없다. append_line 이 매번 write() 를 정확히 한 번만 부르는 것
-# 자체가 그 보장을 지키는 방법이다; 줄 단위로 덧붙이는 모든 파일(원장,
-# delivered.tsv, 색인)이 여기 의존한다. 아래 상수는 그 보장과 무관하게 "한
-# write() 호출로 무리 없이 끝나는 크기" 를 넉넉히 잡은 값일 뿐이다.
+# PIPE_BUF is pipe-only (POSIX, 512 on macOS), so it's not the basis for
+# anything here (#22). POSIX guarantees a **single write(2) call** to an fd
+# opened O_APPEND on a regular file is one atomic "seek to end + write"
+# operation — with no size limit. append_line calling write() exactly once,
+# every time, is itself how that guarantee is upheld; every line-appended
+# file here (ledger, delivered.tsv, index) depends on it. The constant below
+# is unrelated to that guarantee — it's just a generously sized "amount that
+# comfortably finishes in one write() call".
 PIPE_BUF_SAFE = 4096
 
 
@@ -22,11 +23,12 @@ def _ensure_parent(path: str) -> None:
 
 def write_atomic(path: str, text: str, *, fsync: bool = True,
                  suffix: str = ".tmp") -> None:
-    """tmp 에 쓰고 fsync 한 뒤 os.replace 로 갈아끼운다.
+    """Writes to a tmp file, fsyncs, then swaps in via os.replace.
 
-    사람이 편집 중인 파일(AGENTS.md)이나 훅이 읽어갈 파일(omhc.txt)을 반쯤 쓴
-    상태로 남기면 안 된다. 이 규칙이 여섯 곳에 손으로 복제돼 있었고 그중 두 곳은
-    fsync 가 빠져 있었다 — 한 곳에 모아 그 차이를 없앤다.
+    A file a human is editing (AGENTS.md) or a file a hook will read
+    (omhc.txt) must never be left half-written. This rule used to be
+    hand-duplicated in six places, and two of them were missing fsync — this
+    consolidates them into one place and removes that gap.
     """
     _ensure_parent(path)
     tmp = path + suffix
@@ -39,13 +41,15 @@ def write_atomic(path: str, text: str, *, fsync: bool = True,
 
 
 def replace_preserving(path: str, text: str) -> None:
-    """사람이 손으로 관리하는 설정 파일(hooks.json/settings.json)을 원자적으로
-    갈아끼운다. `path` 가 심링크면 심링크 자체는 그대로 두고 실물만 바꾼다 —
-    install.sh 의 uninstall 경로가 이미 같은 규칙을 쓰고 있었다(#7, hookconf.merge/strip).
+    """Atomically swaps a hand-maintained config file (hooks.json/settings.json).
+    If `path` is a symlink, the symlink itself is left in place and only the
+    real file is replaced — install.sh's uninstall path already used the
+    same rule (#7, hookconf.merge/strip).
 
-    권한은 realpath 의 현재 mode 를 그대로 물려받는다. 파일이 아직 없으면(예:
-    Codex 는 원래 hooks.json 이 없다) 0644 로 새로 만든다 — mkstemp 의 기본
-    0600 을 그대로 두면 새로 만든 설정 파일만 유독 접근 권한이 좁아진다.
+    Permissions are inherited from realpath's current mode. If the file
+    doesn't exist yet (e.g. Codex has no hooks.json to begin with), it's
+    created with 0644 — leaving mkstemp's default 0600 would leave a freshly
+    created config file with uniquely restrictive access.
     """
     real_target = os.path.realpath(path)
     directory = os.path.dirname(real_target) or "."
@@ -68,14 +72,16 @@ def replace_preserving(path: str, text: str) -> None:
 
 
 def append_line(path: str, line: str, *, mode: int = 0o600) -> None:
-    """한 줄을 O_APPEND 단일 write(2) 로 덧붙인다.
+    """Appends one line via a single O_APPEND write(2).
 
-    여러 세션이 동시에 써도 부분 레코드가 생기지 않는다 — POSIX 가 O_APPEND
-    fd 에 대한 단일 write(2) 호출의 원자성을 보장하기 때문이고(위 모듈 주석,
-    #22 리뷰), PIPE_BUF 와는 무관하다(파이프 전용). 호출자가 책임질 것은
-    `line` 을 (개행 붙인 채로) **한 번의 write() 호출**로 보낼 수 있게 유지하는
-    것뿐이다 — 현실적 상한은 PIPE_BUF 가 아니라 커널이 한 write() 로 처리하는
-    크기다(ledger.MAX_LINE 처럼 훨씬 작게 잡는 건 원자성이 아니라 다른 이유다).
+    No partial records occur even with multiple sessions writing
+    concurrently — because POSIX guarantees atomicity for a single write(2)
+    call to an O_APPEND fd (see the module comment above, #22 review), and
+    PIPE_BUF is unrelated (pipe-only). All the caller is responsible for is
+    keeping `line` (with its newline) sendable in **one write() call** — the
+    real-world cap isn't PIPE_BUF but whatever size the kernel handles in one
+    write() (something like ledger.MAX_LINE, set far smaller, exists for a
+    different reason than atomicity).
     """
     _ensure_parent(path)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, mode)
@@ -86,7 +92,7 @@ def append_line(path: str, line: str, *, mode: int = 0o600) -> None:
 
 
 def append_blob(path: str, blob: str, *, mode: int = 0o600) -> None:
-    """여러 줄을 한 번에 덧붙인다. 색인처럼 배치로 쓰는 경우."""
+    """Appends multiple lines at once. For batch writes like the index."""
     _ensure_parent(path)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, mode)
     try:
@@ -96,7 +102,7 @@ def append_blob(path: str, blob: str, *, mode: int = 0o600) -> None:
 
 
 def read_text(path: str, default: str = "") -> str:
-    """읽기 실패를 예외가 아니라 기본값으로 돌려준다. 훅 경로용."""
+    """Returns a default value instead of raising on read failure. For the hook path."""
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             return fh.read()
@@ -113,22 +119,25 @@ def size_of(path: str, default: int = 0) -> int:
 
 def line_aligned_size(path: str, size: int, window: int = 65536,
                       fallback: Optional[int] = None) -> int:
-    """`size`(보통 `os.stat().st_size`)를 그 앞의 마지막 완전한 줄 끝으로
-    스냅한다. JSONL append-only 로그를 쓰는 프로세스가 마침 그 순간 긴
-    레코드 하나를 쓰는 중이면 `size` 자체가 레코드 중간일 수 있다(#22 리뷰)
-    — 그걸 그대로 baseline 으로 쓰고 나중에 그 레코드가 마저 쓰인 뒤 거기서
-    부터 읽으면, offset 기반 리더(`read_session_since` 류)의 줄 스냅 로직이
-    그 레코드 전체를 건너뛴다.
+    """Snaps `size` (usually `os.stat().st_size`) back to the end of the last
+    complete line before it. If a process writing a JSONL append-only log
+    happens to be mid-write on one long record at that exact moment, `size`
+    itself can land mid-record (#22 review) — using that as-is for a
+    baseline and reading from there once that record finishes being written
+    would make an offset-based reader's (`read_session_since` and friends)
+    line-snapping logic skip that entire record.
 
-    파일 끝에서 최대 `window` 바이트만 거꾸로 훑어 마지막 개행을 찾는다 —
-    JSONL 한 줄이 그보다 긴 경우는 드물다. 못 찾으면(또는 파일을 못 읽으면)
-    `fallback` 을 돌려준다 — 주지 않으면(기본 `None`) `size` 를 그대로
-    돌려준다(레코드 중간일 위험을 감수하는 옛 동작; window 보다 긴 단일
-    레코드가 실제로 있는 극히 드문 경우에만 해당한다). 호출자가 이전에 알던
-    baseline 을 `fallback` 으로 주면 못 찾았을 때 그 자리에 둔다 — 다음 판정이
-    그 구간을 다시 볼 뿐 레코드를 건너뛰지 않는다. 이전 baseline 이 없을 때
-    `0` 을 주면 안 된다: 다음 판정이 처음부터 읽어 원래의 사람 턴을 새 턴으로
-    착각하고 옛 내용을 다시 넘긴다(#22 리뷰에서 재현).
+    Scans backward from the end of the file, at most `window` bytes, for the
+    last newline — a JSONL line longer than that is rare. If not found (or
+    the file can't be read), returns `fallback` — if none is given (default
+    `None`), returns `size` as-is (the old behavior, accepting the
+    mid-record risk; applies only to the very rare case of a single record
+    genuinely longer than `window`). If the caller passes a previously known
+    baseline as `fallback`, that's where it stays when not found — the next
+    judgment just looks at that span again rather than skipping the record.
+    Never pass `0` when there's no prior baseline: the next judgment would
+    read from the start, mistake the original human turn for a new one, and
+    pass old content along again (reproduced in the #22 review).
     """
     if size <= 0:
         return 0
@@ -154,10 +163,10 @@ def unlink_quiet(path: str) -> bool:
 
 
 def claim_exclusive(path: str, contents: str = "", *, mode: int = 0o600) -> bool:
-    """O_CREAT|O_EXCL 선점. 같은 파일시스템 안에서 원자적이다.
+    """Claims exclusivity via O_CREAT|O_EXCL. Atomic within the same filesystem.
 
-    훅 경로에서 불리므로 **던지지 않는다** — 부모 디렉터리를 만들 수 없는 경우까지
-    포함해 실패는 False 다.
+    Called from the hook path, so it **never raises** — failure is False,
+    including when the parent directory can't be created.
     """
     try:
         _ensure_parent(path)
@@ -175,7 +184,7 @@ def claim_exclusive(path: str, contents: str = "", *, mode: int = 0o600) -> bool
 
 
 def listdir_suffix(directory: str, suffix: str) -> list:
-    """정렬된 전체 경로 목록. 디렉터리가 없으면 빈 목록."""
+    """Sorted list of full paths. Empty list if the directory doesn't exist."""
     try:
         names = sorted(os.listdir(directory))
     except OSError:

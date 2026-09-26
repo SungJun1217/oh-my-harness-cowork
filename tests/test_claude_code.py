@@ -29,9 +29,9 @@ def ref_for(path: str, cwd=REPO) -> A.SessionRef:
 
 class TestSlug(unittest.TestCase):
     def test_slug_for_this_repo_matches_the_real_directory_name(self):
-        """이 머신의 실측 값. 다른 경로에서는 건너뛴다."""
+        """A value measured on this machine. Skipped under a different path."""
         if REPO != "/home/ec2-user/capstone/oh-my-harness-cowork":
-            self.skipTest("다른 체크아웃 경로: {}".format(REPO))
+            self.skipTest("different checkout path: {}".format(REPO))
         self.assertEqual(
             CC.claude_slug(REPO), "-home-ec2-user-capstone-oh-my-harness-cowork"
         )
@@ -54,7 +54,7 @@ class TestDetect(unittest.TestCase):
             self.assertTrue(got.note)
 
     def test_detect_finds_an_existing_projects_dir(self):
-        """실제 홈을 보지 않는다. CI 러너에는 Claude Code 가 없어서 실측 홈에 기대면 항상 빨갛다."""
+        """Never look at the real home. CI runners have no Claude Code, so relying on the real home would always fail."""
         with tempfile.TemporaryDirectory() as home:
             os.makedirs(os.path.join(home, ".claude", "projects"))
             got = CC.ClaudeCodeAdapter(home=home).detect()
@@ -65,12 +65,12 @@ class TestDetect(unittest.TestCase):
 @unittest.skipUnless(have_fixtures, MISSING)
 class TestListSessions(unittest.TestCase):
     def test_glob_is_depth_one_only(self):
-        """중첩 subagent 파일 137개가 결과에 들어오면 남의 에이전트 발화를 읽는다."""
+        """If 137 nested subagent files leaked into the result, it would read another agent's speech."""
         refs = CC.ClaudeCodeAdapter().list_sessions(REPO)
         self.assertTrue(refs)
         for ref in refs:
             rest = os.path.relpath(ref.source_path, os.path.dirname(refs[0].source_path))
-            self.assertNotIn(os.sep, rest, "깊이 1을 벗어난 경로: {}".format(ref.source_path))
+            self.assertNotIn(os.sep, rest, "path deeper than depth 1: {}".format(ref.source_path))
 
     def test_sessions_outside_this_repo_are_not_returned(self):
         refs = CC.ClaudeCodeAdapter().list_sessions(REPO)
@@ -82,9 +82,9 @@ class TestListSessions(unittest.TestCase):
             self.assertEqual(CC.ClaudeCodeAdapter().list_sessions(d), [])
 
     def test_non_interactive_sdk_sessions_are_excluded(self):
-        """실측: 이 레포의 최상위 세션 31개 중 30개가 entrypoint=sdk-py 다.
+        """Measured: 30 of this repo's 31 top-level sessions have entrypoint=sdk-py.
 
-        걸러내지 않으면 남의 도구가 남긴 비대화형 세션을 사람의 작업으로 오인한다.
+        Without filtering, a non-interactive session left by someone else's tool gets mistaken for human work.
         """
         refs = CC.ClaudeCodeAdapter().list_sessions(REPO)
         for ref in refs:
@@ -99,14 +99,14 @@ class TestListSessions(unittest.TestCase):
         self.assertEqual(epochs, sorted(epochs, reverse=True))
 
     def test_blocklist_not_allowlist(self):
-        """허용목록이면 새 대화형 entrypoint 가 생겼을 때 진짜 세션을 잃는다."""
+        """An allowlist would lose a real session whenever a new interactive entrypoint appears."""
         self.assertIn("sdk-py", CC.NON_INTERACTIVE_ENTRYPOINTS)
         self.assertNotIn("cli", CC.NON_INTERACTIVE_ENTRYPOINTS)
 
 
 class TestHeadlessOverride(unittest.TestCase):
-    """OMHC_ALLOW_HEADLESS 는 헤드리스(sdk-cli 등)를 되살리지만 사이드체인은
-    절대 되살리지 않는다 — 발화자가 다른 문제라서 오버라이드로 풀 대상이 아니다."""
+    """OMHC_ALLOW_HEADLESS revives headless sessions (sdk-cli etc.) but never
+    a sidechain — that's a different problem (who the speaker is), not something the override is meant to solve."""
 
     def setUp(self):
         self._backup = os.environ.pop("OMHC_ALLOW_HEADLESS", None)
@@ -158,8 +158,9 @@ def _write_jsonl(path: str, rows) -> None:
 
 
 def _copied(row: dict, *, fork_id="fork1", parent_id="parent1", uuid="u1") -> dict:
-    """/branch, --fork-session 등이 복사한 레코드의 모양(#34, 분석 근거).
-    uuid/parentUuid/timestamp/type/message 는 원본 그대로고 나머지를 덮어쓴다."""
+    """The shape of a record copied by /branch, --fork-session, etc. (#34,
+    basis of the analysis). uuid/parentUuid/timestamp/type/message stay as
+    in the original; everything else is overwritten."""
     row = dict(row)
     row["sessionId"] = fork_id
     row["isSidechain"] = False
@@ -172,8 +173,9 @@ _TS = "2026-09-25T00:00:00.000Z"
 
 
 class TestForkClassify(unittest.TestCase):
-    """#34: 포크는 부모의 사슬을 복사해 새 session_id 로 시작한다. 포크 자신의
-    사람 턴이 없으면 이미 전달된 부모 턴을 또 전달하게 되므로 적격이 아니다."""
+    """#34: a fork copies the parent's chain and starts under a new
+    session_id. With no human turn of its own, it would redeliver the
+    already-delivered parent turn, so it's not eligible."""
 
     def test_fork_with_no_own_turn_is_not_eligible(self):
         with tempfile.TemporaryDirectory() as home:
@@ -201,7 +203,7 @@ class TestForkClassify(unittest.TestCase):
             self.assertTrue(CC.ClaudeCodeAdapter().classify(path))
 
     def test_fork_with_only_new_assistant_records_is_not_eligible(self):
-        """새 구간이 있어도 사람의 말이 아니면 여전히 적격이 아니다."""
+        """Even with a new section, still not eligible if it's not a human's words."""
         with tempfile.TemporaryDirectory() as home:
             path = os.path.join(home, "f.jsonl")
             _write_jsonl(path, [
@@ -222,10 +224,12 @@ class TestForkClassify(unittest.TestCase):
             self.assertTrue(CC.ClaudeCodeAdapter().classify(path))
 
     def test_bound_hit_fails_open_to_eligible(self):
-        """own tail(복사 구간을 벗어난 뒤)이 상한을 넘도록 크면(사람 턴을 못
-        찾으면) 예전 동작으로 연다 — 판정 포기가 세션을 영영 못 여는 것보다
-        싸다. 복사 구간 자체의 바이트는 상한에 넣지 않으므로(리뷰 지적) own
-        tail 을 상한보다 크게 채워야 한다."""
+        """If the own tail (past the copied section) is large enough to
+        exceed the bound (a human turn can't be found), fall back to the old
+        behavior — giving up on the judgment is cheaper than never opening
+        the session at all. The copied section's own bytes don't count
+        toward the bound (review point), so the own tail must be filled
+        larger than the bound."""
         with tempfile.TemporaryDirectory() as home:
             path = os.path.join(home, "f.jsonl")
             rows = [_copied({"type": "user", "cwd": REPO, "timestamp": _TS,
@@ -269,9 +273,9 @@ class TestForkClassify(unittest.TestCase):
             self.assertEqual(CC.ClaudeCodeAdapter(home=home).list_sessions(REPO), [])
 
     def test_message_as_a_string_in_the_own_tail_fails_open_not_raises(self):
-        """리뷰 재현: own tail 의 user 레코드가 message 를 문자열로 갖고 있으면
-        `message.get("content")` 가 AttributeError 를 낸다 — classify() 밖으로
-        새면 watch 가 그 레포의 Claude ref 를 전부 잃는다."""
+        """Review repro: if a user record in the own tail holds message as a
+        string, `message.get("content")` raises AttributeError — if that
+        leaks out of classify(), watch loses every Claude ref for that repo."""
         with tempfile.TemporaryDirectory() as home:
             path = os.path.join(home, "f.jsonl")
             _write_jsonl(path, [
@@ -283,8 +287,8 @@ class TestForkClassify(unittest.TestCase):
             self.assertTrue(CC.ClaudeCodeAdapter().classify(path))
 
     def test_non_string_text_block_in_the_own_tail_fails_open_not_raises(self):
-        """리뷰 재현: text 블록의 text 가 문자열이 아니면(예: 5) `_text_of` 의
-        "".join 이 TypeError 를 낸다."""
+        """Review repro: if a text block's text is not a string (e.g. 5),
+        `_text_of`'s "".join raises TypeError."""
         with tempfile.TemporaryDirectory() as home:
             path = os.path.join(home, "f.jsonl")
             _write_jsonl(path, [
@@ -296,9 +300,9 @@ class TestForkClassify(unittest.TestCase):
             self.assertTrue(CC.ClaudeCodeAdapter().classify(path))
 
     def test_guard_dropped_own_turn_does_not_make_a_fork_eligible(self):
-        """envelope 전용·tool_result 전용·합성 인터럽트 문자열은 read_session
-        도 사람의 말로 세지 않는다 — 포크의 own tail 에 이런 레코드만 있으면
-        여전히 적격이 아니어야 한다."""
+        """envelope-only, tool_result-only, and synthetic interrupt strings
+        aren't counted as human speech by read_session either — if a fork's
+        own tail has only these records, it must still not be eligible."""
         with tempfile.TemporaryDirectory() as home:
             path = os.path.join(home, "f.jsonl")
             _write_jsonl(path, [
@@ -315,7 +319,7 @@ class TestForkClassify(unittest.TestCase):
             self.assertFalse(CC.ClaudeCodeAdapter().classify(path))
 
     def test_a_deeply_nested_line_does_not_raise(self):
-        """json 이 RecursionError 를 내는 줄도 깨진 줄처럼 건너뛴다(리뷰)."""
+        """A line where json raises RecursionError is skipped like a broken line too (review)."""
         with tempfile.TemporaryDirectory() as home:
             path = os.path.join(home, "f.jsonl")
             _write_jsonl(path, [
@@ -327,7 +331,7 @@ class TestForkClassify(unittest.TestCase):
             self.assertFalse(CC.ClaudeCodeAdapter().classify(path))
 
     def test_cache_key_includes_the_headless_override(self):
-        """OMHC_ALLOW_HEADLESS 가 판정을 바꾸므로 캐시가 옛 판정을 돌려주면 안 된다."""
+        """OMHC_ALLOW_HEADLESS changes the verdict, so the cache must not return a stale one."""
         with tempfile.TemporaryDirectory() as home:
             path = os.path.join(home, "s.jsonl")
             _write_jsonl(path, [{"type": "user", "cwd": REPO, "timestamp": _TS,
@@ -339,10 +343,10 @@ class TestForkClassify(unittest.TestCase):
                 self.assertTrue(adapter.classify(path))
 
     def test_classify_result_is_cached_per_path_size_and_mtime(self):
-        """리뷰 지적: ref_for_path 가 한 번, brief.eligible 이 다시 한 번
-        adapter.classify(mark.path) 를 부를 수 있다 — 두 번째 호출은 파일을
-        다시 스캔하지 않아야 한다. 파일이 자라면(size/mtime 이 바뀌면) 캐시가
-        무효화돼 다시 스캔해야 한다."""
+        """Review point: adapter.classify(mark.path) can be called once by
+        ref_for_path and again by brief.eligible — the second call must not
+        rescan the file. If the file grows (size/mtime changes), the cache
+        must invalidate and rescan."""
         with tempfile.TemporaryDirectory() as home:
             path = os.path.join(home, "f.jsonl")
             _write_jsonl(path, [
@@ -374,8 +378,9 @@ NOW = 1758500000.0
 
 
 class TestForkBrief(unittest.TestCase):
-    """#34 end-to-end: 부모가 이미 codex-cli 로 전달된 뒤 그 세션이 포크되면,
-    포크 자신의 새 턴이 없는 한 아무것도 다시 나가면 안 된다."""
+    """#34 end-to-end: once a parent has already been delivered to codex-cli
+    and that session is forked, nothing must go out again unless the fork
+    has a new turn of its own."""
 
     def setUp(self):
         self.t = _repo.TempRepo()
@@ -464,7 +469,7 @@ class TestReadSession(unittest.TestCase):
                 self.assertNotEqual(ev.text, synthetic)
 
     def test_tool_result_user_records_never_become_human(self):
-        """Claude Code는 tool_result 를 type:\"user\" 로 되돌린다. 67개가 그렇다."""
+        """Claude Code reflects tool_result back as type:\"user\". 67 of them do."""
         for ev in self.read.events:
             if ev.author == "human":
                 self.assertNotIn("tool_use_id", ev.text)
@@ -476,17 +481,17 @@ class TestReadSession(unittest.TestCase):
 
     def test_real_tool_names_map_to_neutral_verbs(self):
         verbs = {e.verb for e in self.read.events}
-        self.assertIn("ran", verbs)       # Bash 52회
+        self.assertIn("ran", verbs)       # Bash x52
         self.assertIn("modified", verbs)  # Write 18 / Edit 6
         self.assertIn("said", verbs)
 
     def test_verb_map_covers_every_tool_this_machine_actually_used(self):
-        """미매핑 툴이 0이어야 한다.
+        """Unmapped tools must be 0.
 
-        키워드 스캔으로 "에이전트 텍스트에 tool_use 가 없다"를 단정하면 안 된다 —
-        에이전트가 tool_use 페어링을 설명하는 정당한 산문이 걸린다. 어휘 누출은
-        스키마(툴 이름 필드 부재)와 총체적 매핑으로 막는 것이고, 본문 검열이
-        아니다.
+        Never assert "no tool_use in agent text" via a keyword scan —
+        legitimate prose where the agent explains a tool_use pairing would
+        get caught. Vocabulary leakage is prevented by the schema (no
+        tool-name field) and exhaustive mapping, not by censoring the body text.
         """
         self.assertNotIn("unmapped_tool", self.read.dropped)
 
@@ -498,7 +503,7 @@ class TestReadSession(unittest.TestCase):
             self.assertLessEqual(len(ev.arg), 120)
 
     def test_thinking_blocks_are_not_events(self):
-        """모델의 사적 추론은 교차 벤더로 옮기지 않는다. 픽스처에 79개 있다."""
+        """The model's private reasoning never crosses vendors. 79 of them in the fixture."""
         self.assertTrue(all(e.verb in {"said", "inspected", "modified", "ran",
                                        "delegated", "researched"}
                             for e in self.read.events))
@@ -519,7 +524,7 @@ class TestReadSession(unittest.TestCase):
 
 
 class TestReadSessionForgedRecords(unittest.TestCase):
-    """실물에 없는 분기는 위조 레코드로 덮는다. is_error=True 가 없기 때문이다."""
+    """A branch absent from real fixtures is covered with a forged record — there's no observed is_error=True case."""
 
     def _read(self, rows) -> A.SessionRead:
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False,
@@ -564,10 +569,11 @@ class TestReadSessionForgedRecords(unittest.TestCase):
         self.assertEqual(len(read.events), 0)
 
     def test_synthetic_assistant_record_is_dropped(self):
-        """Claude Code 2.1.281 자신의 스킵 판정과 같은 레코드다.
+        """The same record shape as Claude Code 2.1.281's own skip judgment.
 
-        <synthetic> 모델이나 isApiErrorMessage 는 로그인 안내 같은 하네스 자체
-        발화이지 에이전트의 말이 아니다 — PLAN? 으로도 새어나가면 안 된다.
+        A <synthetic> model or isApiErrorMessage is the harness's own speech
+        (e.g. a login prompt), not the agent's words — it must not leak out
+        even as PLAN?.
         """
         read = self._read([
             {"type": "assistant", "cwd": REPO, "isApiErrorMessage": True,

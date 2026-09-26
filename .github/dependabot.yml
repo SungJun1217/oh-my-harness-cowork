@@ -1,5 +1,5 @@
-# 런타임 의존성이 0 이라 관리할 건 Actions 버전뿐이다. main 은 릴리스 전용이므로
-# develop 으로 올린다.
+# Zero runtime dependencies, so Actions versions are the only thing to manage. main is
+# release-only, so updates target develop.
 version: 2
 updates:
   - package-ecosystem: github-actions

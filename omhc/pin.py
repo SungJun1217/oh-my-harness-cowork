@@ -5,9 +5,10 @@ import os
 from typing import NamedTuple, Optional
 
 class PinResult(NamedTuple):
-    """고정 결과. 조용히 None 을 돌려주면 아카이브가 깨진 걸 아무도 모른다.
+    """Pin result. Silently returning None would let a broken archive go
+    unnoticed.
 
-    `omhc status` 가 이 값을 PASS/FAIL 로 보고한다.
+    `omhc status` reports this as PASS/FAIL.
     """
 
     path: Optional[str]
@@ -24,19 +25,20 @@ def pinned_dir(state_dir: str, session_id: str) -> str:
 
 
 def pin_session(state_dir: str, ref) -> Optional[str]:
-    """원본 세션 바이트를 하드링크로 고정한다.
+    """Pins the original session bytes via hardlink.
 
-    재직렬화하지 않는다. 같은 inode 이므로
-      - 추가 디스크 0바이트
-      - 아직 돌아가는 세션의 append 도 그대로 보이고
-      - 원본 디렉터리 항목이 rm 되거나 /clear 돼도 바이트가 살아남는다.
-    포맷이 파괴적으로 바뀌어도 포인터는 깨지지 않는다.
+    Never re-serializes. Same inode, so
+      - zero extra disk bytes
+      - appends from a still-running session remain visible
+      - the bytes survive even if the original directory entry is rm'd or
+        /clear'd.
+    A destructive format change downstream still can't break the pointer.
     """
     return pin_session_result(state_dir, ref).path
 
 
 def pin_session_result(state_dir: str, ref) -> PinResult:
-    """pin_session 의 관측 가능한 형태. 실패 이유를 담아 돌려준다."""
+    """Observable form of pin_session. Returns the failure reason too."""
     if not os.path.exists(ref.source_path):
         return PinResult(None, False, 0, "source missing: {}".format(ref.source_path))
     target_dir = pinned_dir(state_dir, ref.session_id)
@@ -69,7 +71,7 @@ def _link_or_none(src: str, dst: str) -> Optional[str]:
                 return dst
         except OSError:
             return dst
-        # 다른 세션 파일이 같은 자리를 차지했다면 교체한다.
+        # Replace it if a different session file has taken the same slot.
         try:
             os.unlink(dst)
         except OSError:
@@ -78,17 +80,19 @@ def _link_or_none(src: str, dst: str) -> Optional[str]:
         os.link(src, dst)
         return dst
     except OSError:
-        # 다른 장치이거나 하드링크가 막힌 파일시스템. 복사는 하지 않는다 —
-        # 이 파일은 계속 자라므로 사본은 곧 낡는다. 없는 것이 낫다.
+        # Different device, or a filesystem that refuses hardlinks. Don't
+        # fall back to copying — this file keeps growing, so a copy would go
+        # stale immediately. Better to have nothing.
         return None
 
 
 def _pin_sidecars(ref, target_dir: str) -> int:
-    """externalized tool output 을 같이 고정한다.
+    """Pins externalized tool output alongside the session.
 
-    Claude Code 는 큰 tool_result 를 <persisted-output> 스텁으로 치환하고 내용을
-    <session>/tool-results/*.txt 로 빼낸다. 사이드카를 고정하지 않으면 스텁이
-    해소되지 않아 tier (b) 가 반쪽이 된다.
+    Claude Code replaces large tool_result blocks with a <persisted-output>
+    stub and moves the content out to <session>/tool-results/*.txt. Without
+    pinning the sidecar, the stub never resolves and tier (b) is only half
+    there.
     """
     base = os.path.dirname(ref.source_path)
     sidecar_root = os.path.join(base, ref.session_id, "tool-results")

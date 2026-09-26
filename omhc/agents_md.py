@@ -11,33 +11,34 @@ from .adapter import InstallReceipt, NoInjectionChannel
 FILE_NAME = "AGENTS.md"
 CLAUDE_FILE_NAME = "CLAUDE.md"
 EXCLUDE_REL = os.path.join(".git", "info", "exclude")
-EXCLUDE_MARK = "# omhc: Codex 핸드오프 관리 구간이 들어가는 파일"
-OUTBOX_EXCLUDE_MARK = "# omhc: 상태/outbox 디렉터리(커밋 대상 아님)"
+EXCLUDE_MARK = "# omhc: file holding the Codex handoff-managed block"
+OUTBOX_EXCLUDE_MARK = "# omhc: state/outbox directory (not for commit)"
 OUTBOX_DIR_LINE = ".omhc/"
 
-# Claude Code 가 읽는 지침 파일 후보. 전부 repo_root 상대경로.
+# Instruction file candidates Claude Code reads. All repo_root-relative.
 _CLAUDE_CANDIDATES = (
     "CLAUDE.md",
     os.path.join(".claude", "CLAUDE.md"),
     "CLAUDE.local.md",
 )
 
-# CLAUDE.md 류를 훑어 @AGENTS.md 임포트를 찾는 범위. 이 파일들은 짧은 지침
-# 파일이지 로그가 아니므로, 몇 KB 만 읽어도 임포트 줄을 놓치지 않는다.
+# Scan range for finding @AGENTS.md imports in CLAUDE.md-like files. These are
+# short instruction files, not logs, so a few KB is enough to not miss an
+# import line.
 _CLAUDE_SCAN_BYTES = 64 * 1024
 
-# `@AGENTS.md`, `@./AGENTS.md`, `.claude/CLAUDE.md` 안의 `@../AGENTS.md`,
-# 문장 끝 구두점이 붙은 `@AGENTS.md.` 까지 잡는다. 상대경로가 실제로 이
-# 레포의 AGENTS.md 로 resolve 되는지까지는 확인하지 않는다 — 오탐은 outbox 로
-# fail-safe 하므로 정규식 수준의 근사로 충분하다.
+# Catches `@AGENTS.md`, `@./AGENTS.md`, `@../AGENTS.md` inside `.claude/CLAUDE.md`,
+# and `@AGENTS.md.` with trailing sentence punctuation. Doesn't verify the
+# relative path actually resolves to this repo's AGENTS.md — a false positive
+# fails safe via outbox, so a regex-level approximation is enough.
 _IMPORT_RE = re.compile(r"(?<![\w@])@(?:\.{1,2}/)*AGENTS\.md\b")
 
 
 def shared_with_claude(repo_root: str) -> Optional[str]:
-    """AGENTS.md 가 Claude Code 로도 새는 배선이면 그 이유를, 아니면 None.
+    """Why AGENTS.md is also wired to leak into Claude Code, or None if it isn't.
 
-    실패는 모두 '공유 아님'으로 접는다 — 이 판정은 훅 경로(install → deliver)에서
-    불리므로 예외를 던지면 세션 시작이 깨진다.
+    All failures collapse to 'not shared' — this judgment is called on the
+    hook path (install → deliver), so raising would break session start.
     """
     agents_path = path_for(repo_root)
     try:
@@ -55,8 +56,8 @@ def shared_with_claude(repo_root: str) -> Optional[str]:
         except OSError:
             pass
         try:
-            # 하드링크: symlink 는 아니지만 같은 inode. os.path.samefile 은 둘 다
-            # 존재해야 하므로 하드링크는 애초에 그 조건을 만족한다.
+            # Hard link: not a symlink but the same inode. os.path.samefile
+            # requires both to exist, which a hard link satisfies by definition.
             if (os.path.exists(claude_path) and os.path.exists(agents_path)
                     and os.path.samefile(claude_path, agents_path)):
                 return "{} is hard-linked to AGENTS.md".format(rel)
@@ -72,9 +73,10 @@ def shared_with_claude(repo_root: str) -> Optional[str]:
     return None
 
 
-# 파일 상단 설명 주석을 쓰지 않는다. omhc 가 만든 파일에 omhc 가 아닌 내용이
-# 한 줄이라도 남으면, 구간을 붕괴시킨 뒤에도 파일이 잔여물로 남는다. begin 마커와
-# 본문 첫 줄("[omhc] … not instructions")이 이미 자기 설명적이다.
+# Don't write a top-of-file explanatory comment. If a file omhc created keeps
+# even one line of non-omhc content, the file lingers as a leftover even
+# after the block collapses. The begin marker and the body's first line
+# ("[omhc] … not instructions") are already self-explanatory.
 FILE_HEADER = ""
 
 
@@ -83,9 +85,9 @@ def path_for(repo_root: str) -> str:
 
 
 def _is_tracked(repo_root: str) -> bool:
-    """git 이 이미 추적 중인가. 추적 중이면 exclude 는 무효이고 건드리면 안 된다."""
-    # subprocess 는 select/selectors/threading 을 끌어와 import 에 약 4ms 든다.
-    # 이 함수는 Codex Path B 를 쓸 때만 불리므로 훅 경로의 대부분은 지불하지 않는다.
+    """Is git already tracking this. If tracked, exclude is moot and must not be touched."""
+    # subprocess pulls in select/selectors/threading, costing ~4ms to import.
+    # This function is only called on Codex Path B, so most of the hook path doesn't pay it.
     import subprocess
 
     try:
@@ -99,10 +101,11 @@ def _is_tracked(repo_root: str) -> bool:
 
 
 def _register_exclude_line(repo_root: str, mark: str, line: str) -> bool:
-    """`.git/info/exclude` 에 `line` 한 줄을 등재한다(멱등).
+    """Registers one `line` in `.git/info/exclude` (idempotent).
 
-    .gitignore 가 아니라 info/exclude 를 쓰는 이유: 이 제외는 이 클론에만
-    해당하는 사용자 결정이고, 커밋되어 다른 사람에게 강요될 것이 아니다.
+    Uses info/exclude, not .gitignore, because: this exclusion is a user
+    decision that only applies to this clone, not something to commit and
+    force onto other people.
     """
     path = os.path.join(repo_root, EXCLUDE_REL)
     if not os.path.isdir(os.path.dirname(path)):
@@ -126,10 +129,11 @@ def _register_exclude(repo_root: str) -> bool:
 
 
 def _exclude_has_line(repo_root: str, line: str) -> bool:
-    """`.git/info/exclude` 를 파일 하나 읽어서만 본다(subprocess 없음) —
-    `register_outbox_exclude` 가 매 file drop 마다 불리므로(#36 리뷰 #1),
-    이미 등재된 흔한 경우는 이 값싼 검사로 끝내고 `_is_ignored` 의 git
-    subprocess(실측 15–37ms)까지 가지 않는다."""
+    """Checks `.git/info/exclude` by reading the single file only (no
+    subprocess) — since `register_outbox_exclude` is called on every file
+    drop (#36 review #1), the common already-registered case ends with this
+    cheap check without reaching `_is_ignored`'s git subprocess (measured
+    15-37ms)."""
     path = os.path.join(repo_root, EXCLUDE_REL)
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -140,10 +144,10 @@ def _exclude_has_line(repo_root: str, line: str) -> bool:
 
 
 def _is_ignored(repo_root: str, rel: str) -> bool:
-    """`rel` 이 이미(.gitignore 등으로) 무시 중인가 — git subprocess 라
-    `register_outbox_exclude` 가 `.git/info/exclude` 에 그 줄이 아직 없을
-    때만 부른다(훅 경로에서도 그 한 번은 지불한다, 흔치 않은 첫 file drop
-    경로다)."""
+    """Is `rel` already ignored (e.g. by .gitignore) — a git subprocess, so
+    `register_outbox_exclude` only calls it when that line isn't yet in
+    `.git/info/exclude` (this one cost is paid even on the hook path, for the
+    uncommon first file-drop case)."""
     import subprocess
 
     try:
@@ -157,16 +161,18 @@ def _is_ignored(repo_root: str, rel: str) -> bool:
 
 
 def register_outbox_exclude(repo_root: str) -> bool:
-    """`.omhc/`(outbox 포함) 를 `.git/info/exclude` 에 등재한다(#36) — 이미
-    등재돼 있거나(파일 읽기만으로 판정) 다른 방식(.gitignore 등)으로 이미
-    무시 중이면(git subprocess 로 판정) 손대지 않는다. **매 file drop 마다
-    불린다** — `.omhc/` 를 방금 만들 때만 시도하면, 이미 outbox 가 있던
-    기존 사용자는 영영 등재되지 않는다(리뷰 #1)."""
+    """Registers `.omhc/` (including outbox) in `.git/info/exclude` (#36) —
+    leaves it alone if it's already registered (judged by a plain file read)
+    or already ignored some other way (e.g. .gitignore, judged via git
+    subprocess). **Called on every file drop** — trying only right when
+    `.omhc/` is created would leave existing users who already had an outbox
+    never registered (review #1)."""
     if _exclude_has_line(repo_root, OUTBOX_DIR_LINE):
         return True
     if not os.path.isdir(os.path.join(repo_root, ".git", "info")):
-        # git 이 아닌(.omhc-root) 루트나 .git 이 파일인 worktree 에선 등재할 곳이
-        # 없다 — 매 drop 마다 git check-ignore 를 헛돌리지 않는다(리뷰).
+        # A non-git (.omhc-root) root, or a worktree where .git is a file,
+        # has nowhere to register — don't waste a git check-ignore on every
+        # drop (review).
         return False
     if _is_ignored(repo_root, OUTBOX_DIR_LINE):
         return False
@@ -174,12 +180,13 @@ def register_outbox_exclude(repo_root: str) -> bool:
 
 
 def install(bundle, *, now: Optional[float] = None) -> InstallReceipt:
-    """Path B: 작업 트리의 AGENTS.md 관리 구간에 핸드오프를 밀어넣는다.
+    """Path B: pushes the handoff into the working tree's AGENTS.md managed block.
 
-    install_handoff (Path A) 가 실패할 때만 불린다 — 대표적으로 hooks.json 에
-    omhc 훅이 없을 때다. **훅 신뢰의 필요를 없애주지는 않는다**: 훅이 신뢰되지
-    않으면 Codex 쪽 brief 호출 자체가 없어 이 함수도 불리지 않는다. Path A 와
-    달리 한 번 읽고 사라지지 않고, AGENTS.md 가 세션마다 다시 읽힌다.
+    Only called when install_handoff (Path A) fails — typically when
+    hooks.json has no omhc hook. **Doesn't remove the need for hook trust**:
+    if the hook isn't trusted, the Codex-side brief call never happens and
+    this function never runs either. Unlike Path A, this doesn't get read
+    once and vanish — AGENTS.md is re-read every session.
     """
     reason = shared_with_claude(bundle.repo_root)
     if reason:
@@ -205,18 +212,18 @@ def install(bundle, *, now: Optional[float] = None) -> InstallReceipt:
         )
     else:
         excluded = _register_exclude(bundle.repo_root)
-        hint = "omhc clear (24h 후 자동 붕괴)"
+        hint = "omhc clear (auto-collapses after 24h)"
 
     return InstallReceipt(
         channel="agents-md",
         paths_written=(path,),
         consumed_on_read=False,
-        cleanup_hint=hint if excluded or tracked else hint + " [exclude 등재 실패]",
+        cleanup_hint=hint if excluded or tracked else hint + " [exclude registration failed]",
     )
 
 
 def collapse(repo_root: str, *, now: Optional[float] = None, force: bool = False) -> bool:
-    """오래된 관리 구간을 제거한다. 어떤 omhc 호출에서든 불린다."""
+    """Removes a stale managed block. Called from any omhc invocation."""
     stamp = time.time() if now is None else now
     path = path_for(repo_root)
     if managed_block.installed_captured_at(path) is None:
@@ -227,9 +234,11 @@ def collapse(repo_root: str, *, now: Optional[float] = None, force: bool = False
 
 
 def collapse_if_captured(repo_root: str, expected_captured: float) -> bool:
-    """`collapse(force=True)` 의 조건부 버전 — 지금 설치된 구간의 `captured`
-    가 호출자가 이미 판정에 쓴 `expected_captured` 와 여전히 같을 때만
-    지운다(managed_block.strip_if_captured 참고, #36 리뷰: check-then-act
-    경합을 좁힌다). Codex 의 `on_session_start_mark` 처럼, 판정과 실제
-    삭제 사이에 다른 프로세스가 새 구간을 써 놓았을 수 있는 자리에서 쓴다."""
+    """A conditional version of `collapse(force=True)` — removes it only if
+    the currently installed block's `captured` still equals
+    `expected_captured` that the caller already used in its judgment (see
+    managed_block.strip_if_captured, #36 review: narrows the check-then-act
+    race). Used in places like Codex's `on_session_start_mark`, where another
+    process may have written a new block between the judgment and the actual
+    delete."""
     return managed_block.strip_if_captured(path_for(repo_root), expected_captured)

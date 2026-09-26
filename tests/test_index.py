@@ -37,7 +37,7 @@ class TestIndex(unittest.TestCase):
     def test_row_size_is_small(self):
         index.append_rows(self.path, [mk(i) for i in range(1, 51)])
         per_row = os.path.getsize(self.path) / 50.0
-        self.assertLess(per_row, 120, "행당 크기가 커지면 색인이 아카이브가 된다")
+        self.assertLess(per_row, 120, "if per-row size grows, the index becomes an archive")
 
     def test_append_is_additive_not_rewriting(self):
         index.append_rows(self.path, [mk(1)])
@@ -85,7 +85,7 @@ class TestIndex(unittest.TestCase):
             self.assertIn("pytest tests/test_index.py", fh.read())
 
     def test_human_events_keep_text_out_of_the_index(self):
-        """색인은 포인터다. 본문을 담으면 아카이브가 원본 두 벌이 된다."""
+        """The index is a pointer. Storing the body would make the archive two copies of the original."""
         index.append_rows(self.path, [mk(1, author="human", verb="said",
                                          text="비밀 이야기", arg="")])
         with open(self.path, encoding="utf-8") as fh:
@@ -93,7 +93,7 @@ class TestIndex(unittest.TestCase):
 
 
 class TestAppendNew(unittest.TestCase):
-    """커서는 seq 가 아니라 바이트 offset 이다(#23)."""
+    """The cursor is a byte offset, not seq (#23)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -114,16 +114,16 @@ class TestAppendNew(unittest.TestCase):
         self.assertEqual([r.offset for r in rows], [100, 200, 300])
 
     def test_a_parser_that_drops_more_records_does_not_lose_new_events(self):
-        """업그레이드 전 파서가 seq 1..5 를 매겼고, 새 파서는 그중 둘을 버려
-        같은 세션의 이후 이벤트가 seq 4, 5 로 나온다. seq 커서였다면 둘 다
-        `seq > 5` 에 걸려 빠졌다."""
+        """The pre-upgrade parser assigned seq 1..5, and the new parser drops two
+        of them, so later events in the same session come out as seq 4, 5. With a
+        seq cursor, both would trip on `seq > 5` and be missed."""
         index.append_new(self.path, [mk(i) for i in range(1, 6)])
         reparsed = [mk(1), mk(3), mk(5),
                     mk(4, offset=600), mk(5, offset=700)]
         self.assertEqual(index.append_new(self.path, reparsed), 2)
         rows = index.rows(self.path)
         self.assertEqual([r.offset for r in rows][-2:], [600, 700])
-        # 번호는 이 색인 안에서 이어진다 — 겹치면 `show <세션>#4` 가 모호해진다.
+        # Numbers are contiguous within this index — a collision would make `show <session>#4` ambiguous.
         self.assertEqual([r.seq for r in rows], [1, 2, 3, 4, 5, 6, 7])
 
     def test_a_parser_that_reads_more_records_does_not_duplicate(self):
@@ -133,8 +133,8 @@ class TestAppendNew(unittest.TestCase):
         self.assertEqual([r.offset for r in index.rows(self.path)], [100, 300, 400])
 
     def test_events_sharing_one_record_are_not_split_across_calls(self):
-        """Claude 의 assistant 레코드 하나가 tool_use 여러 개를 낳으면 이벤트들이
-        같은 offset/length 를 공유한다."""
+        """When one Claude assistant record produces multiple tool_use calls,
+        the events share the same offset/length."""
         same = [mk(1), mk(2, offset=100), mk(3, offset=100)]
         index.append_new(self.path, same)
         self.assertEqual(index.append_new(self.path, same + [mk(4, offset=200)]), 1)

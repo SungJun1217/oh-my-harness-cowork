@@ -63,11 +63,11 @@ class TestBudget(unittest.TestCase):
         self.assertEqual(mint.BUDGET, 900)
 
     def test_clipping_is_byte_based_not_character_based(self):
-        """한글은 UTF-8 에서 글자당 3바이트다.
+        """Korean is 3 bytes/char in UTF-8.
 
-        글자 수로 자르면 200자 슬롯 하나가 600바이트를 먹고 다른 슬롯이 전부
-        밀린다 — 실측에서 749바이트 산출물에 151바이트 여유가 남았는데도 슬롯
-        5개가 버려졌다.
+        Clipping by character count lets a single 200-char slot eat 600
+        bytes and crowd out every other slot — measured: a 749-byte output
+        with 151 bytes of headroom still dropped 5 slots.
         """
         korean = "가" * 500
         out = mint.mint(read_of([ev(1, text=korean), ev(2, text=korean)]),
@@ -77,7 +77,7 @@ class TestBudget(unittest.TestCase):
             self.assertLessEqual(len(line.encode("utf-8")), 400, line[:40])
 
     def test_no_line_is_truncated_mid_command(self):
-        """잘린 명령은 없는 명령보다 나쁘다. 줄 단위로만 줄인다."""
+        """A truncated command is worse than no command. Only trim whole lines."""
         events = [ev(1, text="목표 " * 60)] + [
             ev(i, author="agent", verb="modified", arg="x",
                paths=("/repo/a/very/long/path/number{}.py".format(i),))
@@ -89,7 +89,7 @@ class TestBudget(unittest.TestCase):
             for line in out.splitlines():
                 if line.startswith("PULL"):
                     self.assertTrue(line.rstrip().endswith(("30", ".py", "E1")),
-                                    "PULL 이 중간에서 끊겼다: {!r}".format(line))
+                                    "PULL was cut off mid-line: {!r}".format(line))
 
     def test_small_budget_still_says_one_substantive_thing(self):
         out = mint.mint(read_of([
@@ -99,15 +99,17 @@ class TestBudget(unittest.TestCase):
         slots = slots_of(out)
         self.assertTrue(
             "GOAL" in slots or "NEXT" in slots or "FAIL" in slots,
-            "내용이 하나도 없는 표식은 쓸모가 없다: {!r}".format(out),
+            "a handoff with no content at all is useless: {!r}".format(out),
         )
 
     def test_budget_pressure_keeps_verified_facts_over_an_unverified_claim(self):
-        """PLAN? 은 이전 에이전트의 주장이므로 GOAL 보다 먼저 버려져야 한다.
+        """PLAN? is a prior agent's claim, so it must be dropped before GOAL.
 
-        사적 상수(_PRIORITY)를 단정하면 드롭 메커니즘을 리팩터링할 때마다 동작
-        변화 없이 테스트가 깨지고, 게다가 숫자가 맞아도 루프가 엉뚱한 것을 버릴 수
-        있어 보장을 증명하지 못한다. 관측 가능한 결과로 단정한다.
+        Asserting on the private constant (_PRIORITY) breaks the test on any
+        refactor of the drop mechanism with no behavior change, and even if
+        the numbers match, the loop could still be dropping the wrong thing
+        — that wouldn't prove the guarantee. Assert on the observable result
+        instead.
         """
         events = [
             ev(1, text="목표를 세운다 " * 12),
@@ -121,7 +123,7 @@ class TestBudget(unittest.TestCase):
 
         tight = slots_of(mint.mint(read_of(events), to_adapter_id="claude-code",
                                    budget=480, now=NOW))
-        self.assertIn("GOAL", tight, "검증된 목표가 주장보다 먼저 버려졌다")
+        self.assertIn("GOAL", tight, "a verified goal was dropped before a claim")
         self.assertNotIn("PLAN?", tight)
         self.assertIn("plan?", " ".join(tight.get("MORE", [])).lower())
 
@@ -143,7 +145,7 @@ class TestProvenanceSlots(unittest.TestCase):
         self.assertIn("필드 경로", slots_of(out)["NEXT"][0])
 
     def test_ack_shaped_last_turn_yields_plan_question_instead_of_next(self):
-        """'계속 진행해' 같은 승인형 턴을 NEXT 로 쓰면 거부된 제안이 지시로 세탁된다."""
+        """Using an approval-shaped turn like '계속 진행해' (go ahead) as NEXT launders a rejected proposal into an instruction."""
         out = mint.mint(read_of([
             ev(1, text="목표를 세운다"),
             ev(2, author="agent", text="다음으로 Codex 파서를 붙이겠습니다. 그 다음은 색인입니다."),
@@ -163,7 +165,7 @@ class TestProvenanceSlots(unittest.TestCase):
         self.assertIn("PLAN?", out)
 
     def test_other_human_turns_appear_as_said_not_as_a_decision(self):
-        """DEC 은 해석을 함의한다. 결정론적 추출로는 무엇이 결정인지 알 수 없다."""
+        """A DEC slot would imply interpretation. Deterministic extraction can't know what counts as a decision."""
         out = mint.mint(read_of([
             ev(1, text="첫 목표를 정한다"),
             ev(3, text="ordinal 을 seq 로 쓰고 byte offset 은 인덱스에만 둔다"),
@@ -202,7 +204,7 @@ class TestMachineSlots(unittest.TestCase):
         self.assertIn("pytest tests/test_x.py", slots_of(out)["FAIL"][0])
 
     def test_failure_resolved_later_is_dropped_and_counted(self):
-        """한 시간 전부터 그린인 스위트에 대해 '3 failed' 라고 말하지 않는다."""
+        """Don't report '3 failed' for a suite that's been green for an hour."""
         out = mint.mint(read_of([
             ev(1, text="목표"),
             ev(2, author="agent", verb="ran", arg="pytest tests/test_x.py", ok=False),
@@ -213,7 +215,7 @@ class TestMachineSlots(unittest.TestCase):
         self.assertIn("fixed later", " ".join(slots["MORE"]))
 
     def test_resolution_matches_on_the_first_40_bytes_of_the_arg(self):
-        """접두 40바이트가 같으면 같은 일로 본다 — 플래그만 다른 재실행을 잡는다."""
+        """Same first-40-bytes prefix counts as the same thing — catches a rerun that only differs in flags."""
         long_a = "pytest tests/test_read_codex.py -k function_call_output -x"
         long_b = "pytest tests/test_read_codex.py -k function_call_output --verbose"
         self.assertEqual(long_a[:40], long_b[:40])
@@ -276,7 +278,7 @@ class TestDisclosure(unittest.TestCase):
         self.assertIn("hidden", " ".join(slots_of(out)["MORE"]))
 
     def test_more_uses_singular_for_exactly_one_hidden_event(self):
-        """#15b: "1 events hidden" 은 어색하다 — 복수는 1개일 때 안 쓴다."""
+        """#15b: "1 events hidden" reads wrong — no plural for exactly one."""
         events = [ev(1, text="목표"),
                   ev(2, author="agent", verb="ran", arg="pytest")]
         out = mint.mint(read_of(events), to_adapter_id="claude-code", now=NOW)
@@ -300,7 +302,7 @@ class TestDisclosure(unittest.TestCase):
 
 class TestSameVendorShortCircuit(unittest.TestCase):
     def test_minting_for_the_same_harness_returns_empty(self):
-        """같은 벤더끼리는 native resume 이 무손실이며 우월하다."""
+        """Same-vendor native resume is lossless and strictly better."""
         out = mint.mint(read_of([ev(1, text="목표")], adapter_id="claude-code"),
                         to_adapter_id="claude-code", now=NOW)
         self.assertEqual(out, "")

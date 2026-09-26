@@ -19,10 +19,11 @@ have_fixtures = __import__("tests._repo", fromlist=["have_fixtures"]).have_fixtu
 
 @unittest.skipUnless(have_fixtures, MISSING)
 class TestFixtureGolden(unittest.TestCase):
-    """골든이 얼린 픽스처와 자기 일관되는지 본다.
+    """Checks the golden is self-consistent with the frozen fixture.
 
-    레코드 수 같은 값은 하드코딩하지 않는다 — 라이브 트랜스크립트가 이 세션이라
-    계속 자라기 때문이다(798 → 1022 실측). 구조적으로 안정한 값만 하드코딩한다.
+    Values like record count aren't hardcoded — the live transcript is this
+    very session and keeps growing (798 -> 1022 observed). Only structurally
+    stable values are hardcoded.
     """
 
     def setUp(self):
@@ -33,7 +34,7 @@ class TestFixtureGolden(unittest.TestCase):
         self.assertEqual(actual, self.exp["claude"]["records"])
 
     def test_first_cwd_bearing_record_is_not_index_zero(self):
-        """'첫 줄에서 cwd 읽기' 는 v1 주력 하네스에서 실패한다."""
+        """'reading cwd from the first line' fails on v1's primary harness."""
         self.assertEqual(self.exp["claude"]["first_cwd_index"], 3)
         self.assertGreater(self.exp["claude"]["no_cwd"], 0)
 
@@ -48,7 +49,7 @@ class TestFixtureGolden(unittest.TestCase):
             self.assertIn(needed, subs)
 
     def test_hook_additional_context_is_observed(self):
-        """우리가 쓸 주입 표면이 실물로 관측되는지."""
+        """Whether the injection surface we'll use is observed in the wild."""
         self.assertIn("hook_additional_context", self.exp["claude"]["attachment_subtypes"])
 
     def test_nested_subagent_files_exist(self):
@@ -62,12 +63,12 @@ class TestFixtureGolden(unittest.TestCase):
 
 @unittest.skipUnless(have_fixtures, MISSING)
 class TestFixtureStructure(unittest.TestCase):
-    """세션 길이와 무관하게 성립해야 하는 구조적 사실."""
+    """Structural facts that must hold regardless of session length."""
 
     def test_tool_results_come_back_as_user_records(self):
-        """Claude Code는 tool_result 를 type:"user" 로 되돌린다.
+        """Claude Code reports tool_result as type:"user" too.
 
-        타입만 보고 사람의 말로 판정하면 안 된다는 근거.
+        Evidence that type alone is not enough to judge something as human speech.
         """
         tool_result_users = 0
         for _i, row in iter_json(CLAUDE_LIVE):
@@ -119,16 +120,16 @@ class TestFixtureStructure(unittest.TestCase):
         return out
 
     def test_codex_relays_its_environment_prompt_as_a_user_role_record(self):
-        """role 기반 필터만으로는 Codex 환경 프롬프트가 사람의 말로 중계된다.
+        """A role-based filter alone relays Codex's environment prompt as human speech.
 
-        판별자는 둘이다 — 봉투 구조와 메타데이터 kind. content_item_kinds 는
-        실재하지만 payload.internal_chat_message_metadata_passthrough 안에
-        중첩돼 있다.
+        There are two discriminators — envelope structure and the metadata kind.
+        content_item_kinds does exist, but nested under
+        payload.internal_chat_message_metadata_passthrough.
         """
         texts = self._codex_user_texts()
         self.assertGreaterEqual(len(texts), 2)
         wrapped = [t for t in texts if t.strip().startswith("<environment_context>")]
-        self.assertEqual(len(wrapped), 1, "환경 프롬프트를 실은 role=user 레코드가 정확히 1개여야 한다")
+        self.assertEqual(len(wrapped), 1, "exactly one role=user record carrying the environment prompt is expected")
 
     def test_codex_developer_records_are_pure_machinery(self):
         heads = []
@@ -141,14 +142,14 @@ class TestFixtureStructure(unittest.TestCase):
             for b in payload.get("content") or []:
                 if isinstance(b, dict) and b.get("text"):
                     heads.append(b["text"][:40])
-        self.assertTrue(heads, "developer 레코드를 찾지 못했다")
+        self.assertTrue(heads, "could not find a developer record")
         self.assertTrue(
             any(h.startswith("<skills_instructions>") for h in heads),
-            "기계장치 태그가 픽스처에 있어야 가드 테스트가 진짜 적대적 입력을 갖는다",
+            "the fixture needs a machinery tag so guard tests get real adversarial input",
         )
 
     def test_subagent_user_records_carry_agent_id(self):
-        """author 를 3값으로 두는 이유. 이 레코드들은 사람의 말이 아니다."""
+        """Why author has three values. These records are not human speech."""
         seen = 0
         for _i, row in iter_json(CLAUDE_SUB):
             if row.get("type") != "user":

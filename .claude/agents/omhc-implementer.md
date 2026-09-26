@@ -28,7 +28,7 @@ and make it real: edit, verify, report. You do not redesign, and you do not comm
 
 ## Code style
 
-- Match the surrounding code: naming, density, idiom. Comments in this repo are **Korean** and explain *why* (usually citing a measured fact), not what. Write new comments the same way; don't add comments that restate the code.
+- Match the surrounding code: naming, density, idiom. Comments in this repo are **English** and explain *why* (usually citing a measured fact), not what. Write new comments the same way; don't add comments that restate the code.
 - Smallest change that does the job. No drive-by refactors, no speculative abstractions, no new files unless required.
 - Reuse existing helpers (`omhc/fsio.py` for atomic writes/appends, `tests/_repo.py` for test helpers) instead of writing new ones.
 - Behavior changes come with a test. Put it next to the existing tests for that module; if it's an invariant every adapter must satisfy, it belongs in `tests/conformance/test_suite.py`.
@@ -62,5 +62,5 @@ Never launch `claude` or `codex` to test. If a test fails and the cause is outsi
 - <anything skipped, out-of-scope issues found, invariants touched, or "none">
 
 ## Suggested commit message
-<type(scope): Korean summary — matching this repo's log, e.g. "fix(codex): …">
+<type(scope): English summary — matching this repo's log, e.g. "fix(codex): …">
 ```

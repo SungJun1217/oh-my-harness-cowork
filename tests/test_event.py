@@ -46,11 +46,11 @@ class TestEvent(unittest.TestCase):
             self.assertNotIn(forbidden, Event._fields)
 
     def test_event_is_immutable_against_declared_and_undeclared_names(self):
-        """namedtuple + __slots__ = () 이므로 어느 이름도 할당할 수 없다.
+        """namedtuple + __slots__ = () means no name can be assigned at all.
 
-        dataclasses 대신 namedtuple 을 쓰는 이유는 import 비용이다 — dataclasses 는
-        inspect·ast·dis·tokenize 를 끌어와 훅 경로 두 프로세스가 매번 8ms 씩
-        지불했다. 불변 보장은 동일하다.
+        namedtuple is used instead of dataclasses for import cost — dataclasses
+        pulls in inspect/ast/dis/tokenize, costing 8ms on each of the two hook-path
+        processes every time. The immutability guarantee is the same either way.
         """
         ev = mk()
         with self.assertRaises(AttributeError):

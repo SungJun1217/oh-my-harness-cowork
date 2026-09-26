@@ -1,9 +1,10 @@
-"""주입되는 바이트 자체를 지키는 테스트.
+"""Tests that guard the injected bytes themselves.
 
-출처 검사이며 키워드 스캔이 아니다. 폐기 대상 레코드에 **센티넬**을 심고 그것이
-산출물에 새어나오는지만 본다. 키워드 금지는 거짓 양성을 낸다 — 이 레포의 대화
-산문에 <system-reminder> 가 146회 등장하고 그중 상당수는 그 마커를 논의하는
-정당한 문장이다.
+This is a provenance check, not a keyword scan. A **sentinel** is planted in
+records that should be discarded, and the only thing checked is whether it
+leaks into the artifact. Banning keywords produces false positives — in this
+repo's conversation prose, <system-reminder> appears 146 times, and a good
+number of those are legitimate sentences discussing that very marker.
 """
 from __future__ import annotations
 
@@ -53,7 +54,8 @@ def mint_codex(rows, budget=900) -> str:
 
 
 class TestSentinelNeverEscapes(unittest.TestCase):
-    """폐기 대상 레코드에 센티넬을 심는다. 산출물에 나타나면 방어가 뚫린 것이다."""
+    """Plant a sentinel in a record that should be discarded. If it shows up
+    in the artifact, the defense has been breached."""
 
     def test_sentinel_in_an_attachment_never_reaches_the_artifact(self):
         out = mint_claude([
@@ -198,10 +200,10 @@ class TestSentinelNeverEscapes(unittest.TestCase):
         self.assertNotIn(SENTINEL, out)
 
     def test_agent_echoing_the_omhc_header_is_dropped_claude_code(self):
-        """#24: 받는 에이전트가 주입된 [omhc] 헤더를 답변에 그대로 인용하면 반대
-        방향 핸드오프의 PLAN? 에 그 블록이 통째로 중첩된다. guard.HEADER_LINE1_FMT
-        하나로 mint 와 guard 가 같은 문구를 공유하므로, 여기서 만든 헤더가 실제
-        mint() 산출물과 어긋날 수 없다.
+        """#24: if the receiving agent quotes the injected [omhc] header verbatim
+        in its reply, the reverse-direction handoff's PLAN? nests that whole block.
+        mint and guard share the same wording through a single guard.HEADER_LINE1_FMT,
+        so the header built here can't drift from mint()'s real output.
         """
         header = guard.HEADER_LINE1_FMT.format("codex-cli", "abcd1234", "5m", "2h ago")
         quoted = "받은 요약을 인용합니다:\n" + header + "\n" + guard.HEADER_LINE2 + "\n계속 진행하겠습니다."
@@ -211,8 +213,8 @@ class TestSentinelNeverEscapes(unittest.TestCase):
             {"type": "assistant", "cwd": REPO, "timestamp": "2026-09-22T00:00:01.000Z",
              "message": {"content": [{"type": "text", "text": quoted}]}},
         ])
-        # mint() 자신의 헤더도 "notes from a prior session" 을 담으므로 그 문구
-        # 자체가 아니라 인용된 헤더의 식별자(가짜 id8 "abcd1234")로 판정한다.
+        # mint()'s own header also carries "notes from a prior session", so judge
+        # by the quoted header's identifier (fake id8 "abcd1234"), not that phrase itself.
         self.assertNotIn("abcd1234", out)
         self.assertEqual(out.count("notes from a prior session"), 1)
 
@@ -235,7 +237,8 @@ class TestSentinelNeverEscapes(unittest.TestCase):
         self.assertEqual(out.count("notes from a prior session"), 1)
 
     def test_agent_mentioning_omhc_in_passing_is_kept_both_adapters(self):
-        """#24 의 반대쪽: "[omhc]" 라는 낱말만으로 걸면 무해한 언급까지 드롭한다."""
+        """The flip side of #24: matching on the word "[omhc]" alone drops even
+        harmless mentions."""
         mention = "the [omhc] tool을 써서 컨텍스트를 넘겼다"
         out_cc = mint_claude([
             {"type": "user", "cwd": REPO, "timestamp": "2026-09-22T00:00:00.000Z",
@@ -259,7 +262,7 @@ class TestSentinelNeverEscapes(unittest.TestCase):
         self.assertIn("omhc", out_cx)
 
     def test_sentinel_in_an_unknown_future_record_type_never_reaches_the_artifact(self):
-        """모르는 타입은 기본 DROP 이라는 계약을 센티넬로 확인한다."""
+        """Confirm with a sentinel the contract that an unknown type defaults to DROP."""
         out = mint_claude([
             {"type": "user", "cwd": REPO, "timestamp": "2026-09-22T00:00:00.000Z",
              "message": {"content": "정상적인 사람의 말"}},
@@ -282,17 +285,18 @@ class TestRealFixtureArtifacts(unittest.TestCase):
         return out
 
     def test_no_machinery_tag_appears_anywhere_in_any_artifact(self):
-        """기계장치 태그 9종은 산출물 어디에도 나타나면 안 된다.
+        """None of the 9 machinery tags must appear anywhere in the artifact.
 
-        이것은 키워드 스캔이 아니다 — 이 태그들은 하네스가 생성한 구조적 마커이고
-        사람이 쓴 산문에 등장할 수는 있으나 우리가 만든 슬롯에 들어갈 이유가 없다.
+        This is not a keyword scan — these tags are structural markers the harness
+        generates, and while they could appear in prose a human wrote, there's no
+        reason for them to land in a slot we built.
         """
         for artifact in self._artifacts():
             for marker in guard.FOREIGN_MARKERS:
                 self.assertNotIn(marker, artifact, marker)
 
     def test_machine_slots_never_carry_a_vendor_tool_name(self):
-        """FAIL / DID 는 arg 와 paths 로만 만들어진다 — 툴 이름 필드가 없다."""
+        """FAIL / DID are built only from arg and paths — there's no tool-name field."""
         for artifact in self._artifacts():
             for line in artifact.splitlines():
                 key = line.split("  ")[0].strip()

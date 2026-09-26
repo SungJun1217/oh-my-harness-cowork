@@ -7,10 +7,10 @@ from .event import Event
 
 
 class Capability(enum.Enum):
-    """선언된 능력. 두 개뿐이며, 실물 하네스가 요구하지 않는 플래그는 두지 않는다.
+    """Declared capabilities. Only two — no flag that no real harness actually needs.
 
-    읽기와 쓰기는 독립이다. Cursor 처럼 세션 훅이 없는 하네스는 읽기 전용
-    어댑터가 정상 상태이며 결함이 아니다.
+    Read and write are independent. A harness with no session hook (e.g.
+    Cursor) having a read-only adapter is a normal state, not a defect.
     """
 
     READ = "read"
@@ -18,15 +18,15 @@ class Capability(enum.Enum):
 
 
 class OmhcAdapterError(Exception):
-    """어댑터 계층의 모든 예외의 기반."""
+    """Base for every exception in the adapter layer."""
 
 
 class AdapterUnavailable(OmhcAdapterError):
-    """모르는 adapter_id, 또는 이 머신에 설치되지 않은 하네스."""
+    """Unknown adapter_id, or the harness isn't installed on this machine."""
 
 
 class NoInjectionChannel(OmhcAdapterError):
-    """쓰기 능력이 없거나 모든 주입 경로가 막혔다. 호출자가 보편 바닥으로 보낸다."""
+    """No write capability, or every injection path is blocked. Caller falls back to the universal floor."""
 
 
 class HarnessPresence(NamedTuple):
@@ -35,10 +35,11 @@ class HarnessPresence(NamedTuple):
 
 
 class SessionRef(NamedTuple):
-    """한 세션 파일을 가리키는 포인터.
+    """A pointer to a single session file.
 
-    cwd 가 None 일 수 있다 — 작업 디렉터리 개념이 없는 하네스가 존재하며,
-    지금 필드 하나를 허용하는 비용이 나중에 Protocol 을 바꾸는 비용보다 싸다.
+    cwd can be None — some harnesses have no working-directory concept, and
+    allowing that field to be optional now is cheaper than changing the
+    Protocol later.
     """
 
     adapter_id: str
@@ -50,32 +51,34 @@ class SessionRef(NamedTuple):
 
 
 class SessionRead(NamedTuple):
-    """한 세션을 중립 Event 로 읽은 결과.
+    """The result of reading one session into neutral Events.
 
-    unparsed/dropped 는 조용한 열화를 관측 가능하게 만든다. 모르는 레코드에서
-    예외를 던지면 훅 경로가 죽고, 조용히 버리면 유실을 아무도 모른다.
+    unparsed/dropped make silent degradation observable. Raising on an
+    unknown record would kill the hook path; dropping silently would hide
+    the loss from everyone.
     """
 
     ref: SessionRef
     events: Tuple[Event, ...]
     unparsed: int
-    # 기본값을 주지 않는다 — NamedTuple 의 기본값은 인스턴스 간에 공유되므로
-    # 가변 dict 를 기본값으로 두면 한 어댑터의 집계가 다른 어댑터에 새어든다.
+    # No default here — NamedTuple defaults are shared across instances, so a
+    # mutable dict default would leak one adapter's tally into another's.
     dropped: Dict[str, int]
 
 
 class SessionSince(NamedTuple):
-    """`read_session_since` 의 결과. `SessionRead` 와 거의 같지만 `end_offset`
-    을 더 들고 있다 — 이 읽기가 실제로 다 읽은, **마지막으로 완전한 줄 바로
-    뒤**의 바이트 오프셋이다.
+    """Result of `read_session_since`. Almost the same as `SessionRead`, but
+    also carries `end_offset` — the byte offset right after the **last fully
+    read line** this call actually consumed.
 
-    호출자(cli._reactivate_grown_sessions)는 다음 baseline 으로 `os.stat` 의
-    크기 대신 이걸 써야 한다 — stat 이 레코드 중간에 걸리면(하네스가 쓰는
-    중일 수 있다), 그 크기를 그대로 baseline 으로 삼고 나중에 그 레코드가
-    마저 쓰인 뒤 거기서부터 읽으면 skip-to-newline 로직이 그 레코드 전체를
-    건너뛴다. `end_offset` 은 실제로 소비한 줄만 반영하므로 이 문제가 없다.
-    `max_bytes`/조기 종료로 EOF 전에 멈췄으면 `end_offset` 은 자연히 거기서
-    멈춘다 — 다음 호출이 그 지점부터 이어 읽는다."""
+    The caller (cli._reactivate_grown_sessions) must use this as the next
+    baseline instead of `os.stat`'s size — if stat lands mid-record (the
+    harness may still be writing), taking that size as the baseline and later
+    reading from there once the record finishes being written makes the
+    skip-to-newline logic skip that entire record. `end_offset` only reflects
+    lines actually consumed, so it doesn't have this problem. If `max_bytes`/
+    early exit stopped before EOF, `end_offset` naturally stops there too —
+    the next call resumes from that point."""
 
     events: Tuple[Event, ...]
     unparsed: int
@@ -90,7 +93,7 @@ class HandoffBundle(NamedTuple):
 
 
 class InstallReceipt(NamedTuple):
-    """모든 주입 경로는 receipt 로 끝난다. 조용한 실패를 만들지 않는다."""
+    """Every injection path ends in a receipt. No silent failures."""
 
     channel: str
     paths_written: Tuple[str, ...] = ()
@@ -99,29 +102,30 @@ class InstallReceipt(NamedTuple):
 
 
 class HarnessAdapter:
-    """하네스 하나(정확히는 하나의 표면)에 대한 어댑터. 메서드 5개가 전부다.
+    """An adapter for one harness (more precisely, one surface). Five methods, total.
 
-    부수 규칙:
-    - `__init__` 에서 I/O 를 하지 않는다. `home=` 과 `now=` 를 키워드로 받는다.
-    - `detect()` 는 싸야 하고 **예외를 던지지 않는다**.
-    - 모르는 레코드 타입은 기본 DROP 이며 `SessionRead.dropped` 에 보고된다.
-    - `author == "human"` 은 **최상위 세션 파일에서만** 나온다.
-    - 글롭은 깊이 1만. 중첩 `<session>/subagents/**` 는 읽지 않는다.
+    Side rules:
+    - No I/O in `__init__`. Takes `home=` and `now=` as keywords.
+    - `detect()` must be cheap and **must never raise**.
+    - Unknown record types default to DROP and are reported in `SessionRead.dropped`.
+    - `author == "human"` only ever comes from the top-level session file.
+    - Globs are depth 1 only. Nested `<session>/subagents/**` is never read.
 
-    typing.Protocol 을 쓰지 않는 이유: 3.9 에서 런타임 검사가 제한적이고,
-    적합성 스위트가 실제 인스턴스로 계약을 검증하므로 명목 기반 클래스가 더
-    솔직하다.
+    Why not typing.Protocol: runtime checking is limited on 3.9, and the
+    conformance suite already verifies the contract against real instances,
+    so a nominal base class is more honest.
     """
 
     adapter_id: str = ""
     capabilities: frozenset = frozenset()
 
-    # 주입 JSON 형식. 하네스별 사실 중 가장 하네스별인 것이므로 어댑터가 소유한다.
+    # Injection JSON shape. The most harness-specific fact there is, so the adapter owns it.
     #   "claude" : {"hookSpecificOutput": {"hookEventName": …, "additionalContext": …}}
     #   "cursor" : {"additional_context": …}
-    #   "sdk"    : {"additionalContext": …}   (SDK 표준 / Copilot CLI)
-    # 코어에 harness→wire 표를 두면 새 어댑터가 코어를 고쳐야 하고, 고치지 않으면
-    # 자기 하네스가 무시하는 필드를 조용히 내보낸다(receipt 도 남지 않는다).
+    #   "sdk"    : {"additionalContext": …}   (SDK standard / Copilot CLI)
+    # A harness→wire table in the core would force new adapters to touch the
+    # core, and if they don't, they'd silently emit a field their own harness
+    # ignores (with no receipt to show for it).
     wire: str = "sdk"
 
     def __init__(self, *, home: Optional[str] = None, now=None) -> None:
@@ -139,28 +143,31 @@ class HarnessAdapter:
     def read_session_since(self, ref: SessionRef, offset: int, *,
                            max_bytes: Optional[int] = None,
                            stop_at_human_turn: bool = False) -> Optional[SessionSince]:
-        """`offset` 바이트부터 읽는다. 선택 메서드 — `discover`/`health` 와
-        같은 패턴이다. 기본값 `None` 은 "이 어댑터는 구분할 수 없다"이고,
-        호출자는 그러면 오늘의 전체 스캔 경로를 그대로 쓴다 — **이 판정은
-        어댑터당 한 번이다**: 호출자가 아무 인자로나 한 번 불러 `None` 이면
-        그 어댑터는 이후 완전히 건너뛴다(콜마다 달라지지 않는다).
+        """Reads starting at byte `offset`. Optional method — same pattern as
+        `discover`/`health`. The default `None` means "this adapter can't
+        distinguish", and the caller then falls back to today's full-scan
+        path — **this decision is per adapter**: once the caller calls it
+        once with any argument and gets `None`, that adapter is skipped
+        entirely afterward (it doesn't vary call to call).
 
-        `codex exec resume` 처럼 같은 파일(같은 inode)에 새 턴이 이어붙는데
-        `session_meta` 가 다시 쓰이지 않는 하네스가 이걸 구현한다 — 전체
-        `read_session` 은 13.8MB rollout 에서 593ms 실측이라 훅 경로에서
-        매번 돌리면 예산(150ms)을 넘긴다. `offset` 은 이전에 관측한 파일
-        크기(바이트) — 레코드 경계일 필요는 없다: 줄 중간이면 구현이 다음
-        개행까지 건너뛴다. 반환하는 이벤트는 `event.offset >= offset` 만
-        포함한다(줄 경계로 스냅한 뒤 기준). 절대 던지지 않는다 — 가비지에도
-        빈 결과로 열화한다.
+        Harnesses like `codex exec resume`, where a new turn is appended to
+        the same file (same inode) without rewriting `session_meta`,
+        implement this — full `read_session` measured 593ms on a 13.8MB
+        rollout, which blows the hook-path budget (150ms) if run every time.
+        `offset` is the previously observed file size in bytes — it need not
+        be a record boundary: mid-line, the implementation skips to the next
+        newline. Returned events only include `event.offset >= offset` (after
+        snapping to a line boundary). Never raises — degrades to an empty
+        result even on garbage.
 
-        `max_bytes`(선택, 기본 무제한)를 주면 그만큼만 읽고 멈춘다 — 실측
-        (17.7MB 꼬리): 늘어난 만큼 비용이 그대로 비례해(396.6ms) 훅 예산을
-        넘길 수 있다. `stop_at_human_turn`(선택, 기본 False)이면 사람의
-        `said` 이벤트를 하나라도 찾는 즉시 멈춘다 — 존재 여부만 필요한
-        호출자(재개 감지)가 나머지를 읽지 않게 한다. 반환값의 `end_offset`
-        은 항상 **실제로 다 읽은 마지막 완전한 줄 바로 뒤** 오프셋이다 —
-        기본값(무제한, 조기 종료 없음)에서는 EOF 와 같다.
+        `max_bytes` (optional, unlimited by default) reads only that much
+        and stops — measured (17.7MB tail): cost scales proportionally with
+        size (396.6ms), which can blow the hook budget. `stop_at_human_turn`
+        (optional, False by default) stops as soon as it finds a single
+        human `said` event — for callers that only need existence (resume
+        detection) so they don't read the rest. The returned `end_offset` is
+        always the offset right after **the last fully read complete line**
+        — with defaults (unlimited, no early exit) that equals EOF.
         """
         return None
 
@@ -171,117 +178,137 @@ class HarnessAdapter:
         raise NotImplementedError
 
     def classify(self, source_path: str) -> bool:
-        """이 트랜스크립트가 **사람이 대화한 세션**인가.
+        """Is this transcript a **session a human actually talked in**?
 
-        False 는 헤드리스·서브에이전트라고 확실할 때만 낸다. 판단할 수 없으면
-        True 다 — brief 는 False 인 원장 행을 건너뛰고 그 앞 행으로 가므로, 모르는
-        파일을 False 로 판정하면 낡은 세션이 나간다(#21).
+        Only return False when it's certain to be headless/subagent. If it
+        can't be determined, return True — brief skips ledger rows classified
+        False and falls back to the row before it, so classifying an unknown
+        file as False lets a stale session go out instead (#21).
 
-        하네스별 지식이므로 어댑터가 소유한다. 코어가 한 어댑터의 파서로 다른
-        하네스의 세션을 판정하면 안 된다 — Claude 의 entrypoint/isSidechain 을
-        Codex rollout 에서 찾으면 아무것도 없어 필터가 조용히 no-op 가 된다.
+        Owned by the adapter because it's harness-specific knowledge. The
+        core must never judge one harness's session with another adapter's
+        parser — looking for Claude's entrypoint/isSidechain in a Codex
+        rollout finds nothing, and the filter silently becomes a no-op.
         """
         raise NotImplementedError
 
     def discover(self, repo_root: Optional[str], deadline: Optional[float] = None):
-        """이 레포에 새로 나타난 세션들. `mark` 의 원장 백필 전용 선택 메서드.
+        """Sessions newly appeared in this repo. Optional method, used only
+        by `mark`'s ledger backfill.
 
-        `fallback_channels`/`health` 와 같은 선택 메서드 패턴이다 — 기본은 빈
-        튜플이며, list_sessions 처럼 비싼 전체 스캔을 모든 어댑터가 구현할
-        의무는 없다(Claude 는 이 스캔이 249ms 실측이라 훅 경로에서 절대 쓰면
-        안 되므로 명시적으로 빈 튜플을 돌려준다).
+        Follows the same optional-method pattern as `fallback_channels`/
+        `health` — default is an empty tuple, and not every adapter is
+        obligated to implement an expensive full scan like list_sessions
+        (Claude measured this scan at 249ms, which must never run on the hook
+        path, so it explicitly returns an empty tuple).
 
-        구현하는 어댑터는 반환하는 `SessionRef.epoch` 를 **세션 시작 시각**으로
-        채워야 한다 — list_sessions 의 epoch(파일 mtime, "최근 것부터" 정렬용)와
-        다르다. cmd_mark 가 이 값을 원장의 최신 시작 epoch 와 비교해 append
-        순서를 정하므로(invariant 6 이 금지하는 "순서의 근거로 삼는 mtime"이
-        아니라, due() 와 같은 키인 세션 시작 epoch 를 그대로 쓰는 것이다 —
-        허용된 예외다), mtime 을 여기 섞으면 오래된 세션이 최신으로 오인될
-        수 있다.
+        An adapter that implements this must fill the returned
+        `SessionRef.epoch` with the **session's start time** — different from
+        list_sessions's epoch (file mtime, used to sort "newest first").
+        cmd_mark compares this value against the ledger's latest start epoch
+        to decide append order (this isn't the "mtime as ordering basis" that
+        invariant 6 forbids — it's simply reusing the session-start epoch,
+        the same key `due()` uses — a permitted exception), so mixing in
+        mtime here could make an old session look like the newest.
 
-        `deadline` 은 `time.time()` 과 같은 시계의 절대 시각(선택)이다. 스캔
-        비용이 큰 어댑터(Codex 의 날짜 디렉터리 순회)는 루프 안에서 주기적으로
-        확인해 넘기면 지금까지 모은 것만 돌려주고 멈춰야 한다 — 안 그러면
-        cmd_mark 쪽 시간 예산은 discover() 호출이 끝난 뒤에야 재기 때문에
-        무의미해진다. 기본값 `None` 은 "끊지 않는다"이다.
+        `deadline` is an optional absolute time on the same clock as
+        `time.time()`. Adapters with expensive scans (Codex's date-directory
+        walk) should check it periodically inside the loop and, once passed,
+        return only what's been gathered so far and stop — otherwise
+        cmd_mark's time budget becomes meaningless since it's only measured
+        after the discover() call returns. The default `None` means "don't
+        cut it short".
         """
         return ()
 
     def fallback_channels(self):
-        """install_handoff 가 실패했을 때 순서대로 시도할 채널들.
+        """Channels to try in order when install_handoff fails.
 
-        각 항목은 HandoffBundle 을 받아 InstallReceipt 를 돌려주거나
-        NoInjectionChannel 을 던진다. 라우터가 벤더 문자열을 들고 있으면
-        "어댑터 추가는 파일 하나" 라는 계약이 문자 그대로 깨진다 — 세 번째
-        WRITE 어댑터가 자기 파일 기반 폴백(Cursor 의 rules, kimi-code 의 메모리)을
-        선언할 방법이 없어진다.
+        Each entry takes a HandoffBundle and returns an InstallReceipt or
+        raises NoInjectionChannel. If the router held vendor strings, the
+        "adding an adapter is one file" contract would literally break — a
+        third WRITE adapter would have no way to declare its own file-based
+        fallback (Cursor's rules, kimi-code's memory).
         """
         return ()
 
     def health(self, repo_root: Optional[str], ledger_rows) -> Tuple[Tuple[str, Optional[bool], str], ...]:
-        """선택적 진단. 기본은 빈 튜플 — 모든 어댑터가 구현할 의무는 없다.
+        """Optional diagnostics. Default is an empty tuple — no adapter is
+        obligated to implement this.
 
-        실측(codex-cli 0.155.1): 신뢰되지 않은 `~/.codex/hooks.json` 훅은 메시지도
-        원장 행도 없이 조용히 건너뛰어진다. brief 가 한 번도 안 돌아도 `omhc
-        status` 는 전부 PASS 를 보였다 — 사용자가 그 사실을 알 방법이 없었다.
-        하네스별 행태 증거가 필요하므로 코어가 아니라 어댑터가 소유한다.
+        Measured (codex-cli 0.155.1): an untrusted `~/.codex/hooks.json` hook
+        is silently skipped, with no message and no ledger row. `omhc status`
+        showed all-PASS even though brief had never run once — the user had
+        no way to know. This needs harness-specific behavioral evidence, so
+        the adapter owns it, not the core.
 
-        `fallback_channels` 처럼 선택 메서드 패턴을 따른다 — 구현하지 않는
-        어댑터는 이 기본값으로 충분하고, `cmd_status` 가 단정하는 `(label, ok,
-        detail)` 형태만 지키면 된다. `ok` 는 `True`/`False`/`None` 이다 — 실제
-        판정이 되는 경우만 `True`/`False`(게이팅), 아직 판단할 근거가 없는
-        정보성 진단은 `None`(`----`, 게이팅 안 함)을 돌려준다. 절대 예외를
-        던지지 않는다 — status 는 진단 도구이고, 진단이 죽으면 열화를 보고할
-        방법이 없어진다.
+        Follows the same optional-method pattern as `fallback_channels` —
+        adapters that don't implement it are fine with this default, and only
+        need to honor the `(label, ok, detail)` shape `cmd_status` asserts on.
+        `ok` is `True`/`False`/`None` — only return `True`/`False` (gating)
+        when an actual verdict is possible; return `None` (`----`, not
+        gating) for an informational diagnostic with no basis yet to judge.
+        Never raises — status is a diagnostic tool, and if the diagnostic
+        dies there's no way left to report degradation.
 
-        `ledger_rows` 는 **레포로 거르지 않은** 원장이다 — 세션 id 는 전역
-        유일하므로, 호출자가 이 레포 키로 미리 거르면 자기 `.git` 을 가진 중첩
-        워크트리·서브모듈에서 시작한 세션이 다른 repo 키로 기록돼 영원히 "안
-        돈 것"으로 보인다.
+        `ledger_rows` is the ledger **not filtered by repo** — session ids
+        are globally unique, so if the caller pre-filtered by this repo key,
+        a session started from a nested worktree/submodule with its own
+        `.git` would be recorded under a different repo key and look
+        permanently "never ran".
         """
         return ()
 
     def on_session_start_mark(self, repo_root: str, *, source: str, epoch: float) -> None:
-        """`mark` 의 SessionStart 훅 경로에서, 이 하네스로 마크될 때마다 불리는
-        선택 메서드 — `discover`/`health` 와 같은 패턴이다. 기본은 no-op.
+        """Optional method called every time a session is marked under this
+        harness, from `mark`'s SessionStart hook path — same pattern as
+        `discover`/`health`. Default is a no-op.
 
-        "이 하네스가 세션 시작 시 AGENTS.md/CLAUDE.md 류를 자기 SessionStart
-        훅보다 먼저 읽는다"는 사실은 하네스별 실측(#36, codex-cli 0.156.1
-        sandbox 실측: 첫 턴은 훅 실행 전에 이미 읽은 뒤라 훅이 그 파일을 고쳐도
-        소용없다)이라 코어가 아니라 어댑터가 안다. 코어(cmd_mark)는 어떤 조건에서
-        부를지(`source` != "compact")만 정하고, "이미 읽혔으니 지워도 되는가"의
-        판단(캡처 시각과의 margin, Claude 공유 가드)은 구현이 갖는다.
+        "This harness reads AGENTS.md/CLAUDE.md-style files at session start
+        before its own SessionStart hook runs" is harness-specific measured
+        fact (#36, codex-cli 0.156.1 sandbox measurement: the first turn has
+        already read the file before the hook runs, so the hook editing it
+        does nothing), so the adapter knows it, not the core. The core
+        (cmd_mark) only decides under what condition to call this (`source`
+        != "compact"); the judgment of "has it already been read, so is it
+        safe to delete" (margin against capture time, the Claude shared
+        guard) belongs to the implementation.
 
-        `source` 는 SessionStart 훅 payload 의 원문 값이다("startup"/"resume"/
-        "compact"/빈 문자열 등, 두 하네스가 공유하는 어휘 — cli.py 참고).
-        `epoch` 는 이 mark 호출이 기록한 원장 행의 epoch 다(이 세션이 지금
-        막 이 하네스에서 새로 시작/재개됐다는, mark 가 가진 가장 이른 시각).
+        `source` is the raw value from the SessionStart hook payload
+        ("startup"/"resume"/"compact"/empty string etc — vocabulary shared by
+        both harnesses, see cli.py). `epoch` is the epoch of the ledger row
+        this mark call recorded (the earliest time mark has that this
+        session just started/resumed under this harness).
 
-        훅 경로에서 불리므로(invariant 2) 절대 던지지 않는다 — 호출자도 감싸지만
-        구현 스스로도 감싸야 한다(기본 동작이 no-op 인 이유)."""
+        Called from the hook path (invariant 2), so it must never raise —
+        the caller wraps it too, but the implementation must guard itself as
+        well (why the default behavior is a no-op)."""
         return None
 
     def hook_config(self):
-        """이 하네스의 SessionStart 훅 설정 위치. 선택 메서드 — `health`/
-        `fallback_channels`/`discover` 와 같은 패턴이다. 기본은 None(훅 개념이
-        없는 하네스, 또는 아직 지원하지 않는 하네스).
+        """Where this harness's SessionStart hook config lives. Optional
+        method — same pattern as `health`/`fallback_channels`/`discover`.
+        Default is None (a harness with no hook concept, or not yet
+        supported).
 
-        구현하면 `omhc.hookconf.HookConfig`(또는 그와 같은 3개 필드짜리 레코드)를
-        돌려준다: `config_path`(그 조각이 병합될 하네스 설정의 절대 경로),
-        `fragment_name`(`hooks/` 아래 그 하네스 조각 파일명), `post_write_note`
-        (설치 직후 사용자가 봐야 할 안내 — 예: Codex 의 훅 신뢰 재승인 경고;
-        없으면 빈 문자열). `omhc status` 의 `<adapter-id> hooks` 행과 `omhc
-        hooks install` 이 이 레코드 하나로 두 하네스를 동일하게 다룬다 — 코어에
-        벤더 이름이 들어가지 않는다.
+        If implemented, returns `omhc.hookconf.HookConfig` (or an equivalent
+        3-field record): `config_path` (absolute path of the harness config
+        this fragment merges into), `fragment_name` (the fragment file name
+        under `hooks/` for that harness), `post_write_note` (guidance the user
+        should see right after install — e.g. Codex's hook-trust re-approval
+        warning; empty string if none). `omhc status`'s `<adapter-id> hooks`
+        row and `omhc hooks install` treat both harnesses identically off
+        this one record — no vendor name enters the core.
         """
         return None
 
     def ref_for_path(self, source_path: str, session_id: str,
                      cwd: Optional[str] = None) -> Optional[SessionRef]:
-        """알려진 경로 하나를 SessionRef 로 만든다. 부적격이면 None.
+        """Makes a SessionRef from one known path. None if ineligible.
 
-        원장이 경로를 기록해 두므로, 세션 목록을 전부 스캔하지 않고 바로 그 파일을
-        열 수 있다 — 실측에서 list_sessions 는 130개 파일 34MB 를 읽어 1건을
-        남겼고 그것이 훅 예산 150ms 의 1.7배였다.
+        Since the ledger already recorded the path, this can open that exact
+        file directly instead of scanning the full session list — measured:
+        list_sessions read 130 files, 34MB, to yield 1 hit, which was 1.7x
+        the hook budget (150ms).
         """
         raise NotImplementedError

@@ -23,123 +23,136 @@ from . import _register, allow_headless, install_state_artifact, iso_epoch
 
 ARTIFACT_NAME = "omhc.txt"
 
-# 날짜 디렉터리 스캔 범위. sessions/YYYY/MM/DD 구조라 전체 walk 를 하면 오래된
-# 세션까지 전부 stat 한다. 훅 경로에서 돌아가므로 범위를 묶는다.
+# Scan range for date directories. sessions/YYYY/MM/DD structure means a
+# full walk would stat every old session too. Bounded since this runs on the
+# hook path.
 SCAN_DAYS = 14
 
-# 파싱하는 봉투 타입. 나머지(world_state, turn_context 등)는 부기다.
-# event_msg 는 item_completed 만 쓴다 — 셸·편집의 사실은 거기에만 있다.
+# Envelope types we parse. The rest (world_state, turn_context, etc) are
+# bookkeeping. event_msg only uses item_completed — the facts of shell/edit
+# only live there.
 _PARSED_ENVELOPES = frozenset({"response_item", "event_msg"})
 
-# 통과시키는 role. developer 는 <skills_instructions> / <multi_agent_role> 등
-# 순수 기계장치이므로 파싱조차 하지 않는다.
+# Roles let through. developer (<skills_instructions> / <multi_agent_role>
+# etc) is pure machinery and isn't even parsed.
 _PARSED_ROLES = frozenset({"user", "assistant"})
 
-# 텍스트를 담는 블록 타입. user/developer 는 input_text, assistant 는 output_text.
+# Block types carrying text. user/developer use input_text, assistant uses output_text.
 _TEXT_BLOCKS = frozenset({"input_text", "output_text", "text"})
 
-# --- 실측 (codex-cli 0.141.0–0.155.1, 이 머신 211개 rollout, 2026-09) --------
-# 세 시대가 섞여 있다.
+# --- Measured (codex-cli 0.141.0-0.155.1, 211 rollouts on this machine, 2026-09) --------
+# Three eras are mixed together.
 #
-# era A (0.141–0.142): 셸은 response_item/function_call name="exec_command" 다.
-#   arguments 는 JSON 문자열이고 cmd(str, 381/381 실측)가 곧 셸 명령이다.
-#   workdir(절대경로, 가끔 없음)도 같이 온다. parsed_cmd 는 없다. 출력은
-#   function_call_output.output 의 평문이고("Chunk ID: … / Wall time: … /
-#   Process exited with code N 또는 Process running with session ID N /
-#   Original token count: N / Output: …") JSON 이 아니다. 백그라운드로 돌던
-#   프로세스는 나중의 write_stdin(args.session_id==N) 출력에서 결과가 온다.
-#   편집은 custom_tool_call name="apply_patch" 이고 JSON arguments 가 아니라
-#   최상위 input 에 원본 패치 텍스트가 들어 있다(*** Add/Update/Delete File:,
-#   *** Move to: 줄에서 경로를 읽는다). 같은 편집이 event_msg/item_completed
-#   FileChange(id==call_id, 절대경로)로 또 온다 — 둘 다 이벤트를 만들면 이중
-#   계상이라 FileChange 로 원래 이벤트를 덮어쓴다.
-# era B0 (0.144–0.148): 명령이 custom_tool_call name="exec" 의 JS 소스 문자열
-#   안에만 있다. JS 는 파싱하지 않는다(화이트리스트, fail-closed) — 그 구간의
-#   파일은 사실 없이 남는다(SCAN_DAYS 밖이라 손실을 감수한다).
-# era B (0.149–0.155.1, 현재): 셸은 event_msg/item_completed
-#   item.type="CommandExecution" 이다(status completed⇔exit 0, failed⇔exit≠0,
-#   parsed_cmd 있음). 같은 자리의 custom_tool_call name="exec" 는 JS 래퍼
-#   부기다. 멀티에이전트 도구(spawn_agent 등)는 function_call 로 온다.
+# era A (0.141-0.142): shell is response_item/function_call
+#   name="exec_command". arguments is a JSON string and cmd (str, measured
+#   381/381) is the shell command itself. workdir (absolute path,
+#   sometimes missing) comes along too. No parsed_cmd. Output is plain text
+#   in function_call_output.output ("Chunk ID: ... / Wall time: ... /
+#   Process exited with code N or Process running with session ID N /
+#   Original token count: N / Output: ..."), not JSON. A process left
+#   running in the background gets its result from a later
+#   write_stdin(args.session_id==N) output. Edits are custom_tool_call
+#   name="apply_patch", with the raw patch text in the top-level input
+#   rather than JSON arguments (paths are read from *** Add/Update/Delete
+#   File:, *** Move to: lines). The same edit comes again as
+#   event_msg/item_completed FileChange (id==call_id, absolute path) — if
+#   both produced events that'd be double counting, so FileChange
+#   overwrites the original event.
+# era B0 (0.144-0.148): the command only exists inside a JS source string in
+#   custom_tool_call name="exec". JS isn't parsed (whitelist, fail-closed) —
+#   files from this era are left without facts (accepted loss, since it's
+#   outside SCAN_DAYS anyway).
+# era B (0.149-0.155.1, current): shell is event_msg/item_completed
+#   item.type="CommandExecution" (status completed<=>exit 0,
+#   failed<=>exit!=0, has parsed_cmd). The custom_tool_call name="exec" in
+#   the same spot is JS-wrapper bookkeeping. Multi-agent tools (spawn_agent
+#   etc) come as function_call.
 _JS_WRAPPER_TOOL = "exec"
-# parsed_cmd 가 전부 이 종류면 읽기다. Codex 에는 읽기 전용 도구가 따로 없어서
-# 이걸 안 쓰면 Codex 세션에 inspected 가 영영 없다.
+# If parsed_cmd is entirely these kinds, it's a read. Codex has no dedicated
+# read-only tool, so without this Codex sessions would never have an inspected event.
 _INSPECT_KINDS = frozenset({"read", "list_files", "search"})
 _SHELL_FLAGS = frozenset({"-c", "-lc"})
 
-# 도구 이름 → 중립 동사. 실측된 이름만 올린다(invariant 5 — 도구명 자체는 IR에
-# 남기지 않고 동사로만 흡수한다). 모르는 이름은 unmapped_tool 로만 세고 이벤트를
-# 만들지 않는다 — 빈 arg 의 가짜 ran 이 300개쯤 생기는 것보다 낫다.
+# Tool name → neutral verb. Only measured names go in here (invariant 5 —
+# the tool name itself never enters the IR, only gets absorbed into a verb).
+# Unknown names are only tallied as unmapped_tool, producing no event —
+# better than ~300 fake "ran" events with an empty arg.
 _VERB_BY_TOOL = {
     "exec_command": "ran",
     "apply_patch": "modified",
     "spawn_agent": "delegated",
 }
 
-# 부기 전용 도구 — 이벤트를 만들지 않고 dropped["tool_bookkeeping"] 으로만
-# 센다. write_stdin 은 예외적으로 session_id 를 원래 exec_command 이벤트에
-# 되돌려 붙이는 데 쓰이지만(read_session 참고), 그 자신은 이벤트가 되지 않는다.
+# Bookkeeping-only tools — produce no event, only tallied under
+# dropped["tool_bookkeeping"]. write_stdin is a special case, used to link
+# session_id back to the original exec_command event (see read_session), but
+# it never becomes an event itself.
 _BOOKKEEPING_TOOLS = frozenset({
     "write_stdin", "wait", "wait_agent", "list_agents", "interrupt_agent",
     "send_message", "followup_task", "request_user_input",
     "list_available_plugins_to_install",
 })
 
-# apply_patch 의 top-level input 에서 경로를 뽑는 줄. Move to: 는 목적지 경로다.
+# The line that extracts the path from apply_patch's top-level input. Move to: gives the destination path.
 _PATCH_PATH_RE = re.compile(
     r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", re.MULTILINE)
 
-# `~/.codex/config.toml` 의 `project_root_markers = [...]` 를 뽑는다(#31). 키
-# 이름은 따옴표로 감싸일 수도 있다(TOML bare/quoted key 둘 다 유효). 여러 줄
-# 배열까지 잡도록 비탐욕 DOTALL 로 첫 `]` 까지 본다.
+# Extracts `project_root_markers = [...]` from `~/.codex/config.toml` (#31).
+# The key name may be quoted (both TOML bare/quoted keys are valid). Uses a
+# non-greedy DOTALL match up to the first `]` so it catches multi-line arrays too.
 _ROOT_MARKERS_KEY_RE = re.compile(
     r'(?m)^[ \t]*[\'"]?project_root_markers[\'"]?[ \t]*=[ \t]*(\[.*?\])', re.DOTALL)
-# 리뷰 #2: `[projects."..."]` 같은 테이블 헤더는 그 아래 키의 스코프를 바꾼다
-# (`[table]\nproject_root_markers = …` 는 최상위 키가 아니다) — 첫 헤더 앞까지만
-# 최상위로 본다.
+# Review #2: a table header like `[projects."..."]` changes the scope of the
+# keys under it (`[table]\nproject_root_markers = ...` is not a top-level
+# key) — only treat text before the first header as top-level.
 
-# `~/.codex/config.toml` 의 `project_doc_max_bytes = N`(#33). Codex 가 AGENTS.md
-# 체인 전체(레포 루트부터 cwd 까지)를 머리부터 읽는 총 예산이다(deep-research,
-# 2026-09-25 — 문서에 값이 없어 임베디드 기본값 32768 을 실측 근사로 쓴다).
-# 정수 값만 인식한다 — 실측/문서 모두 정수 외의 꼴을 보인 적이 없다.
+# `project_doc_max_bytes = N` from `~/.codex/config.toml` (#33). The total
+# budget Codex uses to read the whole AGENTS.md chain (repo root down to cwd)
+# from the top (deep-research, 2026-09-25 — no value documented, so the
+# embedded default 32768 is used as a measured approximation). Only
+# recognizes integer values — neither measurement nor docs have ever shown
+# anything else.
 DEFAULT_PROJECT_DOC_MAX_BYTES = 32768
 _PROJECT_DOC_MAX_BYTES_KEY_RE = re.compile(
     r'(?m)^[ \t]*[\'"]?project_doc_max_bytes[\'"]?[ \t]*=[ \t]*(-?\d+)')
 
 
 def _first_table_header(text: str) -> int:
-    """첫 `[section]`/`[[section]]` 머리(`[` 자체)가 시작하는 위치, 없으면 -1.
+    """Position where the first `[section]`/`[[section]]` header (the `[`
+    itself) starts, -1 if none.
 
-    문자열·주석을 건너뛰며 값 배열의 괄호 깊이를 추적하는 스캐너
-    (`hookconf.toml_header_lines`, #32 에서 인라인 `[hooks]` 판정과 이걸
-    공유하도록 뽑아냈다)를 그대로 쓴다 — 첫 것만 필요하면 결과의 첫 원소."""
+    Reuses the scanner that skips strings/comments while tracking bracket
+    depth inside array values (`hookconf.toml_header_lines`, pulled out in
+    #32 to share with inline `[hooks]` detection) — only the first result is
+    needed here."""
     headers = hookconf.toml_header_lines(text)
     return headers[0][0] if headers else -1
 
 
-# TOML basic("...", 이스케이프 있음)과 literal('...', 이스케이프 없음) 문자열
-# 리터럴을 모두 인식한다.
+# Recognizes both TOML basic ("...", with escapes) and literal ('...', no escapes) string literals.
 _TOML_STRING_RE = re.compile(r'"(?P<d>(?:[^"\\]|\\.)*)"|\'(?P<s>[^\']*)\'')
 
-# exec_command/write_stdin 출력의 고정 헤더 줄. JSON 이 아니라 평문이다.
+# Fixed header lines of exec_command/write_stdin output. Plain text, not JSON.
 _EXIT_CODE_RE = re.compile(
     r"^(?:Process exited with code|Exit code:) (\d+)$", re.MULTILINE)
 _RUNNING_SID_RE = re.compile(
     r"^Process running with session ID (\S+)$", re.MULTILINE)
 _ABORTED_RE = re.compile(r"^aborted by user after ", re.MULTILINE)
 
-# 사람이 타이핑한 내용의 kind 접두. 실측된 값:
-#   ['user.text']                        ← 진짜 사람의 프롬프트
-#   ['environments.environment_context'] ← 환경 프롬프트 (role=user 인데 기계장치)
-#   ['host_skills.instructions', 'multi_agent.role_instructions', …] ← developer
+# kind prefixes for content a human typed. Measured values:
+#   ['user.text']                        <- a real human prompt
+#   ['environments.environment_context'] <- environment prompt (role=user but machinery)
+#   ['host_skills.instructions', 'multi_agent.role_instructions', ...] <- developer
 #
-# 접두 허용(deny-by-default 아님)이라 새로운 user.* kind 가 생겨도 사람의 말을
-# 잃지 않는다. 봉투 판정과 함께 2중으로 쓴다 — 메타데이터는 정확하지만
-# 하네스별이고, 봉투는 덜 정확하지만 모든 하네스에서 동작한다.
+# Prefix-allow (not deny-by-default), so a new user.* kind doesn't lose human
+# speech. Used together with envelope detection as a double check — metadata
+# is accurate but harness-specific, while envelope detection is less
+# accurate but works across every harness.
 _HUMAN_KIND_PREFIX = "user."
 
 
 def human_kinds(payload: dict):
-    """content_item_kinds. payload 최상위가 아니라 메타데이터 안에 중첩돼 있다."""
+    """content_item_kinds. Nested inside metadata, not at the payload's top level."""
     meta = payload.get("internal_chat_message_metadata_passthrough")
     if not isinstance(meta, dict):
         return None
@@ -150,7 +163,7 @@ def human_kinds(payload: dict):
 
 
 def session_meta(path: str) -> Optional[dict]:
-    """첫 줄만 읽는다. 나머지를 파싱하면 훅 경로에서 비용이 튄다."""
+    """Reads only the first line. Parsing the rest would spike cost on the hook path."""
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             first = fh.readline()
@@ -166,21 +179,24 @@ def session_meta(path: str) -> Optional[dict]:
     return payload if isinstance(payload, dict) else None
 
 
-# 프로그래매틱 앱서버 클라이언트의 originator. 전부 source="vscode" 로 오므로
-# source 값으로는 구분이 안 된다. 실측(이 머신, 2026-09-24): applecider 36개,
-# splitlane* 3개 — 전부 role=user 턴이 "User goal: … Current browser URL: …
-# Active project file: …" 형태의 기계 템플릿이다(사람이 타이핑한 문장이 아니다).
-# thread_source="user" 를 허용목록으로 쓰지 않는다: 실측상 진짜 대화형 39개 중
-# 38개가 이 필드를 갖지만 1개(Codex Desktop 0.146.0-alpha.3.1)는 없다. 문서화되지
-# 않은 필드라 언제든 사라질 수 있고, 허용목록이면 그때 진짜 세션을 조용히 잃는다.
-# 대신 새 프로그래매틱 originator 는 여기에 손으로 더해야 한다.
+# Originator of programmatic app-server clients. All come with
+# source="vscode", so source alone can't distinguish them. Measured (this
+# machine, 2026-09-24): 36 applecider, 3 splitlane* — every one of them has a
+# role=user turn that's a machine template shaped like "User goal: ...
+# Current browser URL: ... Active project file: ..." (not a sentence a human
+# typed). thread_source="user" isn't used as an allowlist: measured, 38 of 39
+# real interactive sessions have this field, but 1 (Codex Desktop
+# 0.146.0-alpha.3.1) doesn't. It's an undocumented field that could
+# disappear any time, and an allowlist would then silently lose real
+# sessions. Instead, new programmatic originators must be added here by hand.
 _PROGRAMMATIC_ORIGINATORS = frozenset({"applecider", "codex_exec"})
 _PROGRAMMATIC_ORIGINATOR_PREFIXES = ("splitlane",)
 
-# managed_block 의 captured 는 초 단위로 반올림된다(#36) — 같은 SessionStart
-# 안에서 병렬로 도는 mark 와 brief 가 같은 초나 그 인접 초에 각자 epoch 를
-# 재면, 이 margin 없이는 brief 가 이 세션 몫으로 방금 쓴 블록을 mark 가
-# "이미 읽힌 낡은 블록"으로 오인해 지울 수 있다(on_session_start_mark 참고).
+# managed_block's captured is rounded to whole seconds (#36) — if mark and
+# brief, running in parallel within the same SessionStart, each measure
+# their epoch in the same second or an adjacent one, without this margin
+# mark could mistake the block brief just wrote for this session as an
+# "already-consumed stale block" and delete it (see on_session_start_mark).
 _CONSUMED_BLOCK_MARGIN_SECONDS = 2.0
 
 
@@ -193,16 +209,17 @@ def _is_headless_originator(originator) -> bool:
 
 
 def _is_subagent(meta: dict) -> bool:
-    """서브에이전트 스레드인가. 차단목록이며 허용목록이 아니다 — 모르는
-    source 는 여전히 서브에이전트가 아닌 것으로 남는다.
+    """Is this a subagent thread? A blocklist, not an allowlist — an unknown
+    source still remains "not a subagent".
 
-    실측(이 머신, 2026-09-24): host rollout 194개 중 116개가 서브에이전트
-    스레드다. 부모 에이전트의 role=user 프롬프트가 content_item_kinds=
-    ['user.text'] 로 오기 때문에 사람 화이트리스트를 그대로 통과해 GOAL/NEXT 로
-    둔갑한다(invariant 3 위반). 실물 모양(codex-cli 0.155.1):
-    source={"subagent": {"thread_spawn": {...}}}, thread_source="subagent",
-    parent_thread_id=<uuid> — 셋 중 하나만 있어도 서브에이전트이고, 이건
-    OMHC_ALLOW_HEADLESS 로도 절대 풀리지 않는다(발화자가 다른 문제라서).
+    Measured (this machine, 2026-09-24): 116 of 194 host rollouts are
+    subagent threads. Since the parent agent's role=user prompt comes with
+    content_item_kinds=['user.text'], it passes straight through the human
+    whitelist and gets disguised as GOAL/NEXT (violates invariant 3). Real
+    shape (codex-cli 0.155.1): source={"subagent": {"thread_spawn": {...}}},
+    thread_source="subagent", parent_thread_id=<uuid> — any one of the three
+    alone is enough to be a subagent, and this is never unlocked by
+    OMHC_ALLOW_HEADLESS (it's a different-speaker problem).
     """
     source = meta.get("source")
     if isinstance(source, dict) and "subagent" in source:
@@ -215,16 +232,16 @@ def _is_subagent(meta: dict) -> bool:
 
 
 def _is_headless_meta(meta: dict) -> bool:
-    """`codex exec` 류 프로그래매틱 실행인가. `codex exec` 는
-    originator="codex_exec", source="exec" (샌드박스 rollout 5개 전부 실측).
-    applecider/splitlane* 은 vscode 확장 안에 얹힌 프로그래매틱 클라이언트다
-    (위 _PROGRAMMATIC_ORIGINATORS 주석)."""
+    """Is this `codex exec`-style programmatic execution? `codex exec` comes
+    with originator="codex_exec", source="exec" (measured on all 5 sandbox
+    rollouts). applecider/splitlane* are programmatic clients riding inside a
+    vscode extension (see the _PROGRAMMATIC_ORIGINATORS comment above)."""
     return meta.get("source") == "exec" or _is_headless_originator(meta.get("originator"))
 
 
 def _is_interactive(meta: dict) -> bool:
-    """서브에이전트·헤드리스 실행을 걸러낸다. 서브에이전트는 언제나 제외,
-    헤드리스는 OMHC_ALLOW_HEADLESS 가 켜졌을 때만 통과시킨다."""
+    """Filters out subagent/headless runs. Subagent is always excluded;
+    headless only passes when OMHC_ALLOW_HEADLESS is on."""
     if _is_subagent(meta):
         return False
     if _is_headless_meta(meta):
@@ -233,12 +250,13 @@ def _is_interactive(meta: dict) -> bool:
 
 
 def _recent_date_dirs(root: str, days: int, now) -> List[str]:
-    """최근 N일의 날짜 디렉터리. **UTC 와 로컬 날짜를 모두 넣는다.**
+    """Date directories for the last N days. **Includes both UTC and local dates.**
 
-    Codex 가 디렉터리를 어느 시간대로 이름 붙이는지 이 머신(TZ=UTC)에서는
-    구분할 수 없다. UTC 만 쓰면 KST(UTC+9) 같은 환경에서 매일 로컬 00:00~09:00
-    동안 오늘 디렉터리가 스캔 목록에 없어 핸드오프가 조용히 실패한다. 양쪽을
-    넣는 비용은 glob 몇 번이고, 중복은 dict 로 제거한다.
+    On this machine (TZ=UTC) there's no way to tell which timezone Codex
+    names its directories by. UTC-only would make today's directory missing
+    from the scan list every day between local 00:00-09:00 in an environment
+    like KST (UTC+9), silently failing the handoff. Including both costs a
+    few extra globs, and duplicates are removed with a dict.
     """
     seen = {}
     stamp = now()
@@ -261,8 +279,8 @@ def _text_of(blocks) -> str:
 
 
 def _patch_paths(text: str, workdir: str) -> Tuple[str, ...]:
-    """apply_patch 의 원본 패치 텍스트에서 *** …: 줄만 읽는다. 상대경로는
-    workdir 이 있으면 그걸 기준으로 절대화하고, 없으면 받은 그대로 둔다."""
+    """Reads only the *** ...: lines from apply_patch's raw patch text. A
+    relative path is made absolute relative to workdir if given, otherwise left as-is."""
     paths = []
     for m in _PATCH_PATH_RE.finditer(text):
         p = m.group(1).strip()
@@ -273,9 +291,9 @@ def _patch_paths(text: str, workdir: str) -> Tuple[str, ...]:
 
 
 def _arg_and_paths(payload: dict) -> Tuple[str, Tuple[str, ...]]:
-    """exec_command 는 arguments(JSON 문자열).cmd, apply_patch 는 최상위 input
-    (원본 패치 텍스트), spawn_agent 는 task_name/agent_type 을 읽는다.
-    message 는 절대 읽지 않는다 — 에이전트가 쓴 프롬프트 본문이다."""
+    """Reads exec_command's arguments (JSON string).cmd, apply_patch's
+    top-level input (raw patch text), spawn_agent's task_name/agent_type.
+    Never reads message — that's a prompt body the agent wrote."""
     name = payload.get("name")
 
     if name == "apply_patch":
@@ -303,7 +321,7 @@ def _arg_and_paths(payload: dict) -> Tuple[str, Tuple[str, ...]]:
         arg = parsed.get("task_name") or parsed.get("agent_type") or ""
         return guard.redact_b64(str(arg))[:ARG_LIMIT], ()
 
-    # exec_command: cmd 는 str, 실측 381/381.
+    # exec_command: cmd is str, measured 381/381.
     cmd = parsed.get("cmd")
     arg = cmd if isinstance(cmd, str) else ""
     return guard.redact_b64(arg)[:ARG_LIMIT], ()
@@ -322,14 +340,14 @@ def _uri_path(value) -> str:
 
 
 def _item_fact(item: dict):
-    """item_completed 의 item 하나 → (verb, ok, arg, paths). 모르는 타입이면 None."""
+    """One item from item_completed → (verb, ok, arg, paths). None if unknown type."""
     kind = item.get("type")
     ok = item.get("status") == "completed"
     if kind == "CommandExecution":
         command = item.get("command")
         if isinstance(command, list):
             parts = [str(c) for c in command]
-            # ["/bin/bash", "-lc", "ls omhc"] — 셸 래퍼를 벗긴다.
+            # ["/bin/bash", "-lc", "ls omhc"] — strip the shell wrapper.
             arg = parts[2] if len(parts) == 3 and parts[1] in _SHELL_FLAGS else " ".join(parts)
         else:
             arg = str(command or "")
@@ -344,23 +362,28 @@ def _item_fact(item: dict):
         code = item.get("exit_code")
         ok = ok and (code is None or code == 0)
         if not ok and code == 1 and kinds and kinds <= _INSPECT_KINDS:
-            # 실측(era B, CommandExecution 2,708개 중 비0 종료 331개): grep/rg 류는
-            # 매치 없음을 exit 1 로 표현한다. parsed_cmd 가 전부 읽기이고 출력도
-            # 비었으면 그 관용구로 본다 — 이 규칙이 잡는 것은 3건이고 실제 실패는
-            # 하나도 가리지 않는다.
-            # 더 넓히지 않는 이유(#11):
-            # - parsed_cmd 는 전부 아니면 전무다. 복합 명령에 모르는 부분(pwd,
-            #   echo, 2>/dev/null 리다이렉트 …)이 하나라도 있으면 명령 전체가
-            #   unknown 한 칸이 된다(unknown 이 다른 항목과 섞인 경우 0건). 그러니
-            #   `pwd; rg …` 에 닿으려면 원문 셸 문자열을 쪼개야 하고, 그건 era A
-            #   처럼 명령어 이름으로 짐작하는 일이다.
-            # - unknown 에서는 빈 출력이 무해의 신호가 아니다: 출력을 파일로 돌린
-            #   빌드·타입 검사 실패도 비어 보인다.
-            # - 읽기 항목끼리여도 출력이 있으면 실패로 둔다: 없는 경로의 sed/cat/ls
-            #   는 "No such file" 을 stdout 에 남긴다(stderr 는 늘 비어 있다 — pty
-            #   로 stdout 에 합쳐진다). && 는 짧게 끊기므로 마지막 항목이 search
-            #   라고 그 search 가 종료 코드를 낸 것도 아니다.
-            # 위험: 검증용 `grep -q`/`rg -q` 는 실측상 unknown 이라 여기 안 걸린다.
+            # Measured (era B, 331 of 2,708 CommandExecution with non-zero
+            # exit): grep/rg-style tools express "no match" as exit 1. If
+            # parsed_cmd is entirely read kinds and output is empty, treat it
+            # as that idiom — this rule catches 3 cases and never masks a
+            # real failure.
+            # Why this isn't broadened further (#11):
+            # - parsed_cmd is all-or-nothing. If a compound command has even
+            #   one unrecognized part (pwd, echo, 2>/dev/null redirect, ...),
+            #   the whole command becomes a single unknown slot (never mixed
+            #   with other items when unknown). So reaching `pwd; rg ...`
+            #   would require splitting the raw shell string, which is
+            #   guessing at command names the way era A did.
+            # - For unknown, empty output isn't a signal of harmlessness:
+            #   a build/type-check failure that redirected output to a file
+            #   also looks empty.
+            # - Even among read-only items, keep it a failure if there's
+            #   output: sed/cat/ls on a missing path leave "No such file" on
+            #   stdout (stderr is always empty — merged into stdout via
+            #   pty). && short-circuits, so the last item being "search"
+            #   doesn't mean that search produced the exit code either.
+            # Risk: verification commands like `grep -q`/`rg -q` measure as
+            # unknown, so they never hit this branch.
             output = "{}{}".format(item.get("stdout") or "", item.get("stderr") or "")
             if not output.strip():
                 ok = True
@@ -373,8 +396,9 @@ def _item_fact(item: dict):
 
 
 class _ExecOutcome:
-    """_parse_exec_outcome 의 결과. ok=None 은 '이 출력에서 알 수 없다'다 —
-    오늘처럼 이벤트는 ok=True 로 남는다(출력이 아예 없는 abort 도 마찬가지)."""
+    """Result of _parse_exec_outcome. ok=None means "can't tell from this
+    output" — the event stays ok=True as before (same for an abort with no
+    output at all)."""
 
     __slots__ = ("ok", "session_id")
 
@@ -384,18 +408,21 @@ class _ExecOutcome:
 
 
 def _parse_exec_outcome(output) -> _ExecOutcome:
-    """exec_command/write_stdin 의 평문 출력을 읽는다. JSON 이 아니다.
+    """Reads the plain-text output of exec_command/write_stdin. Not JSON.
 
-    "Process exited with code N" / "Exit code: N" → 그 코드. "Process running
-    with session ID N" → 아직 안 끝났다, session_id 만 기록해 write_stdin 쪽
-    호출과 잇는다. "aborted by user after …" → 실패. 셋 다 없으면(포맷을 모름,
-    또는 abort 인데 이 문구가 아닌 경우) ok=None 으로 오늘처럼 True 를 유지한다.
+    "Process exited with code N" / "Exit code: N" → that code. "Process
+    running with session ID N" → not finished yet, records only session_id
+    to link with the write_stdin call. "aborted by user after ..." →
+    failure. If none of the three match (unrecognized format, or an abort
+    without this phrase), ok=None keeps True as before.
     """
     if not isinstance(output, str):
         return _ExecOutcome()
-    # 헤더만 본다. "Output:" 뒤 본문은 프로그램이 찍은 것이라, 백그라운드 빌드가
-    # "Exit code: 0" 같은 줄을 찍으면 "running" 헤더를 이기고 write_stdin 쪽 실패를
-    # 잃는다. apply_patch 의 "Exit code: N\n…\nOutput:" 도 같은 자리에서 갈린다.
+    # Only look at the header. The body after "Output:" is whatever the
+    # program printed, and if a background build prints a line like "Exit
+    # code: 0", it would beat the "running" header and lose write_stdin's
+    # own failure. apply_patch's "Exit code: N\n...\nOutput:" splits at the
+    # same spot.
     output = output.partition("\nOutput:")[0]
     m = _EXIT_CODE_RE.search(output)
     if m:
@@ -412,10 +439,11 @@ def _parse_exec_outcome(output) -> _ExecOutcome:
 class CodexCliAdapter:
     adapter_id = "codex-cli"
     capabilities = frozenset({Capability.READ, Capability.WRITE})
-    # 실측(codex-cli 0.155.1, --dangerously-bypass-hook-trust): 최상위
-    # {"additionalContext": …} 는 "hook: SessionStart Failed" 로 거부되고
-    # 아무것도 주입되지 않는다. hookSpecificOutput 중첩 형식은 rollout 에
-    # content_item_kinds=["hooks.additional_context"] 로 실제로 나타난다.
+    # Measured (codex-cli 0.155.1, --dangerously-bypass-hook-trust): a
+    # top-level {"additionalContext": ...} is rejected as "hook: SessionStart
+    # Failed" and nothing gets injected. The nested hookSpecificOutput form
+    # actually shows up in the rollout as
+    # content_item_kinds=["hooks.additional_context"].
     wire = "claude"
 
     def __init__(self, *, home: Optional[str] = None, now=time.time) -> None:
@@ -429,7 +457,7 @@ class CodexCliAdapter:
     def sessions_root(self) -> str:
         return os.path.join(self.home, ".codex", "sessions")
 
-    # --- 5개 메서드 --------------------------------------------------------
+    # --- the 5 methods --------------------------------------------------------
 
     def detect(self) -> HarnessPresence:
         root = self.sessions_root()
@@ -439,13 +467,15 @@ class CodexCliAdapter:
 
     def _scan(self, repo_root: Optional[str], include_headless: bool, *,
               deadline: Optional[float] = None, newest_first: bool = False):
-        """list_sessions/discover/health 가 공유하는 날짜 디렉터리 walk.
-        서브에이전트는 언제나 뺀다; 헤드리스는 `include_headless` 로 직접
-        켠다 — list_sessions/discover 는 `allow_headless()`(env)를 그대로
-        넘기고, health() 의 "헤드리스만 있었나" 판별은 env 와 무관하게 True 를
-        넘긴다. (path, meta) 를 yield 한다 — SessionRef 조립은 호출자 몫이다
-        (list_sessions 는 파일 mtime, discover 는 session_meta.timestamp 를
-        쓴다 — 서로 다른 epoch 정의라 여기서 합치면 invariant 6 을 흐린다).
+        """The date-directory walk shared by list_sessions/discover/health.
+        Subagent is always excluded; headless is toggled directly via
+        `include_headless` — list_sessions/discover pass through
+        `allow_headless()` (env) as-is, while health()'s "were there only
+        headless sessions" check passes True regardless of env. Yields
+        (path, meta) — assembling the SessionRef is the caller's job
+        (list_sessions uses file mtime, discover uses session_meta.timestamp
+        — different epoch definitions, so merging them here would blur
+        invariant 6).
         """
         if repo_root is None:
             return
@@ -453,9 +483,10 @@ class CodexCliAdapter:
         for directory in _recent_date_dirs(self.sessions_root(), SCAN_DAYS, self._now):
             if deadline is not None and time.time() > deadline:
                 break
-            # glob 은 파일시스템 순서라 정렬되지 않는다. 파일명이
-            # rollout-YYYY-MM-DDTHH-MM-SS- 로 시작하므로 역순 정렬이 곧 최신순이고,
-            # deadline 에 잘려도 가장 최근 세션부터 읽힌다(discover 전용).
+            # glob isn't sorted — it's filesystem order. Filenames start
+            # with rollout-YYYY-MM-DDTHH-MM-SS-, so reverse sort is newest
+            # first, and even if cut off by deadline, the most recent
+            # sessions get read first (discover only).
             paths = glob.glob(os.path.join(directory, "rollout-*.jsonl"))
             if newest_first:
                 paths = sorted(paths, reverse=True)
@@ -468,8 +499,9 @@ class CodexCliAdapter:
                 if _is_headless_meta(meta) and not include_headless:
                     continue
                 cwd = meta.get("cwd")
-                # Codex 는 rollout 에 레포 루트를 기록한다. equal-or-descendant 로
-                # 판정해야 서브디렉터리에서 시작한 세션도 잡힌다.
+                # Codex records the repo root in the rollout. Must judge
+                # equal-or-descendant so a session started from a
+                # subdirectory is caught too.
                 if not isinstance(cwd, str) or not locate.is_within(root, cwd):
                     continue
                 yield path, meta
@@ -496,19 +528,23 @@ class CodexCliAdapter:
 
     def discover(self, repo_root: Optional[str],
                 deadline: Optional[float] = None) -> List[SessionRef]:
-        """`omhc mark` 의 원장 백필 전용. list_sessions 와 대상은 같지만(같은
-        디렉터리, 같은 대화형 판정), **epoch 이 다르다** — 여기서는 파일
-        mtime 이 아니라 session_meta.timestamp(세션이 실제로 시작한 시각)를
-        쓴다. cmd_mark 가 이 값을 원장의 최신 시작 epoch 와 비교해 백필 순서를
-        지키므로(invariant 6), mtime 을 섞으면 재개(resume)로 mtime 만 갱신된
-        옛 세션이 최신으로 오인될 수 있다.
+        """Only used by `omhc mark`'s ledger backfill. Targets the same
+        sessions as list_sessions (same directories, same interactive
+        check), but **the epoch differs** — here it uses
+        session_meta.timestamp (when the session actually started), not file
+        mtime. Because cmd_mark compares this value against the ledger's
+        latest start epoch to keep backfill order correct (invariant 6),
+        mixing in mtime could make an old session, whose mtime was only
+        bumped by a resume, look like the newest.
 
-        타임스탬프를 못 읽으면(모르는 모양) 조용히 건너뛴다 — 순서를 보장할
-        수 없는 행을 원장에 넣는 것보다 놓치는 편이 낫다.
+        If the timestamp can't be read (unrecognized shape), silently skip
+        it — better to miss a row than put one into the ledger whose order
+        can't be guaranteed.
 
-        `deadline` 을 넘기면(호출자의 시간 예산) 스캔 도중이라도 지금까지
-        모은 것만 돌려주고 멈춘다 — 날짜 디렉터리가 14일치라 파일이 많을 때
-        cmd_mark 의 훅 예산을 이 호출 하나가 다 쓸 수 있어서다.
+        If `deadline` (the caller's time budget) is exceeded, stop mid-scan
+        and return only what's been gathered so far — with 14 days of date
+        directories, a large number of files could let this one call eat
+        cmd_mark's entire hook budget.
         """
         refs: List[SessionRef] = []
         for path, meta in self._scan(repo_root, allow_headless(), deadline=deadline,
@@ -520,15 +556,18 @@ class CodexCliAdapter:
                 raw_size = os.path.getsize(path)
             except OSError:
                 continue
-            # 줄 경계로 스냅한다(리뷰) — 이 값이 그대로
-            # `_reactivate_grown_sessions` 의 첫 baseline 이 되므로, stat 이
-            # 레코드 중간을 잡으면 그 레코드가 마저 쓰인 뒤 영영 못 읽는다.
-            # 첫 관측이라 이전 baseline 이 없으므로 fallback 을 주지 않는다 —
-            # 64KB 안에 개행을 못 찾으면(64KB 넘는 단일 레코드를 쓰는 중)
-            # size 를 그대로 쓴다. 0 으로 과소평가하면 다음 판정이 파일
-            # 처음부터 읽어 **원래의** 사람 턴을 새 턴으로 착각하고 옛 내용을
-            # 다시 넘긴다(리뷰에서 재현). 과대평가는 그 긴 레코드 하나를
-            # 놓칠 수 있을 뿐이고, 그게 사람 턴일 때만 손해다 — 알려진 한계.
+            # Snap to a line boundary (review) — this value directly becomes
+            # `_reactivate_grown_sessions`'s first baseline, so if stat lands
+            # mid-record, that record becomes permanently unreadable once it
+            # finishes being written. This is the first observation, so
+            # there's no prior baseline to fall back to — if no newline is
+            # found within 64KB (a single record over 64KB is being
+            # written), just use the raw size. Underestimating to 0 would
+            # make the next check read from the start of the file, mistake
+            # the **original** human turn for a new one, and hand back old
+            # content again (reproduced in review). Overestimating can only
+            # miss that one long record, and that only costs something if it
+            # was a human turn — a known limitation.
             size = fsio.line_aligned_size(path, raw_size)
             refs.append(
                 SessionRef(
@@ -550,17 +589,20 @@ class CodexCliAdapter:
     def read_session_since(self, ref: SessionRef, offset: int, *,
                            max_bytes: Optional[int] = None,
                            stop_at_human_turn: bool = False) -> Optional[SessionSince]:
-        """`offset` 바이트 뒤만 읽는다 — 실측(이 머신, 13.8MB rollout):
-        전체 read_session 593ms, 이 경로가 훅 예산(150ms)에서 유일하게 쓸 수
-        있다. `_read` 가 줄 경계로 스냅하므로 `offset` 은 레코드 경계일 필요가
-        없다(#22, `codex exec resume` 이 이어붙인 파일).
+        """Only reads past byte `offset` — measured (this machine, 13.8MB
+        rollout): full read_session takes 593ms, so this path is the only
+        thing that fits the hook budget (150ms). Since `_read` snaps to a
+        line boundary, `offset` doesn't need to be a record boundary (#22,
+        the file `codex exec resume` appends to).
 
-        `max_bytes`(리뷰: 늘어난 꼬리 크기에 비례해 비용이 늘어 훅 예산을
-        넘길 수 있다 — 17.7MB 꼬리 실측 396.6ms)와 `stop_at_human_turn`(사람의
-        새 턴이 있는지만 알면 되는 호출자는 첫 매치에서 멈춰 나머지를 안
-        읽는다)은 `cli._reactivate_grown_sessions` 전용 선택 인자다 — 기본값은
-        오늘의(무제한) 동작과 같아 conformance 의 "offset 이후 read_session 과
-        같은 이벤트" 계약을 그대로 지킨다."""
+        `max_bytes` (review: cost scales with the tail's growing size and
+        can blow the hook budget — measured 396.6ms for a 17.7MB tail) and
+        `stop_at_human_turn` (a caller that only needs to know whether a
+        human turn exists stops at the first match instead of reading the
+        rest) are optional arguments used only by
+        `cli._reactivate_grown_sessions` — the defaults match today's
+        (unlimited) behavior, so the conformance contract "same events as
+        read_session past offset" still holds."""
         try:
             start = max(0, int(offset))
         except (TypeError, ValueError):
@@ -568,43 +610,48 @@ class CodexCliAdapter:
         events, unparsed, dropped, end_offset = self._read(
             ref.source_path, start, max_bytes=max_bytes,
             stop_at_human_turn=stop_at_human_turn)
-        # _read 가 이미 줄 경계로 스냅해 start 이후의 레코드만 만들지만, 필터를
-        # 한 번 더 걸어 둔다 — 계약(read_session 을 offset>=start 로 제한한 것과
-        # 같아야 한다)을 코드로도 증명한다.
+        # _read already snaps to a line boundary and only produces records
+        # after start, but filter once more anyway — proves the contract in
+        # code too (must equal read_session restricted to offset>=start).
         events = tuple(e for e in events if e.offset >= start)
         return SessionSince(events=events, unparsed=unparsed, dropped=dropped,
                             end_offset=end_offset)
 
     def _read(self, path: str, start: int, *, max_bytes: Optional[int] = None,
              stop_at_human_turn: bool = False):
-        """read_session/read_session_since 가 공유하는 파서(화이트리스트·guard
-        로직을 두 벌로 두지 않는다, invariant 4). `start` 뒤부터 읽는다 —
-        0 이면 처음부터. `start` 가 레코드 중간이면(직전 바이트가 개행이
-        아니면) 그 줄의 나머지를 건너뛰고 다음 개행부터 시작한다. 절대
-        던지지 않는다 — 파일이 없거나 깨졌으면 빈 이벤트로 열화한다.
+        """The parser shared by read_session/read_session_since (never
+        duplicate the whitelist/guard logic, invariant 4). Reads from
+        `start` onward — 0 means from the top. If `start` lands mid-record
+        (the previous byte isn't a newline), skips the rest of that line and
+        starts at the next newline. Never raises — degrades to empty events
+        if the file is missing or corrupt.
 
-        반환값 네 번째 자리는 `end_offset` — **마지막으로 완전히 읽은 줄
-        바로 뒤**의 바이트 오프셋이다(리뷰: os.stat 의 크기를 그대로 baseline
-        으로 쓰면 그 크기가 레코드 중간일 수 있어, 나중에 그 레코드가 마저
-        쓰인 뒤 거기서부터 읽으면 skip-to-newline 로직이 그 레코드 전체를
-        건너뛴다 — 호출자는 이 값을 다음 baseline 으로 써야 한다). 개행으로
-        끝나지 않는 **마지막** 줄(`for raw in fh` 가 EOF 에서 미완성 레코드를
-        그대로 넘길 수 있다 — 마침 그 순간 stat 해 읽은 경우)은 여전히
-        파싱은 하지만(read_session 의 events/unparsed 출력은 그대로 유지한다)
-        `end_offset` 에는 포함하지 않는다 — 그 레코드가 마저 쓰인 뒤에도
-        다음 읽기가 그 줄 전체를 다시 볼 수 있어야 한다.
-        `max_bytes` 를 넘기면 그 캡을 넘는 줄은 아예 읽지 않고 멈춘다(캡
-        직전의 완전한 줄에서 자연히 정렬된다). `stop_at_human_turn` 이면
-        사람의 said 이벤트를 만든 즉시 멈춘다.
+        The fourth return slot is `end_offset` — the byte offset right after
+        the **last fully read line** (review: taking os.stat's size directly
+        as the baseline risks it landing mid-record, and once that record
+        finishes being written, reading from there makes the skip-to-newline
+        logic skip that entire record — the caller must use this value as
+        the next baseline instead). A **final** line with no trailing
+        newline (`for raw in fh` can hand over an incomplete record right at
+        EOF — if it happened to be stat'd/read at that exact moment) is
+        still parsed (read_session's events/unparsed output stays the same),
+        but is not included in `end_offset` — once that record finishes
+        being written, the next read must still be able to see the whole
+        line again.
+        If `max_bytes` is exceeded, lines past that cap aren't read at all
+        and reading stops (naturally aligned at the last complete line
+        before the cap). If `stop_at_human_turn`, stops as soon as a human
+        said event is produced.
         """
         events: List[Event] = []
         dropped: Dict[str, int] = {}
         unparsed = 0
-        pending: Dict[str, int] = {}  # call_id -> events 인덱스
-        # write_stdin 의 args.session_id 로만 찾을 수 있다 — write_stdin 자신의
-        # call_id 는 별개다. "Process running with session ID N" 을 만난 원래
-        # exec_command 이벤트를 여기 걸어 두고, 나중에 write_stdin 이 오면
-        # 그 call_id 를 pending 에도 같은 인덱스로 얹는다(아래 참고).
+        pending: Dict[str, int] = {}  # call_id -> index into events
+        # Can only be found via write_stdin's args.session_id — write_stdin's
+        # own call_id is separate. Hang the original exec_command event that
+        # hit "Process running with session ID N" here, and when write_stdin
+        # comes later, also add its call_id to pending pointing at the same
+        # index (see below).
         pending_by_session: Dict[str, int] = {}
         seq = 0
         offset = start
@@ -623,7 +670,7 @@ class CodexCliAdapter:
                     fh.seek(start - 1)
                     prev = fh.read(1)
                     if prev != b"\n":
-                        # start 가 레코드 중간이다 — 그 줄의 나머지를 버린다.
+                        # start lands mid-record — discard the rest of that line.
                         skipped = fh.readline()
                         offset = start + len(skipped)
                 except OSError:
@@ -632,14 +679,15 @@ class CodexCliAdapter:
             end_offset = offset
             for raw in fh:
                 if max_bytes is not None and (offset - since_start) >= max_bytes:
-                    # 캡을 넘는 줄은 아예 안 읽는다 — offset 은 그 직전 완전한
-                    # 줄 끝에 멈춰 있으므로 end_offset 이 저절로 줄 경계다.
+                    # Lines past the cap aren't read at all — offset is
+                    # already parked at the end of the last complete line
+                    # before it, so end_offset is naturally on a line boundary.
                     bump("max_bytes_cap")
                     break
                 start = offset
                 offset += len(raw)
                 if raw.endswith(b"\n"):
-                    # 개행으로 끝난 줄만 "안전하게 다 읽었다" — 위 docstring.
+                    # Only a line ending in a newline was "safely fully read" — see docstring above.
                     end_offset = offset
                 try:
                     row = json.loads(raw.decode("utf-8", "replace"))
@@ -669,17 +717,18 @@ class CodexCliAdapter:
                         continue
                     fact = _item_fact(item)
                     if fact is None:
-                        # UserMessage/AgentMessage 는 response_item 의 사본이다.
+                        # UserMessage/AgentMessage are copies of the response_item.
                         bump("item:" + str(item.get("type")))
                         continue
                     verb, ok, arg, paths = fact
                     item_id = item.get("id")
                     idx = pending.get(item_id) if isinstance(item_id, str) else None
                     if idx is not None:
-                        # era A: apply_patch 의 call_id 와 이 FileChange 의 id 가
-                        # 같다 — 절대경로 사실은 여기에만 있으므로 원래 이벤트를
-                        # 갱신한다(둘 다 세면 이중 계상). seq/offset/length 는
-                        # 첫 레코드 것을 유지한다(invariant 6).
+                        # era A: apply_patch's call_id equals this FileChange's
+                        # id — only here do we have the absolute-path fact, so
+                        # update the original event (counting both would be
+                        # double counting). Keep seq/offset/length from the
+                        # first record (invariant 6).
                         events[idx] = events[idx]._replace(verb=verb, ok=ok, arg=arg,
                                                             paths=paths)
                         continue
@@ -702,7 +751,7 @@ class CodexCliAdapter:
                         if kinds is not None and not any(
                             k.startswith(_HUMAN_KIND_PREFIX) for k in kinds
                         ):
-                            # role=user 로 위장한 기계장치. 실측:
+                            # Machinery disguised as role=user. Measured:
                             # ['environments.environment_context']
                             bump("kind:" + kinds[0])
                             continue
@@ -710,13 +759,15 @@ class CodexCliAdapter:
                         bump("guarded_" + author)
                         continue
                     if stop_at_human_turn and author == "human" and not raw.endswith(b"\n"):
-                        # 리뷰(3차) #2: 사람 턴인데 아직 개행이 안 붙었다(쓰는
-                        # 도중 stat 했을 수 있다) — 이 레코드를 트리거로 세지
-                        # 않는다(이벤트조차 만들지 않는다). 세면 개행이 마저
-                        # 붙은 뒤 다음 라운드가 baseline 을 이 레코드 앞에 둔
-                        # 채로 같은 턴을 또 찾아 재전달을 두 번 하게 된다 —
-                        # `stop_at_human_turn` 이 아닌 호출(read_session 포함)
-                        # 은 이 분기를 타지 않으므로 출력이 그대로다.
+                        # 3rd review #2: it's a human turn but no newline has
+                        # been appended yet (may have been stat'd mid-write)
+                        # — don't count this record as a trigger (don't even
+                        # produce an event for it). Counting it would let the
+                        # next round, once the newline is finally appended,
+                        # keep the baseline in front of this record, find the
+                        # same turn again, and deliver it twice — calls other
+                        # than `stop_at_human_turn` (including read_session)
+                        # don't take this branch, so their output is unchanged.
                         continue
                     seq += 1
                     events.append(Event(
@@ -724,9 +775,10 @@ class CodexCliAdapter:
                         text=text, arg="", paths=(), offset=start, length=len(raw),
                     ))
                     if stop_at_human_turn and author == "human":
-                        # 호출자는 "사람의 새 턴이 있는가"만 물었다 — 찾은
-                        # 즉시 멈춘다 — end_offset 은 이미 이 줄이 개행으로
-                        # 끝났으면 그 뒤로 넘어가 있다(위에서 갱신).
+                        # The caller only asked "is there a new human turn" —
+                        # stop as soon as it's found — end_offset already
+                        # moved past this line if it ended in a newline
+                        # (updated above).
                         return events, unparsed, dropped, end_offset
                     continue
 
@@ -739,10 +791,11 @@ class CodexCliAdapter:
                     call_id = payload.get("call_id")
 
                     if name == "write_stdin":
-                        # 백그라운드로 돌던 exec_command 로 입력을 보낸다 — 그
-                        # 자신은 부기이지만, 이 call_id 의 출력(아래)이 원래
-                        # exec_command 이벤트의 최종 결과다. session_id 로 그
-                        # 이벤트를 찾아 같은 인덱스를 이 call_id 에도 건다.
+                        # Sends input to an exec_command that was running in
+                        # the background — this itself is bookkeeping, but
+                        # this call_id's output (below) is the original
+                        # exec_command event's final result. Find that event
+                        # by session_id and hang this call_id on the same index.
                         sid = None
                         args_raw = payload.get("arguments")
                         args_parsed = None
@@ -800,26 +853,29 @@ class CodexCliAdapter:
 
                 if kind in ("web_search_call", "tool_search_call", "tool_search_output",
                             "agent_message"):
-                    # agent_message 는 에이전트 간 메시지다(실측 170건) — human
-                    # 도 said 도 아니다(invariant 3). web_search_call/
-                    # tool_search_* 는 실측되지 않은 부기 후보라 unparsed 대신
-                    # dropped 로 계상한다.
+                    # agent_message is an inter-agent message (170 measured
+                    # instances) — neither human nor said (invariant 3).
+                    # web_search_call/tool_search_* are unmeasured
+                    # bookkeeping candidates, so tallied as dropped instead
+                    # of unparsed.
                     bump(kind)
                     continue
 
-                # response_item 인데 모양을 모른다 → 조용히 버리지 않는다.
+                # response_item with an unrecognized shape -> never dropped silently.
                 unparsed += 1
 
         return events, unparsed, dropped, end_offset
 
     def classify(self, source_path: str) -> bool:
-        """Codex rollout 에 사람이 시작한 세션인가.
+        """Was this a Codex rollout started by a human?
 
-        False 는 서브에이전트·헤드리스 exec 라고 **확실할 때만** 낸다
-        (`_is_interactive`). session_meta 를 못 읽으면(빈 파일, 모르는 첫 줄)
-        판단할 수 없으므로 True 다 — brief 는 False 인 행만 건너뛰므로, 여기서
-        False 를 내면 포맷이 바뀐 날부터 새 rollout 이 전부 건너뛰어지고 그 전의
-        낡은 세션이 나간다(#21). 여는 판정은 ref_for_path 가 따로 한다.
+        Only returns False when it's **certain** to be a subagent/headless
+        exec (`_is_interactive`). If session_meta can't be read (empty file,
+        unrecognized first line), it can't be judged, so True — brief only
+        skips rows classified False, so returning False here would make
+        every new rollout since a format change get skipped, sending out the
+        stale session before it instead (#21). The eligibility check for
+        opening is handled separately by ref_for_path.
         """
         meta = session_meta(source_path)
         return meta is None or _is_interactive(meta)
@@ -861,22 +917,25 @@ class CodexCliAdapter:
             config_path=self.hooks_path(),
             fragment_name="codex-hooks.json",
             post_write_note=(
-                "codex-cli 0.155.1 실측: 손으로 놓인 hooks.json 은 기본적으로 신뢰되지 "
-                "않는다 — Codex 자체의 훅 신뢰 절차로 한 번 승인해야 실제로 돈다."
+                "Measured (codex-cli 0.155.1): a hand-placed hooks.json is untrusted "
+                "by default — it only actually runs after you approve it once through "
+                "Codex's own hook-trust procedure."
             ),
         )
 
     def _project_trust_level(self, repo_root: str) -> Optional[str]:
-        """`~/.codex/config.toml` 의 `[projects."<repo_root>"]` 아래
-        `trust_level` 값 (#32). 전체 TOML 을 파싱하지 않는다 — 공유 스캐너
-        (`hookconf.toml_header_lines`, 문자열·주석 인식)로 최상위 헤더를 모두
-        찾은 뒤, 이 레포 경로와 정확히 같은 헤더 하나를 골라 그 본문(다음
-        헤더 전까지)에서 `trust_level` 키만 정규식으로 읽는다 — 리뷰: 예전
-        엔 본문 끝을 `^[ \\t]*\\[` 로 다시 찾았는데, 이건 #31 이 이미 걸러낸
-        "여러 줄 배열 값 안의 `[` 도 줄 맨 앞에 올 수 있다" 문제를 그대로
-        반복한다. 못 찾으면(파일 없음, 이 레포의 헤더가 아예 없음, 못 읽음)
-        None — "신뢰 여부를 모른다" 이지 "신뢰 안 됨" 이 아니다(호출자가
-        project 레이어를 아예 무시하는 근거가 된다).
+        """The `trust_level` value under `[projects."<repo_root>"]` in
+        `~/.codex/config.toml` (#32). Doesn't parse the whole TOML file —
+        finds every top-level header with the shared scanner
+        (`hookconf.toml_header_lines`, which recognizes strings/comments),
+        picks the one header exactly matching this repo path, and reads only
+        the `trust_level` key from its body (up to the next header) with a
+        regex — review: this used to re-find the end of the body with
+        `^[ \\t]*\\[`, which repeats exactly the problem #31 already fixed
+        ("a `[` inside a multi-line array value can also sit at the start of
+        a line"). If not found (file missing, no header for this repo at
+        all, unreadable), returns None — "trust unknown", not "untrusted"
+        (the caller treats this as grounds to ignore the project layer entirely).
         """
         real = os.path.realpath(repo_root)
         try:
@@ -902,13 +961,14 @@ class CodexCliAdapter:
         return None
 
     def _hook_layers(self, repo_root: Optional[str]):
-        """omhc brief 를 실제로 부를 수 있는 네 위치 각각의 (path, 거기에
-        세션 시작 시점에 도는 omhc 호출이 있는가) — 공식 문서(config-advanced,
-        "Hooks" 절, #32): `~/.codex/hooks.json`, `~/.codex/config.toml` 의
-        인라인 `[hooks]`, `<repo>/.codex/hooks.json`, `<repo>/.codex/config.toml`
-        (project 쪽은 그 `.codex/` 레이어가 trusted 일 때만). `hook_is_installed`
-        와 `_install_source`(#32 리뷰 2 — mtime 판정이 hooks.json 하나만
-        보던 결함) 가 이 목록 하나를 공유한다."""
+        """(path, does it have an omhc call that runs at session start) for
+        each of the four places omhc brief can actually be called from —
+        per official docs (config-advanced, "Hooks" section, #32):
+        `~/.codex/hooks.json`, the inline `[hooks]` in `~/.codex/config.toml`,
+        `<repo>/.codex/hooks.json`, `<repo>/.codex/config.toml` (project side
+        only when that `.codex/` layer is trusted). `hook_is_installed` and
+        `_install_source` (#32 review 2 — the mtime check used to only look
+        at hooks.json) share this one list."""
         flags = {"--harness": self.adapter_id}
         layers = [
             (self.hooks_path(), hookconf.has_runnable_call(
@@ -926,14 +986,15 @@ class CodexCliAdapter:
         return layers
 
     def hook_is_installed(self, repo_root: Optional[str] = None) -> bool:
-        """omhc 를 부르는 SessionStart 훅이 설치돼 있는가.
+        """Is a SessionStart hook that calls omhc installed?
 
-        pull 채널(state 산출물)은 훅이 그것을 읽어갈 때만 전달이 성립한다.
-        훅이 없으면 산출물을 써도 아무도 보지 않으므로 전달이 아니다 — 그것을
-        성공으로 보고하면 Path B 가 영원히 발동하지 않는다. `repo_root` 가
-        주어지고 그 레포가 trusted 로 확인될 때만 project 레이어까지 본다 —
-        신뢰를 확인 못 하면 project 레이어는 보지 않는다(과다 신뢰보다
-        무시가 안전하다).
+        A pull channel (state artifact) only counts as delivered if a hook
+        actually reads it. Without a hook, writing the artifact is seen by
+        no one, so it isn't delivery — reporting that as success would mean
+        Path B never fires. Only looks at the project layer when
+        `repo_root` is given and that repo is confirmed trusted — if trust
+        can't be confirmed, the project layer isn't looked at (ignoring is
+        safer than over-trusting).
         """
         try:
             return any(present for _path, present in self._hook_layers(repo_root))
@@ -941,24 +1002,26 @@ class CodexCliAdapter:
             return False
 
     def _install_source(self, repo_root: Optional[str]):
-        """훅이 실제로 설치된 파일들(`_hook_layers` 가 present=True 로 표시한
-        것들) 중 mtime 이 가장 최근인 (epoch, path) — `_hook_health` 가
-        "이 시각 이후 세션이 돌았는가" 를 재는 기준점이다(#32 리뷰 1).
+        """The (epoch, path) with the most recent mtime among the files
+        where the hook is actually installed (those `_hook_layers` marked
+        present=True) — this is the reference point `_hook_health` uses to
+        measure "has a session run since this time" (#32 review 1).
 
-        예전엔 이 기준점을 언제나 `hooks_path()` 의 mtime으로 삼았다 —
-        인라인 전용 설치(hooks.json 자체가 없는 경우)에서는 그 stat 이
-        ENOENT 로 죽어 `_hook_health` 가 매번 `----(unknown)` 으로만
-        남고, 정작 신뢰 안 된 인라인 훅이 조용히 스킵되는 걸 잡아야 할
-        행이 그 역할을 못 했다.
+        This used to always take `hooks_path()`'s mtime as the reference
+        point — for an inline-only install (no hooks.json file at all), that
+        stat died with ENOENT, leaving `_hook_health` permanently stuck at
+        `----(unknown)`, and the very row meant to catch a silently skipped
+        untrusted inline hook couldn't do its job.
 
-        둘 다 설치돼 있으면 둘 중 더 최근에 바뀐 쪽을 쓴다 — 어느 쪽이든
-        최근에 손을 댔다는 신호이기 때문이다. Codex 자신도 config.toml 을
-        자주 고쳐 쓴다(hooks.state 신뢰 해시, `[projects...]` trust_level
-        등) — 그러면 이 mtime 이 실제 훅 설치 시점보다 훨씬 뒤로 밀려
-        판정 창(install_epoch 이후)이 좁아지고, `----`(미판정)로 남는
-        경우가 늘어난다. 그건 보수적인 실패 방향이라 안전하다(FAIL 을
-        놓치는 대신 그냥 못 판정한 것으로 남는다) — 그래서 굳이 "이 mtime
-        변화가 진짜 훅 재설치였는지" 를 더 정교하게 가려내지 않는다.
+        If both are installed, uses whichever changed more recently — either
+        one being recently touched is a signal. Codex itself rewrites
+        config.toml often (hooks.state trust hash, `[projects...]`
+        trust_level, etc) — that pushes this mtime well past the actual hook
+        install time, narrowing the judgment window (post install_epoch) and
+        increasing how often it stays `----` (unjudged). That's a
+        conservative failure direction and safe (it misses a FAIL rather
+        than mislabeling one) — so it deliberately doesn't try to more
+        precisely determine "was this mtime change a real hook reinstall".
         """
         candidates = []
         for path, present in self._hook_layers(repo_root):
@@ -973,36 +1036,43 @@ class CodexCliAdapter:
         return max(candidates, key=lambda c: c[0])
 
     def inline_hook_present(self) -> bool:
-        """config.toml 의 인라인 `[hooks]` 에 (배포 조각과 정확히 같지 않아도)
-        세션 시작 시점에 실제로 도는 omhc brief 호출이 있는가 — "존재하는가"
-        와 "배포 조각과 똑같은가" 는 다른 질문이다(리뷰 #1: 이 둘을 섞어
-        쓰면 인라인 훅이 깨져 있어도(예: mark 가 빠짐) `hooks_status()` 가
-        "not found" 라고 잘못 말하고, `omhc hooks install` 이 그 위에 다시
-        hooks.json 을 겹쳐 써 Codex 가 두 층 다 로드하며 경고하는 상태를
-        만든다). `omhc hooks install` 이 hooks.json 에 중복을 쓸지 판단하는
-        데 이 함수 하나만 쓴다 — "존재" 판정은 여기, "제대로 됐는가" 판정은
+        """Does config.toml's inline `[hooks]` have an omhc brief call that
+        actually runs at session start (even if not identical to the
+        shipped fragment)? "Does it exist" and "is it identical to the
+        shipped fragment" are different questions (review #1: conflating the
+        two made `hooks_status()` wrongly say "not found" even when the
+        inline hook was broken — e.g. missing mark — and let `omhc hooks
+        install` layer another hooks.json on top, ending up with Codex
+        loading both layers and warning). `omhc hooks install` uses only this
+        function to decide whether to write a duplicate into hooks.json —
+        the "exists" check is here, and the "is it correct" check is
         `hooks_status()`."""
         return hookconf.has_runnable_call_toml(
             self.toml_config_path(), "brief", {"--harness": self.adapter_id})
 
     def hooks_status(self):
-        """`omhc status` 의 `codex-cli hooks` 행 전용 — 일반
-        `hookconf.inspect` 는 hooks.json 하나만 본다. Codex 는 그 옆에 인라인
-        `config.toml [hooks]` 도 읽으므로(#32) 여기서 둘 다 본다.
+        """Only used for `omhc status`'s `codex-cli hooks` row — the
+        general `hookconf.inspect` only looks at hooks.json. Codex also reads
+        the inline `config.toml [hooks]` alongside it (#32), so this looks
+        at both.
 
-        "설치돼 있다" 고 부를 층은 존재 여부(`has_runnable_call*`, 세션 시작
-        시점에 실제로 도는 omhc brief 호출이 있는가)로 가른다 — 기존 결함
-        (리뷰 #1)은 이걸 `inspect`/`inspect_toml` 의 "배포 조각과 완전히
-        같은가" 판정과 섞어 썼다: 인라인이 있는데 mark 가 빠졌거나 플래그가
-        달라 "differs" 여야 할 상황을 "not found" 라고 잘못 말했다. 존재하는
-        층에 대해서만 `inspect`/`inspect_toml` 로 "제대로 됐는가" 를 덧붙인다.
+        Which layer counts as "installed" is decided by existence
+        (`has_runnable_call*`, whether an omhc brief call actually runs at
+        session start) — a previous defect (review #1) conflated this with
+        `inspect`/`inspect_toml`'s "is it exactly identical to the shipped
+        fragment" check: it wrongly said "not found" for a situation that
+        should have said "differs" (inline exists but mark is missing, or
+        flags differ). Only for layers that exist does it add `inspect`/
+        `inspect_toml`'s "is it correct" check.
 
-        두 층 다 존재하면 문서(config-advanced, Hooks 절)가 "Codex 는 둘 다
-        로드하고 경고한다"고 명시한다 — 둘 다 정확하면 PASS 대신 미판정
-        (`----`)으로 그 경고를 드러내고, 하나라도 깨져 있으면 FAIL 로 어느
-        쪽인지 짚는다. project 레이어(`<repo>/.codex/…`)는 이 행이 안 본다 —
-        이 행은 특정 레포 문맥이 없는 범용 상태 행이고, project 훅은
-        `hook_is_installed(repo_root)` 가 `install_handoff` 시점에 따로 본다.
+        If both layers exist, the docs (config-advanced, Hooks section)
+        state explicitly that "Codex loads both and warns" — if both are
+        correct, that warning is surfaced as unjudged (`----`) instead of
+        PASS, and if either is broken, FAIL points out which one. This row
+        doesn't look at the project layer (`<repo>/.codex/...`) — this is a
+        generic status row with no specific repo context; the project hook
+        is checked separately by `hook_is_installed(repo_root)` at
+        `install_handoff` time.
         """
         fragment = hookconf.load_fragment(self.hook_config().fragment_name)
         flags = {"--harness": self.adapter_id}
@@ -1014,11 +1084,12 @@ class CodexCliAdapter:
         json_ok, json_detail = hookconf.inspect(json_path, fragment, self.home)
         toml_ok, toml_detail = hookconf.inspect_toml(toml_path, fragment, self.home)
         if toml_present and not toml_ok:
-            # hookconf 의 일반 detail 은 "... — run `omhc hooks install`" 로
-            # 끝난다 — hooks.json 대상이면 맞는 조언이지만, 인라인이 이미
-            # 존재하면(리뷰 #1 이후) `omhc hooks install` 은 그 위에
-            # hooks.json 을 덧쓰지 않고 그냥 실패한다 — 이 조언을 따라가면
-            # 제자리다(리뷰 #2). 실제로 맞는 조언으로 바꾼다.
+            # hookconf's generic detail ends with "... — run `omhc hooks
+            # install`" — right advice if the target is hooks.json, but once
+            # inline already exists (post review #1), `omhc hooks install`
+            # just fails instead of writing hooks.json on top of it —
+            # following that advice goes in a circle (review #2). Replace it
+            # with advice that's actually correct.
             toml_detail = self._inline_advice(toml_path, toml_detail)
 
         if json_present and toml_present:
@@ -1045,10 +1116,11 @@ class CodexCliAdapter:
             json_detail, toml_path, toml_detail)
 
     def _inline_advice(self, toml_path: str, detail: str) -> str:
-        """`hookconf.inspect_toml` 의 일반적인 "... — run `omhc hooks install`"
-        조언을, 인라인이 이미 존재하는 상태에서 실제로 맞는 조언으로 바꾼다
-        (#32 리뷰 2 — 그 명령은 인라인이 있으면 hooks.json 을 덧쓰지 않고
-        그냥 실패하므로, 그 조언을 따르면 같은 자리를 맴돈다)."""
+        """Replaces `hookconf.inspect_toml`'s generic "... — run `omhc hooks
+        install`" advice with advice that's actually correct once inline
+        already exists (#32 review 2 — that command just fails instead of
+        writing on top of hooks.json when inline exists, so following the
+        advice circles back to the same place)."""
         circular_suffix = " — run `omhc hooks install`"
         if detail.endswith(circular_suffix):
             detail = detail[:-len(circular_suffix)]
@@ -1068,14 +1140,16 @@ class CodexCliAdapter:
         return receipt
 
     def _collapse_stale_agents_md_block(self, repo_root: str) -> None:
-        """Path A(신선한 훅 핸드오프) 가 성공했는데 그 옆에 예전 Path B 구간
-        (#33 예산 초과나 훅이 한동안 안 돌던 시기에 깔린 것)이 남아 있으면,
-        다음 Codex 세션이 신선한 훅 핸드오프와 낡은 AGENTS.md 지시를 동시에
-        읽는다(#36) — collapse() 자체는 24시간 지나야 지우므로 여기서
-        force=True 로 즉시 지운다. `#33` 거절 경로와 똑같은 가드를 쓴다:
-        AGENTS.md 가 Claude Code 와 공유되면 절대 건드리지 않는다. 이 메서드는
-        훅 경로(brief → deliver → install_handoff)에서 불리므로 무엇을 하든
-        절대 던지지 않는다(invariant 2)."""
+        """If Path A (a fresh hook handoff) succeeded but an old Path B
+        section (laid down during a #33 budget overrun, or a period the hook
+        wasn't running) still sits beside it, the next Codex session reads
+        both the fresh hook handoff and the stale AGENTS.md instructions at
+        once (#36) — collapse() itself only deletes after 24 hours, so
+        force=True here deletes it immediately. Uses the exact same guard as
+        the `#33` rejection path: never touches it if AGENTS.md is shared
+        with Claude Code. Since this method is called from the hook path
+        (brief -> deliver -> install_handoff), it must never raise no matter
+        what it does (invariant 2)."""
         from .. import agents_md
 
         try:
@@ -1085,39 +1159,47 @@ class CodexCliAdapter:
             pass
 
     def on_session_start_mark(self, repo_root: str, *, source: str, epoch: float) -> None:
-        """#36: Codex 는 AGENTS.md 를 자기 SessionStart 훅보다 **먼저** 읽는다
-        (실측, codex-cli 0.156.1 sandbox, rollout 증거) — 첫 턴은 훅이 파일을
-        고치든 지우든 이미 읽은 뒤라, 여기서 블록을 지워도 "이 세션이 이미
-        읽었다"는 사실 자체는 바꿀 수 없다. 그래도 지금 지워 두면 **다음**
-        Codex 세션은 이 블록을 못 읽는다 — 블록 수명이 "이 세션이 소비할 때
-        까지"로 줄어든다(예전엔 24시간 staleness 뿐이었다). 다음 턴엔 Codex
-        가 스스로 "이전 AGENTS.md 지시는 더 이상 적용되지 않는다"를 알려준다
-        (실측) — 핸드오프의 '지시가 아니다' 성격과도 맞는다.
+        """#36: Codex reads AGENTS.md **before** its own SessionStart hook
+        runs (measured, codex-cli 0.156.1 sandbox, rollout evidence) — the
+        first turn has already read it before the hook can edit or delete
+        the file, so deleting the block here can't change the fact that
+        "this session already read it". Still, deleting it now means the
+        **next** Codex session can't read this block — the block's lifetime
+        shrinks to "until this session consumes it" (it used to be only a
+        24-hour staleness window). On the next turn, Codex itself notes that
+        "the previous AGENTS.md instructions no longer apply" (measured) —
+        consistent with the handoff's "not an instruction" nature.
 
-        `source` 는 "startup" 만 본다 — "읽기가 훅보다 먼저"라는 순서는
-        **startup 에서만 실측했다**(리뷰). resume(같은 세션의 다음 턴)에서
-        Codex 가 AGENTS.md diff 를 언제 계산하는지(사람의 첫 턴 입력 시점일
-        수도 있다)는 아직 실측하지 못했다 — 만약 그게 훅보다 뒤라면, resume
-        에서도 붕괴시키면 그 턴이 아직 보지도 못한, 이 세션 자신의 brief 가
-        방금 쓴 블록을 지워 버릴 수 있다. 그래서 resume 은 건드리지 않는다.
-        "compact" 는 새 턴이 아니므로(#30 과 같은 구분) 호출자(cmd_mark)가
-        아예 부르지 않지만, 여기서도 다시 확인해 방어한다.
+        Only checks `source` == "startup" — the ordering "reading happens
+        before the hook" was **only measured at startup** (review). Whether
+        Codex computes the AGENTS.md diff at resume (the next turn of the
+        same session) hasn't been measured yet (possibly at the moment of
+        the human's first turn input) — if that happens after the hook,
+        collapsing at resume too could delete a block this very session's
+        own brief just wrote, that this turn hasn't even seen yet. So resume
+        is left untouched. "compact" isn't a new turn (same distinction as
+        #30), so the caller (cmd_mark) never calls this for it, but it's
+        checked again here too as a defense.
 
-        경합(리뷰 #1): 같은 SessionStart 안에서 Codex 는 자기 훅들을 병렬로
-        돌린다(실측) — mark(이 메서드)와 brief(Path B 설치)가 동시에 실행될
-        수 있다. brief 가 hooks.json 미신뢰 등으로 Path B 를 골라 **이 세션**
-        몫의 새 블록을 이미 써 놓았는데, mark 가 그걸 "이미 읽힌 낡은 블록"
-        으로 오인해 지우면 이 세션조차 못 읽는 핸드오프가 된다. 블록의
-        captured_at 은 초 단위로 반올림되므로(managed_block), `epoch`(mark
-        가 이 세션에 대해 기록한 원장 epoch)와 같은 초이거나 그 이후, 혹은
-        `_CONSUMED_BLOCK_MARGIN_SECONDS` 안쪽이면 이 세션(또는 이후) 것일
-        수 있어 건드리지 않는다. 그래도 여기서 판정한 뒤 실제로 지우기까지는
-        여전히 시간차가 있다(check-then-act) — `agents_md.collapse_if_captured`
-        가 그 값을 들고 다시 확인한 뒤에만 지운다(managed_block.strip_if_captured
-        참고): 그 사이 다른 프로세스가 새 구간을 써 놓았으면 값이 달라져
-        있으므로 손대지 않는다. `#33` 거절 경로와 같은 가드도 쓴다: AGENTS.md
-        가 Claude Code 와 공유되면(먼저 확인) 절대 건드리지 않는다. 훅
-        경로에서 불리므로 절대 던지지 않는다(invariant 2)."""
+        Race (review #1): within the same SessionStart, Codex runs its hooks
+        in parallel (measured) — mark (this method) and brief (installing
+        Path B) can run concurrently. If brief already wrote a new block for
+        **this session** because it chose Path B (e.g. hooks.json
+        untrusted), and mark mistakes it for an "already-read stale block"
+        and deletes it, the handoff becomes unreadable even for this
+        session. Since the block's captured_at is rounded to whole seconds
+        (managed_block), if it's the same second as `epoch` (the ledger
+        epoch mark recorded for this session) or later, or within
+        `_CONSUMED_BLOCK_MARGIN_SECONDS`, it could belong to this session
+        (or a later one), so it's left alone. Even so, there's still a
+        window between judging it here and actually deleting it
+        (check-then-act) — `agents_md.collapse_if_captured` only deletes
+        after re-checking that value (see managed_block.strip_if_captured):
+        if another process wrote a new section in between, the value would
+        differ and it's left untouched. Uses the same guard as the `#33`
+        rejection path too: never touches it if AGENTS.md is shared with
+        Claude Code (checked first). Called from the hook path, so it must
+        never raise (invariant 2)."""
         if source != "startup":
             return
         from .. import agents_md, managed_block
@@ -1136,41 +1218,46 @@ class CodexCliAdapter:
             pass
 
     def fallback_channels(self):
-        """Path B: install_handoff 가 실패할 때만 열린다 —
+        """Path B: only opens when install_handoff fails —
 
-        즉 이 brief 호출이 실제로 실행됐는데(codex-cli 훅이 신뢰돼 돌았거나,
-        수동 `omhc brief --harness codex-cli` 였거나) install_handoff 가 실패한
-        경우다. 대표적으로 hooks.json 에 omhc 훅 문자열이 없을 때
-        NoInjectionChannel 을 던지지만, deliver() 의 채널 루프는 install_handoff
-        의 다른 예외(예: ~/.omhc 쓰기 실패)도 같은 방식으로 여기로 넘긴다.
-        훅 자체가 신뢰되지 않아 brief 가 한 번도 안 돌면 deliver() 호출 자체가
-        없으므로 Path B 도 열리지 않는다 — 그 경우 Codex 로 들어가는 방향은
-        아무것도 받지 못한다."""
+        i.e. this brief call actually ran (the codex-cli hook ran trusted,
+        or it was manual `omhc brief --harness codex-cli`), but
+        install_handoff failed. Typically raises NoInjectionChannel when
+        hooks.json has no omhc hook string, but deliver()'s channel loop
+        routes other install_handoff exceptions here too the same way (e.g.
+        failure writing ~/.omhc). If the hook itself is untrusted and brief
+        never runs at all, deliver() itself is never called, so Path B never
+        opens either — in that case the Codex-bound direction receives
+        nothing at all."""
         return (self._install_agents_md,)
 
     def _install_agents_md(self, bundle: HandoffBundle) -> InstallReceipt:
-        """`agents_md.install` 을 부르기 전에 #33 예산을 미리 잰다.
+        """Measures the #33 budget before calling `agents_md.install`.
 
-        구간은 이제 항상 파일 맨 앞이라(managed_block.splice) 끝나는 지점은
-        기존 AGENTS.md 크기와 무관하게 `len(prefix+block)` 하나로 정해진다.
-        조상 디렉터리의 AGENTS.md 바이트까지 더하는 건 하지 않는다 — Codex
-        프로젝트 루트는 이 레포의 `repo_root` 로 근사하고(개인용 도구, 서브
-        디렉터리에서 시작하는 사용이 드물다), 조상에 큰 AGENTS.md 가 있는
-        경우까지 재는 건 이 파일 하나만 보는 것보다 훨씬 비싸다(각 조상마다
-        파일을 열어야 한다) — 넘으면 install 을 아예 claim 하지 않고
-        deliver() 가 보편 바닥(outbox)으로 떨어지게 한다(invariant 2: 여기서
-        죽지 않는다, deliver() 의 예외 캐치가 이미 있지만 사유를 guard.log 에도
-        남긴다).
+        The section is now always at the top of the file
+        (managed_block.splice), so where it ends is determined solely by
+        `len(prefix+block)`, regardless of the existing AGENTS.md size.
+        Doesn't add in ancestor directories' AGENTS.md bytes — Codex's
+        project root is approximated as this repo's `repo_root` (a personal
+        tool, rarely used starting from a subdirectory), and measuring the
+        case of a large ancestor AGENTS.md too would be much more expensive
+        than just looking at this one file (every ancestor's file would need
+        opening) — if the budget is exceeded, install is never claimed at
+        all, and deliver() falls through to the universal floor (outbox)
+        (invariant 2: doesn't die here; deliver()'s exception catch already
+        exists, but the reason is also logged to guard.log).
 
-        `project_doc_max_bytes = 0` 은 (codex-rs project_doc.rs 실측 근거로,
-        미확인) Codex 가 AGENTS.md 자체를 아예 안 읽는다는 뜻이라 항상 거절한다
-        — 그 외 0 미만/파싱 불가는 `_project_doc_max_bytes` 가 이미 기본값으로
-        접는다.
+        `project_doc_max_bytes = 0` means (per codex-rs project_doc.rs, an
+        unconfirmed measured basis) Codex doesn't read AGENTS.md at all, so
+        it's always rejected — anything else below 0 / unparseable is
+        already folded to the default by `_project_doc_max_bytes`.
 
-        리뷰 결함: 예산 초과로 거절만 하고 이미 설치된(더 작았던 시절의) 낡은
-        구간을 그대로 두면, Codex 는 outbox 로 떨어진 새 핸드오프 대신 그
-        낡은 구간을 계속 읽는다 — 거절할 때 낡은 구간도 지운다. AGENTS.md 가
-        Claude 와 공유되면(agents_md.install 과 같은 가드) 건드리지 않는다."""
+        Review defect: rejecting for budget overrun while leaving an
+        already-installed (from-when-it-was-smaller) stale section in place
+        means Codex keeps reading that stale section instead of the new
+        handoff that fell to outbox — so the stale section is also deleted
+        on rejection. Left untouched if AGENTS.md is shared with Claude (same
+        guard as agents_md.install)."""
         from .. import agents_md, brief, managed_block
 
         limit = self._project_doc_max_bytes(self.toml_config_path())
@@ -1198,21 +1285,24 @@ class CodexCliAdapter:
         raise NoInjectionChannel(reason)
 
     def _config_trusts(self, hook_file_path: str) -> bool:
-        """`~/.codex/config.toml` 에 `hook_file_path`(보통 hooks.json — 실측상
-        인라인은 아래 참고)의 훅을 신뢰한다는 `hooks.state` 항목이 있는가.
-        이건 `[projects."<repo>"] trust_level` 과는 다른 메커니즘이다 —
-        저건 project 쪽 `.codex/` 레이어(hooks.json 이든 인라인이든) 전체를
-        읽을지 말지를 가르고, 이건 사용자 레벨 hooks.json **내용 하나**를
-        Codex 가 이미 승인했다는 해시다(실측, 이 머신: `hooks.state."<hooks.json
-        절대경로>:session_start:<idx>:<idx>"`). 3.9 엔 tomllib 이 없으므로
-        평문 부분 문자열 검색으로 충분하다 — 해시 의미론(codex 가 훅 내용의
-        무엇을 해시하는지)은 확인된 바 없으므로, 이 신호 하나만으로 실패
-        판정을 내리지 않는다(정적 힌트일 뿐이다).
+        """Does `~/.codex/config.toml` have a `hooks.state` entry saying the
+        hook at `hook_file_path` (usually hooks.json — see below for
+        inline) is trusted? This is a different mechanism from
+        `[projects."<repo>"] trust_level` — that gates whether the whole
+        project-side `.codex/` layer (hooks.json or inline) is read at all,
+        while this is a hash saying Codex has already approved one
+        **specific piece of content** in the user-level hooks.json (measured,
+        this machine: `hooks.state."<absolute hooks.json path>:session_start:<idx>:<idx>"`).
+        3.9 has no tomllib, so a plain substring search is enough — the hash
+        semantics (what exactly Codex hashes in the hook content) haven't
+        been confirmed, so this signal alone never decides a failure verdict
+        (it's just a static hint).
 
-        인라인(`~/.codex/config.toml` 자신에 적힌 `[[hooks.SessionStart]]`)도
-        같은 `hooks.state."<config.toml 경로>:session_start:..."` 키 형식을
-        쓰는지는 확인된 바 없다 — 호출부(`_hook_health`)가 그 불확실성을
-        detail 에 명시한다."""
+        Whether inline hooks (`[[hooks.SessionStart]]` written directly in
+        `~/.codex/config.toml`) use the same
+        `hooks.state."<config.toml path>:session_start:..."` key format also
+        hasn't been confirmed — the caller (`_hook_health`) states that
+        uncertainty explicitly in its detail."""
         config_path = self.toml_config_path()
         needle = 'hooks.state."{}:session_start:'.format(hook_file_path)
         try:
@@ -1222,20 +1312,22 @@ class CodexCliAdapter:
             return False
 
     def _config_trusts_hook(self) -> bool:
-        """하위호환 별칭 — hooks.json 자신의 신뢰 해시만 본다(실측된 경로)."""
+        """Backward-compat alias — only looks at hooks.json's own trust hash (the measured path)."""
         return self._config_trusts(self.hooks_path())
 
     def _repo_matches(self, repo_root: Optional[str], cwd) -> bool:
-        """이 후보(cwd)가 `repo_root` 에 실제로 속하는가.
+        """Does this candidate (cwd) actually belong to `repo_root`?
 
-        `repo_root` 자신이 `.git` 을 가진 진짜 레포면 그 안의 워크트리·서브모듈
-        (자기 `.git` 을 가진 중첩 디렉터리, 예: `.claude/worktrees/*`)도 여전히
-        이 레포에 속한 것으로 본다 — list_sessions 의 is_within(경로 포함)
-        판정을 그대로 신뢰한다(TestHealthMatchesAcrossNestedGitRoots).
-        `repo_root` 자신은 `.git` 이 없는데(resolve_repo_root 의 fallback,
-        "non-git 부모 디렉터리"에서 status 를 부른 경우) 안에 자기 `.git` 을
-        가진 **남남** 레포가 있으면 이야기가 다르다 — 그 세션은 여기 레포의
-        훅이 돈 증거가 아니다. 그 경우에만 repo 키를 엄격히 대조한다.
+        If `repo_root` itself is a real repo with a `.git`, then a
+        worktree/submodule inside it (a nested directory with its own
+        `.git`, e.g. `.claude/worktrees/*`) is still considered to belong to
+        this repo — trusting list_sessions's is_within (path-containment)
+        check as-is (TestHealthMatchesAcrossNestedGitRoots). It's a
+        different story if `repo_root` itself has no `.git` (resolve_repo_root's
+        fallback, i.e. status was called from a "non-git parent directory")
+        and there's a completely **unrelated** repo inside it with its own
+        `.git` — that session is not evidence that this repo's hook ran.
+        Only in that case does it strictly compare repo keys.
         """
         if repo_root is None:
             return True
@@ -1244,20 +1336,20 @@ class CodexCliAdapter:
         return locate.owning_repo_key(cwd) == locate.owning_repo_key(repo_root)
 
     def _codex_root_markers(self, config_path: str):
-        """`~/.codex/config.toml` 의 `project_root_markers` 값을 읽는다.
+        """Reads the `project_root_markers` value from `~/.codex/config.toml`.
 
-        3.9 엔 tomllib 이 없다 — TOML 전체를 파싱하는 대신 이 키 하나만 정규식으로
-        뽑는다(한 줄/여러 줄 배열, bare/quoted 키, basic/literal 문자열 모두). 반환은
-        (state, markers-또는-에러문자열):
-          "missing"  — 파일이 아예 없다(기본값 [".git"] 이 적용된다)
-          "unreadable" — 있는데 못 읽는다(권한, 디렉터리 등) — 두 번째 자리에 사유
-          "absent"   — 최상위(첫 `[section]` 이전)에 이 키가 없다(마찬가지로 기본값)
-          "table"    — 이 키가 `[section]` 아래에서만 보인다(TOML 은 테이블이
-                       스코프를 바꾼다 — 최상위 키가 아니다)
-          "unparseable" — 배열 안에 문자열이 아닌 것(정수, 중첩 표현 …)이 있다
-          "ok"       — 두 번째 자리에 값 tuple
-        `utf-8-sig` 로 여는 것은 BOM 이 있는 파일에서 정규식이 줄 시작(`^`)을 못
-        맞춰 키가 없는 것처럼 보이는 걸 막는다.
+        3.9 has no tomllib — instead of parsing the whole TOML file, pulls
+        just this one key with a regex (single/multi-line array, bare/quoted
+        key, both basic/literal strings). Returns (state, markers-or-error-string):
+          "missing"  — file doesn't exist at all (default [".git"] applies)
+          "unreadable" — exists but can't be read (permissions, is a directory, etc) — reason in the second slot
+          "absent"   — key isn't present at the top level (before the first `[section]`) (same default applies)
+          "table"    — key only appears under a `[section]` (TOML tables
+                       scope keys — not a top-level key)
+          "unparseable" — array contains something that isn't a string (integer, nested expression, ...)
+          "ok"       — value tuple in the second slot
+        Opening with `utf-8-sig` prevents a BOM'd file from making the regex
+        miss the line start (`^`) and look like the key is absent.
         """
         try:
             with open(config_path, encoding="utf-8-sig", errors="replace") as fh:
@@ -1274,16 +1366,18 @@ class CodexCliAdapter:
                 return "table", None
             return "absent", None
         array_text = m.group(1)
-        # 값 안에 두 번째 `[` 가 있으면 중첩 배열이다 — Codex 가 기대하는 문자열
-        # 배열이 아니므로 확신 있게 못 읽은 것으로 본다(리뷰).
+        # A second `[` inside the value means a nested array — not the
+        # string array Codex expects, so this can't be confidently read (review).
         if _TOML_STRING_RE.sub("", array_text).count("[") > 1:
             return "unparseable", None
-        # findall 은 매칭 안 된 그룹을 빈 문자열로 채운다(None 아님) — 두 문자열
-        # 종류를 구분하려면 finditer 로 그룹 참여 여부(None)를 직접 봐야 한다.
+        # findall fills unmatched groups with an empty string (not None) —
+        # to distinguish the two string kinds, need finditer and check group
+        # participation (None) directly.
         values = [sm.group("d") if sm.group("d") is not None else sm.group("s")
                   for sm in _TOML_STRING_RE.finditer(array_text)]
-        # 문자열 리터럴을 전부 지우고 남는 게 있으면(정수, 중첩 배열, 주석 …)
-        # 이 배열을 확신 있게 못 읽은 것이다.
+        # If anything remains after stripping out every string literal
+        # (integer, nested array, comment, ...), this array can't be
+        # confidently read.
         leftover = _TOML_STRING_RE.sub("", array_text)
         leftover = re.sub(r"[\[\],\s]", "", leftover)
         if leftover:
@@ -1291,15 +1385,16 @@ class CodexCliAdapter:
         return "ok", tuple(v.replace('\\"', '"') for v in values)
 
     def _project_doc_max_bytes(self, config_path: str) -> int:
-        """`~/.codex/config.toml` 의 `project_doc_max_bytes` 값, 없거나 못 읽으면
-        임베디드 기본값(#33). `_codex_root_markers` 와 같은 원칙 — 최상위(첫
-        `[section]` 이전) 키만 본다, 절대 던지지 않는다(fail-open).
+        """`project_doc_max_bytes` value from `~/.codex/config.toml`, or the
+        embedded default if missing/unreadable (#33). Same principle as
+        `_codex_root_markers` — only looks at the top-level key (before the
+        first `[section]`), never raises (fail-open).
 
-        `0` 은 그대로 돌려준다(기본값으로 접지 않는다) — codex-rs 의
-        project_doc.rs 실측 근거(리뷰, 바이너리 문자열로는 미확인)로 `0` 은
-        "AGENTS.md 를 아예 안 읽는다"는 뜻이고, 호출자(`_install_agents_md`/
-        `_agents_md_budget_health`)가 그 값 자체로 따로 판정해야 한다. 음수·
-        파싱 불가만 기본값으로 접는다."""
+        Returns `0` as-is (doesn't fold it to the default) — per codex-rs's
+        project_doc.rs (review, unconfirmed by binary strings), `0` means
+        "doesn't read AGENTS.md at all", and the caller
+        (`_install_agents_md`/`_agents_md_budget_health`) must judge on that
+        value itself. Only negative values / unparseable ones fold to the default."""
         try:
             with open(config_path, encoding="utf-8-sig", errors="replace") as fh:
                 text = fh.read()
@@ -1317,10 +1412,10 @@ class CodexCliAdapter:
         return value if value >= 0 else DEFAULT_PROJECT_DOC_MAX_BYTES
 
     def _ancestor_has_git(self, repo_root: str, git_marker: str) -> bool:
-        """리뷰 #4: `repo_root` 위 조상 중 `.git` 을 가진 것이 있으면, Codex
-        기본값(`[".git"]`)으로도 그 조상을 루트로 잡아 AGENTS.md 를 cwd 까지
-        내려오며 읽는다(레포 자신의 AGENTS.md 도 그 경로 위에 있다) — 이땐
-        `.omhc-root` 를 더할 필요가 없다."""
+        """Review #4: if an ancestor above `repo_root` has a `.git`, then
+        Codex's default (`[".git"]`) also picks that ancestor as the root
+        and reads AGENTS.md down to cwd (the repo's own AGENTS.md is on
+        that path too) — in that case there's no need to add `.omhc-root`."""
         real = os.path.realpath(repo_root).rstrip("/") or "/"
         current = os.path.dirname(real)
         while True:
@@ -1332,17 +1427,19 @@ class CodexCliAdapter:
             current = parent
 
     def _root_marker_health(self, repo_root: Optional[str]):
-        """#31: `.omhc-root` 로만 정해진(= `.git` 없는, 위에도 `.git` 조상이 없는)
-        프로젝트에서, 서브폴더에서 시작한 Codex 가 기본
-        `project_root_markers = [".git"]` 로는 조상 AGENTS.md 를 읽지 않는다
-        (실측, codex-cli 0.155.1) — Path B(AGENTS.md managed block)가 조용히
-        무력해진다. `~/.codex/config.toml` 에 `.omhc-root` 를 더해야 통한다.
+        """#31: in a project determined only by `.omhc-root` (no `.git`, and
+        no `.git` ancestor above it either), Codex started from a subfolder
+        won't read the ancestor AGENTS.md with the default
+        `project_root_markers = [".git"]` (measured, codex-cli 0.155.1) —
+        Path B (AGENTS.md managed block) is silently neutered. Needs
+        `.omhc-root` added to `~/.codex/config.toml` to work.
 
-        게이팅하지 않는다(리뷰 결함): Path B 는 `install_handoff` 가 실패할
-        때만 열리는 폴백이라, omhc 훅이 설치·신뢰돼 있으면(보통의 경우) 이
-        설정은 아무 효과가 없는데도 FAIL 로 게이팅하면 정상 설치를 매번
-        FAIL 로 만든다. 대신 PASS 아니면 언제나 `----`(ok=None)이고, 훅이
-        설치돼 있지 않을 때만 "지금 유일한 채널"이라고 명시한다.
+        Not gated (review defect): Path B is a fallback that only opens when
+        `install_handoff` fails, so when the omhc hook is installed and
+        trusted (the usual case) this setting has no effect at all, yet
+        gating with FAIL would make a normal install always FAIL. Instead
+        this is always `----` (ok=None) unless PASS, and only notes "this is
+        currently the only channel" when the hook isn't installed.
         """
         if repo_root is None:
             return None
@@ -1388,19 +1485,22 @@ class CodexCliAdapter:
                 "project_root_markers includes \"{}\"".format(omhc_marker))
 
     def _agents_md_budget_health(self, repo_root: Optional[str]):
-        """#33: 이미 설치된 구간이 Codex 의 `project_doc_max_bytes` 예산을 넘겨
-        끝나면 Codex 는 그걸 못 읽는다 — `_install_agents_md` 가 쓰는 시점에
-        막지만(다음 splice 부터), 이미 예산을 넘겨 설치된 채로 오래 방치된
-        구간은 status 로도 알려야 한다.
+        """#33: if an already-installed section ends past Codex's
+        `project_doc_max_bytes` budget, Codex can't read it — this is
+        prevented at the point `_install_agents_md` writes (from the next
+        splice onward), but a section that's been installed past budget and
+        left alone for a while also needs to be surfaced via status.
 
-        `codex root markers` 와 같은 두 단계 원칙을 따른다: 이 진단 자체가
-        무의미한 레포(AGENTS.md 가 Claude 와 공유돼 Path B 를 절대 안 쓰는
-        레포 — `agents_md.install`/`_install_agents_md` 와 같은 가드)는 행을
-        아예 내지 않는다(``None``). 진단은 유효한데 아직 판단할 근거가 없으면
-        (설치된 구간이 없다 — 설치 전이거나 collapse 됨) `----` 로 행은 내되
-        게이팅은 하지 않는다 — "every check gets PASS/FAIL/---- (never
-        SKIP)"(README) 는 판정 가능한 진단에 적용되지, 진단 자체가 무의미한
-        레포에는 적용되지 않는다."""
+        Follows the same two-stage principle as `codex root markers`: for a
+        repo where this diagnostic is inherently meaningless (AGENTS.md is
+        shared with Claude, so Path B is never used at all — same guard as
+        `agents_md.install`/`_install_agents_md`), no row is emitted at all
+        (``None``). If the diagnostic is valid but there's no basis yet to
+        judge (no installed section — either not installed yet, or
+        collapsed), the row is emitted as `----` but not gated — "every
+        check gets PASS/FAIL/---- (never SKIP)" (README) applies to
+        diagnostics that can actually be judged, not to a repo where the
+        diagnostic itself is meaningless."""
         if repo_root is None:
             return None
         from .. import agents_md, managed_block
@@ -1429,7 +1529,7 @@ class CodexCliAdapter:
         rows = []
         try:
             marker_row = self._root_marker_health(repo_root)
-        except Exception as exc:  # 이 진단도 status 자체를 죽이면 안 된다
+        except Exception as exc:  # this diagnostic must not kill status itself either
             marker_row = ("codex root markers", None, "unknown ({})".format(exc))
         if marker_row is not None:
             rows.append(marker_row)
@@ -1443,69 +1543,77 @@ class CodexCliAdapter:
         return tuple(rows)
 
     def _hook_health(self, repo_root: Optional[str], ledger_rows):
-        """훅이 설치돼 있는데 실제로 돈 적이 없는지 행태로 진단한다.
+        """Diagnoses through behavior whether the hook is installed but has
+        never actually run.
 
-        정적 신호(hooks.json 존재)만으로는 신뢰 여부를 알 수 없다 — codex-cli
-        0.155.1 은 신뢰되지 않은 훅을 메시지도 원장 행도 없이 건너뛴다. 그래서
-        설치 이후 Codex 세션이 실제로 omhc mark 를 남겼는지를 원장과 대조한다.
-        무엇이 잘못돼도 status 자체가 죽으면 안 되므로(진단 도구), 통째로
-        감싸 실패는 ok=None(미판정)으로 열화시킨다.
+        Static signals alone (hooks.json existing) can't tell trust status —
+        codex-cli 0.155.1 skips an untrusted hook with no message and no
+        ledger row. So it cross-checks the ledger for whether a Codex
+        session actually left an omhc mark since the install. Since status
+        itself must not die no matter what goes wrong (it's a diagnostic
+        tool), this is wrapped wholesale and failure degrades to ok=None
+        (unjudged).
 
-        ok=None(`----`, AGENTS.md 의 status 규약)은 "아직 아무것도 판정할 수
-        없다"는 세 번째 상태다 — 대화형 Codex 세션이 install 이후 하나도 없거나
-        헤드리스(`codex exec`)뿐이면 PASS 도 FAIL 도 아니다.
+        ok=None (`----`, the AGENTS.md status convention) is a third state
+        meaning "nothing can be judged yet" — if there's been no interactive
+        Codex session since install, or only headless (`codex exec`) ones,
+        it's neither PASS nor FAIL.
         """
         try:
             if not self.hook_is_installed(repo_root):
-                # 훅을 설치한 적 없는 사용자에게 매번 행을 보여주는 건 소음이다
-                # — "설치 안 됨" 은 이제 `<adapter-id> hooks` 행(hookconf 기반,
-                # cmd_status)이 이미 말해준다.
+                # Showing this row every time to a user who's never
+                # installed the hook is noise — "not installed" is already
+                # said by the `<adapter-id> hooks` row (hookconf-based, cmd_status).
                 return ()
             source = self._install_source(repo_root)
             if source is None:
-                # hook_is_installed(repo_root) 는 True 라고 했는데 그 파일(들)을
-                # 다시 stat 하지 못했다 — 방금 지워졌거나 하는 경합. 판정 불가.
+                # hook_is_installed(repo_root) said True, but the file(s)
+                # couldn't be stat'd again — a race, e.g. just deleted. Can't judge.
                 return (("codex hook", None,
                          "unknown (installed hook file could not be stat'd)"),)
             install_epoch, install_path = source
             install_date = time.strftime("%Y-%m-%d %H:%M %z", time.localtime(install_epoch))
 
-            # 세션 id 는 전역 유일이다(Codex 가 부여) — 레포 경계로 거르지 않는다.
-            # ledger_rows 를 레포로 먼저 거르면 워크트리·서브모듈처럼 자기 .git 을
-            # 가진 중첩 디렉터리에서 시작한 세션이 새는 repo 키로 기록돼 영원히
-            # 안 돈 것으로 보인다(리뷰 결함) — 그래서 호출자(cli.py)는 레포로
-            # 거르지 않은 원장을 여기로 넘긴다.
+            # Session ids are globally unique (assigned by Codex) — not
+            # filtered by repo boundary. If ledger_rows were pre-filtered by
+            # repo, a session started from a nested directory with its own
+            # .git (worktree/submodule) would be recorded under a leaking
+            # repo key and look permanently "never ran" (review defect) — so
+            # the caller (cli.py) passes the ledger here unfiltered by repo.
             ran_sessions = set()
             for row in ledger_rows:
                 if row.get("harness") != self.adapter_id:
                     continue
                 if row.get("via") == "scan":
-                    # 향후 백필 행. 훅이 실제로 돌았다는 증거가 아니므로 세지
-                    # 않는다 — 세면 문제를 가려버린다.
+                    # A future backfill row. Not evidence the hook actually
+                    # ran, so not counted — counting it would hide the problem.
                     continue
                 if row.get("event") != "start":
-                    # "훅이 돌았다" 는 세션 시작 행의 존재로만 증명된다 — 계획된
-                    # pull 행 등 다른 event 는 훅이 돌았다는 증거가 아니다.
+                    # "The hook ran" is only proven by the existence of a
+                    # session-start row — other events, like a scheduled
+                    # pull row, aren't evidence the hook ran.
                     continue
                 sid = row.get("session")
                 if sid:
                     ran_sessions.add(sid)
 
             def _post_install(entries):
-                """entries: (session_id, cwd, meta) 튜플들. repo 소속과 설치
-                이후 시작 시각으로 걸러 (started, session_id, meta) 를 만든다."""
+                """entries: tuples of (session_id, cwd, meta). Filters by
+                repo membership and start time after install to build
+                (started, session_id, meta)."""
                 out = []
                 for session_id, cwd, meta in entries:
                     if not self._repo_matches(repo_root, cwd):
                         continue
-                    # 파일 두 개(hooks.json mtime, rollout 의
-                    # session_meta.timestamp)의 시각을 비교한다 — 한쪽이 mtime
-                    # 이라 invariant 6 이 금지하는 "순서의 근거"가 아니라
-                    # 일회성 진단이라 허용한다(이 비교 결과로 이벤트를 정렬하지
-                    # 않는다). cli._backfill_foreign_sessions 가 하는 비교와는
-                    # 다르다 — 거기는 두 세션 시작 epoch(둘 다
-                    # session_meta.timestamp 계열, mtime 아님)를 비교해 원장
-                    # append 순서를 정하는, invariant 6 이 허용하는 예외다.
+                    # Compares timestamps of two different files (hooks.json
+                    # mtime, the rollout's session_meta.timestamp) — one side
+                    # is mtime, which isn't the "ordering basis" invariant 6
+                    # forbids, since this is a one-off diagnostic (this
+                    # comparison never orders events). Different from the
+                    # comparison cli._backfill_foreign_sessions does — that
+                    # compares two session-start epochs (both
+                    # session_meta.timestamp-style, not mtime) to decide
+                    # ledger append order, the exception invariant 6 permits.
                     started = iso_epoch(meta.get("timestamp"))
                     if not started or started <= install_epoch:
                         continue
@@ -1521,9 +1629,10 @@ class CodexCliAdapter:
             candidates = _post_install(_entries_from_refs(self.list_sessions(repo_root)))
 
             if not candidates:
-                # OMHC_ALLOW_HEADLESS=1 이면 list_sessions() 자체가 헤드리스도
-                # 후보에 넣으므로 여기 온 시점엔 이미 진짜로 아무것도 없다 —
-                # 이 헤드리스 전용 재스캔은 env 와 무관하게 존재 여부만 본다.
+                # If OMHC_ALLOW_HEADLESS=1, list_sessions() itself already
+                # includes headless as candidates, so by the time we're here
+                # there's genuinely nothing at all — this headless-only
+                # rescan only checks existence, regardless of env.
                 headless_entries = (
                     (str(meta.get("session_id") or meta.get("id") or ""),
                      meta.get("cwd"), meta)
@@ -1538,11 +1647,12 @@ class CodexCliAdapter:
                           "not judged yet — no interactive Codex session in this repo "
                           "since {} changed ({})".format(install_path, install_date)),)
 
-            # 신뢰는 config.toml 을 바꾸지, hooks.json 을 바꾸지 않는다 — 신뢰
-            # 이전 세션은 install_epoch 이후라도 영원히 "안 돈 것"으로 남는다.
-            # 그래서 전체 개수가 아니라 **가장 최신** 세션의 행태로 판정한다:
-            # 최신이 돌았으면 그 시점부터는 신뢰가 성립한 것이므로 PASS, 아니면
-            # 최신에서부터 거슬러 연속으로 안 돈 세션 수를 센다.
+            # Trust changes config.toml, not hooks.json — a pre-trust
+            # session stays permanently "never ran" even past install_epoch.
+            # So this judges by the behavior of the **newest** session, not
+            # the total count: if the newest ran, trust must have been
+            # established by then, hence PASS; otherwise counts consecutive
+            # non-ran sessions going backward from the newest.
             candidates.sort(key=lambda c: c[0], reverse=True)
             missing_streak = 0
             newest_missing_meta = None
@@ -1556,9 +1666,10 @@ class CodexCliAdapter:
             if missing_streak == 0:
                 return (("codex hook", True, "ran for the latest session since install"),)
 
-            # UNVERIFIED: Codex Desktop/IDE 세션(originator 예: codex_work_desktop)이
-            # 이 훅을 애초에 전혀 돌리지 않을 수 있다 — 확인된 바 없다. 오진단이
-            # 눈에 보이도록 가장 최신 미실행 세션의 originator 를 detail 에 남긴다.
+            # UNVERIFIED: a Codex Desktop/IDE session (originator e.g.
+            # codex_work_desktop) may never run this hook at all in the
+            # first place — unconfirmed. Records the newest never-run
+            # session's originator in the detail so a misdiagnosis stays visible.
             originator = newest_missing_meta.get("originator")
             if not isinstance(originator, str) or not originator:
                 originator = "unknown"
@@ -1581,13 +1692,15 @@ class CodexCliAdapter:
                         "check is only verified for hooks.json installs, not inline "
                         "config.toml ones, so treat this as a hint, not a diagnosis"
                         .format(install_path))
-            # else: project-level 설치 — 그 신뢰는 `[projects...] trust_level`
-            # 로 이미 확인됐다(여기 오려면 그게 trusted 여야 한다, _hook_layers)
-            # — hooks.state 힌트는 이 층과 무관하니 덧붙이지 않는다.
-            # 훅 백필(cmd_mark) 덕에 Codex→Claude 방향은 이 FAIL 과 무관하게
-            # 산다 — 끊긴 건 Claude→Codex 뿐이라는 걸 명시한다.
+            # else: project-level install — its trust was already confirmed
+            # via `[projects...] trust_level` (getting here requires that to
+            # be trusted, see _hook_layers) — the hooks.state hint is
+            # irrelevant to this layer, so it's not appended.
+            # Thanks to the hook backfill (cmd_mark), the Codex→Claude
+            # direction survives regardless of this FAIL — make explicit
+            # that only Claude→Codex is broken.
             detail += (" — Claude→Codex is not delivered; Codex→Claude still works "
                        "via Claude's mark backfill")
             return (("codex hook", False, detail),)
-        except Exception as exc:  # 진단이 status 자체를 죽이면 안 된다 (invariant 7)
+        except Exception as exc:  # a diagnostic must not kill status itself (invariant 7)
             return (("codex hook", None, "unknown ({})".format(exc)),)

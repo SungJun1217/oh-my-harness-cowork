@@ -1,4 +1,4 @@
-**English** · [한국어](status.ko.md) · [← README](../README.md)
+[← README](../README.md)
 
 # What `omhc status` checks
 

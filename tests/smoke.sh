@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# 적대적 입력에서 훅 경로가 조용히 exit 0 으로 끝나는지 본다.
+# Check that the hook path quietly exits 0 on adversarial input.
 #
-# 세션 시작을 깨뜨리는 것이 이 도구의 최악 결과다. 아무것도 주입하지 못하는 것은
-# 그에 비해 아무 일도 아니다. 그래서 여기서 요구하는 것은 "성공"이 아니라
-# "빈 stdout + exit 0" 이다.
+# Breaking session start is this tool's worst outcome. Failing to inject
+# anything is nothing by comparison. So what's required here isn't
+# "success" — it's "empty stdout + exit 0".
 #
-# 사용: bash tests/smoke.sh
+# Usage: bash tests/smoke.sh
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,19 +39,19 @@ check() {
   fi
 }
 
-# 1) 원장 없음
+# 1) no ledger
 setup
 check "ledger missing" "$PAYLOAD"
 teardown
 
-# 2) 원장에 깨진 반줄만 있음
+# 2) ledger with only a corrupt half-line
 setup
 mkdir -p "$HOME/.omhc"
 printf '{"repo":"x","harn\n' > "$HOME/.omhc/ledger.jsonl"
 check "ledger with a corrupt half-line" "$PAYLOAD"
 teardown
 
-# 3) transcript_path 가 존재하지 않음
+# 3) transcript_path does not exist
 setup
 mkdir -p "$HOME/.omhc"
 KEY="$("$OMHC" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["repo_key"])')"
@@ -60,7 +60,7 @@ printf '{"repo":"%s","harness":"codex-cli","session":"gone","event":"start","epo
 check "transcript_path does not exist" "$PAYLOAD"
 teardown
 
-# 4) transcript_path 가 /dev/null
+# 4) transcript_path is /dev/null
 setup
 mkdir -p "$HOME/.omhc"
 KEY="$("$OMHC" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["repo_key"])')"
@@ -69,23 +69,23 @@ printf '{"repo":"%s","harness":"codex-cli","session":"null","event":"start","epo
 check "transcript_path is /dev/null" "$PAYLOAD"
 teardown
 
-# 5) HOME 이 쓰기 불가
+# 5) HOME is unwritable
 setup
 export HOME=/proc/omhc-nonexistent
 check "HOME is unwritable" "$PAYLOAD"
 teardown
 
-# 6) stdin 이 깨진 JSON
+# 6) stdin is broken JSON
 setup
 check "stdin is broken json" "{not json at all"
 teardown
 
-# 7) stdin 이 비어 있음
+# 7) stdin is empty
 setup
 check "stdin is empty" ""
 teardown
 
-# 8) cwd 가 "/" (거부된 루트)
+# 8) cwd is "/" (rejected root)
 setup
 check "cwd is /" '{"cwd":"/","session_id":"smoke-1"}'
 teardown

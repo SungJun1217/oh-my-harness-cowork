@@ -95,15 +95,15 @@ class TestSplice(unittest.TestCase):
 
     def test_body_containing_marker_like_text_does_not_break_parsing(self):
         MB.splice(self.path, "논의: " + MB.END + " 라는 마커", captured_at=1000.0)
-        # 본문이 END 를 담으면 구조가 깨진다 → splice 가 중화해야 한다.
+        # If the body contains END, the structure breaks -> splice must neutralize it.
         self.assertEqual(self.read().count(MB.END), 1)
         self.assertTrue(MB.strip(self.path))
         self.assertFalse(os.path.exists(self.path))
 
 
 class TestTopPlacementRoundTrip(unittest.TestCase):
-    """#33: 구간은 이제 파일 맨 앞이다 — splice/strip 이 사용자 콘텐츠를 있는
-    그대로(개행 방식·트레일링 개행 유무까지) 되돌리는지 확인한다."""
+    """#33: the section is now at the top of the file — confirms splice/strip
+    restore user content exactly as-is (down to the newline style and trailing newline)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -149,8 +149,8 @@ class TestTopPlacementRoundTrip(unittest.TestCase):
 
     def test_legacy_end_block_is_moved_to_the_top_on_next_splice(self):
         original = "# user content\n\nmore\n"
-        # 예전(#33 이전) 배치를 손으로 흉내낸다: 사용자 콘텐츠 + 구분용 빈 줄 +
-        # 구간(파일 끝).
+        # Manually simulates the old (pre-#33) layout: user content + a separator
+        # blank line + the section (at the end of the file).
         legacy_block = "{}\nold\n{}\n".format(MB._begin(1000.0), MB.END)
         with open(self.path, "w", encoding="utf-8") as fh:
             fh.write(original + "\n" + legacy_block)
@@ -166,16 +166,16 @@ class TestTopPlacementRoundTrip(unittest.TestCase):
 
         self.assertTrue(MB.strip(self.path))
         with open(self.path, encoding="utf-8") as fh:
-            # 예전 배치가 끼워 넣었던 구분용 빈 줄 하나는 이제 사용자 콘텐츠로
-            # 취급돼 그대로 남는다(무해한 흔적 한 바이트) — 위치로 "이게
-            # omhc 가 넣은 빈 줄인지" 추측하다 실제 사용자 콘텐츠를 통째로
-            # 버리는 쪽보다 안전하다(리뷰 결함 #1).
+            # The one separator blank line the old layout inserted is now treated
+            # as user content and stays (a harmless one-byte trace) — safer than
+            # guessing from position whether "this is a blank line omhc inserted"
+            # and discarding real user content wholesale on a wrong guess (review defect #1).
             self.assertEqual(fh.read(), original + "\n")
 
     def test_strip_keeps_a_line_the_user_added_above_the_block(self):
-        """리뷰 결함 #1 (A): 블록이 맨 앞이어도, 그 위에 사용자가 줄을 더하면
-        `before` 가 더 이상 비지 않는다 — 이전 버전은 그러면 `after`(원래
-        블록 뒤 콘텐츠) 전체를 버렸다."""
+        """Review defect #1 (A): even with the block at the top, if the user adds
+        a line above it, `before` is no longer empty — the old version, in that
+        case, discarded all of `after` (the content originally trailing the block)."""
         MB.splice(self.path, "handoff", captured_at=1000.0)
         with open(self.path, encoding="utf-8") as fh:
             with_block = fh.read()
@@ -190,8 +190,9 @@ class TestTopPlacementRoundTrip(unittest.TestCase):
         self.assertNotIn(MB.END, text)
 
     def test_strip_keeps_content_that_trails_a_legacy_end_block(self):
-        """리뷰 결함 #1 (B): 예전 배치의 구간 뒤에 사용자 콘텐츠가 더 있으면
-        (구간이 파일의 진짜 끝이 아니면) 이전 버전은 그 뒤쪽 콘텐츠를 버렸다."""
+        """Review defect #1 (B): if the old layout has more user content after the
+        section (i.e. the section isn't actually the end of the file), the old
+        version discarded that trailing content."""
         legacy_block = "{}\nold\n{}\n".format(MB._begin(1000.0), MB.END)
         with open(self.path, "w", encoding="utf-8") as fh:
             fh.write("# content\n\n" + legacy_block + "user appended after\n")
@@ -218,9 +219,10 @@ class TestTopPlacementRoundTrip(unittest.TestCase):
         self.assertEqual(text.count(MB.END), 1)
 
     def test_no_non_block_byte_of_the_input_is_ever_lost(self):
-        """속성 테스트: 블록 구간만 빠지고 나머지 바이트는 그대로 순서대로 남는다
-        — 위치(맨 앞/중간/맨 끝)나 줄바꿈 모양과 상관없이(리뷰: 조각 순서만 보던
-        옛 검사는 줄바꿈·\r 손실을 못 잡았다)."""
+        """Property test: only the block section is removed, and the remaining
+        bytes stay in order — regardless of position (top/middle/end) or newline
+        style (review: an old check that only looked at fragment order missed
+        newline/\\r loss)."""
         block = "{}\nold\n{}\n".format(MB._begin(1000.0), MB.END)
         shapes = [
             "",
@@ -241,7 +243,7 @@ class TestTopPlacementRoundTrip(unittest.TestCase):
                 self.assertEqual(MB._without_block(shape), shape.replace(block, "", 1))
 
     def test_file_round_trip_is_byte_identical_for_every_shape(self):
-        """splice → splice → strip 을 실제 파일로 돌리면 원래 바이트가 그대로다."""
+        """Running splice -> splice -> strip on a real file leaves the original bytes untouched."""
         shapes = [b"x", b"a\r\nb\r\n", b"a\r\nb", b"\xef\xbb\xbf# t\n",
                   b"\n\nlead", "한글\n본문\n".encode("utf-8")]
         for raw in shapes:

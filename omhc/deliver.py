@@ -15,11 +15,12 @@ from .adapter import (
 
 OMHC_DIR = ".omhc"
 OUTBOX_DIR = os.path.join(OMHC_DIR, "outbox")
-# 오래된 outbox 파일이 무한히 쌓이지 않도록 cmd_mark 가 이 나이를 넘긴 것만
-# 지운다(#36). AGENTS.md 구간의 STALE_AFTER_SECONDS 와 값은 같지만 의미가
-# 다르다 — 저건 "지시로 안 읽히게"이고 이건 "디스크에 안 쌓이게"다.
+# So old outbox files don't pile up forever, cmd_mark only deletes ones past
+# this age (#36). Shares its value with the AGENTS.md block's
+# STALE_AFTER_SECONDS but means something different — that one is about "not
+# being read as an instruction", this one is about "not piling up on disk".
 OUTBOX_TTL_SECONDS = 24 * 3600
-# omhc 가 만든 outbox 파일만 지운다 — 이 헤더로 자기 것을 알아본다.
+# Only deletes outbox files omhc itself created — recognized by this header.
 FILE_DROP_HEADER_PREFIX = "<!-- omhc file drop"
 
 
@@ -32,32 +33,35 @@ def _iso_readable(epoch: float) -> str:
 
 
 def _safe_header_text(text: str) -> str:
-    """헤더 HTML 주석 안에 안전하게 넣을 수 있는 한 줄로 만든다.
+    """Makes a single line safe to embed inside the header HTML comment.
 
-    `why` 는 예외 메시지·경로를 그대로 담을 수 있어 임의 텍스트다 — `-->` 가
-    섞이면 주석이 거기서 끝나고 그 뒤의 `captured=`/`captured_utc=` 가
-    본문으로 새 버린다(리뷰 #3). 개행도 접어서 헤더가 항상 한 줄(따라서 항상
-    첫 줄)이도록 한다 — `_is_own_outbox_file` 이 첫 줄만 본다."""
+    `why` can carry an exception message or path verbatim, so it's arbitrary
+    text — if `-->` sneaks in, the comment ends right there and the
+    `captured=`/`captured_utc=` after it leaks into the body (review #3).
+    Newlines are also folded so the header is always one line (and therefore
+    always the first line) — `_is_own_outbox_file` only looks at the first line."""
     return text.replace("-->", "--&gt;").replace("\n", " ").replace("\r", " ")
 
 
 def file_drop(bundle: HandoffBundle, why: str, *, now: float) -> InstallReceipt:
-    """보편 바닥. 주입 경로가 전부 막혀도 사람이 읽을 파일은 남는다.
+    """The universal floor. Even if every injection path is blocked, a
+    human-readable file is left behind.
 
-    **이 함수도 예외를 던지지 않는다.** 레포 루트가 읽기 전용(CI 체크아웃,
-    root 소유 마운트, 디스크 꽉 찬 경우)이면 바닥마저 무너지는데, deliver() 의
-    '절대 던지지 않는다' 계약은 정확히 그 지점에서 깨져선 안 된다. 쓸 수 없으면
-    그 사실을 receipt 에 담아 돌려준다.
+    **This function also never raises.** If the repo root is read-only (CI
+    checkout, a root-owned mount, disk full), even the floor collapses, and
+    exactly there is where deliver()'s "never raises" contract must not
+    break. If it can't write, that fact is carried back in the receipt.
     """
     path = ""
     try:
         directory = os.path.join(bundle.repo_root, OUTBOX_DIR)
         os.makedirs(directory, exist_ok=True)
-        # git status 에 `.omhc/` 가 새지 않도록 등재를 시도한다(#36 리뷰 #1:
-        # `.omhc/` 를 방금 만들었을 때만 시도하면, 이미 outbox 가 있던
-        # 기존 사용자는 영영 등재되지 않는다 — 매 file drop 마다 시도하되,
-        # register_outbox_exclude 자신이 이미 등재됐으면 파일 한 번 읽는
-        # 것만으로 끝낸다(invariant 2: 실패해도 file drop 자체는 계속된다)).
+        # Try to register so `.omhc/` doesn't leak into git status (#36
+        # review #1: trying only right when `.omhc/` is created would leave
+        # existing users who already had an outbox never registered — try on
+        # every file drop, but if register_outbox_exclude is already
+        # registered, finish with just one file read (invariant 2: the file
+        # drop itself continues even on failure)).
         try:
             from . import agents_md
 
@@ -92,9 +96,9 @@ def deliver(
     now: Optional[float] = None,
     allow_fallbacks: bool = True,
 ) -> InstallReceipt:
-    """핸드오프를 라우팅한다. **절대 예외를 던지지 않는다.**
+    """Routes the handoff. **Never raises.**
 
-    순서: 어댑터의 install_handoff → (Codex 면) AGENTS.md Path B → 보편 바닥.
+    Order: adapter's install_handoff → (if Codex) AGENTS.md Path B → universal floor.
     """
     stamp = time.time() if now is None else now
     try:
@@ -105,8 +109,8 @@ def deliver(
     if Capability.WRITE not in getattr(adapter, "capabilities", frozenset()):
         return file_drop(bundle, "adapter is read-only", now=stamp)
 
-    # 채널 목록은 어댑터의 속성이다. 라우터에 벤더 문자열이 하나라도 있으면
-    # "어댑터 추가는 파일 하나 + 픽스처 하나" 가 거짓이 된다.
+    # The channel list is an adapter attribute. If the router held even one
+    # vendor string, "adding an adapter is one file + one fixture" would be false.
     channels = [adapter.install_handoff]
     if allow_fallbacks:
         try:
@@ -120,16 +124,16 @@ def deliver(
             return channel(bundle)
         except NoInjectionChannel as exc:
             reasons.append("no channel: {}".format(exc))
-        except Exception as exc:  # 어댑터의 나쁜 하루가 세션 시작을 깨뜨리면 안 된다
+        except Exception as exc:  # an adapter's bad day must not break session start
             reasons.append("{}: {}".format(type(exc).__name__, exc))
 
     return file_drop(bundle, "; ".join(reasons) or "no channels declared", now=stamp)
 
 
 def _is_own_outbox_file(path: str) -> bool:
-    """`file_drop` 이 만든 파일인가. 이름 규칙과 헤더를 **둘 다** 본다 —
-    이름만 보면(예: `*-to-*.md`) 사람이 우연히 같은 이름으로 둔 파일도
-    지울 수 있다."""
+    """Is this a file `file_drop` created. Checks **both** the naming
+    convention and the header — going by name alone (e.g. `*-to-*.md`) could
+    delete a file a human happened to name the same way."""
     name = os.path.basename(path)
     if not (name.endswith(".md") and "-to-" in name):
         return False
@@ -143,11 +147,13 @@ def _is_own_outbox_file(path: str) -> bool:
 
 def prune_outbox(repo_root: str, *, now: float, ttl: Optional[float] = OUTBOX_TTL_SECONDS,
                  force: bool = False) -> List[str]:
-    """omhc 가 쓴 outbox 파일을 지운다. `cmd_mark`(훅 경로, ttl 초과분만) 와
-    `omhc clear`(force=True, 전부) 가 공유한다. 지운 경로들을 돌려준다.
+    """Deletes outbox files omhc wrote. Shared by `cmd_mark` (hook path, only
+    ones past the ttl) and `omhc clear` (force=True, all of them). Returns
+    the deleted paths.
 
-    `.omhc/outbox/` 가 아예 없으면(아직 file drop 을 한 번도 안 했다) 조용히
-    아무것도 하지 않는다 — 훅 경로에서 매번 없는 디렉터리를 만들 이유가 없다.
+    If `.omhc/outbox/` doesn't exist at all (never did a file drop yet), does
+    nothing silently — no reason to create a nonexistent directory every
+    time on the hook path.
     """
     directory = os.path.join(repo_root, OUTBOX_DIR)
     try:

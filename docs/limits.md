@@ -1,4 +1,4 @@
-**English** · [한국어](limits.ko.md) · [← README](../README.md)
+[← README](../README.md)
 
 # Known limits
 

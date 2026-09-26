@@ -1,6 +1,7 @@
-"""#12: `.omhc-root` 마커와 `/` 루트 거부. `mark`/`note`/`watch` 가 각자 소유하는
-거부 동작 — `resolve_repo_root` 자체는 절대 거부하지 않는다(mint.relativize 등은
-어떤 루트에서도 계속 동작해야 한다), `locate.refused_root` 가 별도 술어다."""
+"""#12: the `.omhc-root` marker and refusing the `/` root. `mark`/`note`/`watch`
+each own their own refusal behavior — `resolve_repo_root` itself never refuses
+(mint.relativize and friends must keep working from any root); `locate.refused_root`
+is a separate predicate."""
 from __future__ import annotations
 
 import io
@@ -56,8 +57,9 @@ class TestWatchRefusesSlash(unittest.TestCase):
 
 
 class TestLogRefusesSlash(unittest.TestCase):
-    """#19: log/clear 도 note/status/watch 와 같은 거부를 한다 — 읽기·정리용이라
-    무해하지만, `/` 에서 전체 원장을 뒤지는 것도 오사용이긴 마찬가지다."""
+    """#19: log/clear refuse the same way note/status/watch do — they're
+    read/cleanup only and harmless, but scanning the whole ledger from `/` is
+    still a misuse just the same."""
 
     def test_log_at_slash_refuses(self):
         t = TempRepo()

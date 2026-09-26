@@ -1,22 +1,22 @@
-name: 기능 제안
-description: 새 하네스 어댑터, 슬롯, 명령 등
+name: Feature request
+description: A new harness adapter, slot, command, …
 labels: [enhancement]
 body:
   - type: textarea
     id: problem
     attributes:
-      label: 어떤 불편인가
-      description: 하루 작업에서 실제로 겪은 상황으로 적어 주십시오
+      label: What's the pain
+      description: Describe a situation you actually ran into during a day of work
     validations:
       required: true
   - type: textarea
     id: idea
     attributes:
-      label: 제안
+      label: Proposal
   - type: checkboxes
     id: scope
     attributes:
-      label: 범위
+      label: Scope
       options:
-        - label: 새 하네스 어댑터 (코어 수정이 필요하면 어댑터 계약 결함입니다)
-        - label: LLM 호출이나 외부 의존성이 필요하지 않음
+        - label: New harness adapter (if it needs core changes, that's an adapter-contract defect)
+        - label: Needs no LLM calls or external dependencies

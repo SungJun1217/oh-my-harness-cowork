@@ -37,7 +37,7 @@ class TestWriteAtomic(unittest.TestCase):
         self.assertTrue(os.path.exists(self.path))
 
     def test_unwritable_target_raises_oserror_for_the_caller_to_handle(self):
-        """훅 경로의 호출자가 try/except OSError 로 감싸는 계약을 유지한다."""
+        """Preserves the contract that the hook path's caller wraps this in try/except OSError."""
         with self.assertRaises(OSError):
             fsio.write_atomic("/proc/omhc-nonexistent/f.txt", "x")
 
@@ -119,8 +119,8 @@ class TestReadHelpers(unittest.TestCase):
 
 
 class TestLineAlignedSize(unittest.TestCase):
-    """#22 리뷰: baseline 으로 os.stat 크기를 그대로 쓰면 레코드 중간일 수
-    있다 — 마지막 완전한 줄 끝으로 스냅한다."""
+    """#22 review: using os.stat's size as-is for the baseline could land mid-record —
+    snaps back to the end of the last complete line."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -137,13 +137,13 @@ class TestLineAlignedSize(unittest.TestCase):
 
     def test_size_mid_line_snaps_back_to_the_previous_newline(self):
         with open(self.path, "wb") as fh:
-            fh.write(b"aaa\nbb")  # 마지막 줄이 개행 없이 끝난다(쓰는 중)
+            fh.write(b"aaa\nbb")  # the last line ends with no newline (still being written)
         size = os.path.getsize(self.path)
-        self.assertEqual(fsio.line_aligned_size(self.path, size), 4)  # "aaa\n" 뒤
+        self.assertEqual(fsio.line_aligned_size(self.path, size), 4)  # right after "aaa\n"
 
     def test_a_single_line_longer_than_the_window_falls_back_to_size(self):
         with open(self.path, "wb") as fh:
-            fh.write(b"x" * 200)  # 개행이 전혀 없다
+            fh.write(b"x" * 200)  # no newline at all
         size = os.path.getsize(self.path)
         self.assertEqual(fsio.line_aligned_size(self.path, size, window=64), size)
 
@@ -151,8 +151,9 @@ class TestLineAlignedSize(unittest.TestCase):
         self.assertEqual(fsio.line_aligned_size("/nope/missing", 42), 42)
 
     def test_a_given_fallback_wins_over_size_when_no_newline_is_found(self):
-        """리뷰(3차) #3: window 안에 개행이 없으면 과대평가(size 그대로)
-        대신 호출자가 준 안전한 fallback(예: 이전 baseline)을 쓴다."""
+        """Review (round 3) #3: if there's no newline within window, use the
+        caller-provided safe fallback (e.g. a previous baseline) instead of
+        overestimating (size as-is)."""
         with open(self.path, "wb") as fh:
             fh.write(b"x" * 200)
         size = os.path.getsize(self.path)

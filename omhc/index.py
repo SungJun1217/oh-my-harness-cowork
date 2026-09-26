@@ -6,7 +6,7 @@ from typing import Iterable, List, NamedTuple, Optional, Tuple
 from . import fsio
 from .event import ARG_LIMIT
 
-# 열 순서. 행당 60~90바이트를 목표로 한다.
+# Column order. Targets 60-90 bytes per row.
 COLUMNS = ("seq", "epoch", "author", "verb", "ok", "offset", "length", "paths", "arg")
 
 
@@ -23,19 +23,21 @@ class Row(NamedTuple):
 
 
 def _clean(text: str) -> str:
-    """TSV 행 모양을 깨뜨릴 문자를 없앤다.
+    """Strips characters that would break the TSV row shape.
 
-    색인은 포인터이므로 충실도를 여기서 지킬 필요가 없다 — 원문은 offset/length
-    로 원본에서 그대로 읽는다.
+    The index is a pointer, so fidelity doesn't need to be kept here — the
+    original text is read straight from the source via offset/length.
     """
     return text.replace("\t", " ").replace("\n", " ").replace("\r", " ")
 
 
 def append_rows(path: str, events: Iterable) -> int:
-    """Event 를 색인에 덧붙인다. 되쓰지 않으므로 중단된 세션에서도 이어진다."""
+    """Appends Events to the index. Never rewrites, so it survives an
+    interrupted session too."""
     lines = []
     for ev in events:
-        # 본문(text)은 담지 않는다. 담으면 아카이브가 원본 두 벌이 된다.
+        # Body text isn't stored here. Storing it would give the archive two
+        # copies of the original.
         lines.append(
             "\t".join(
                 (
@@ -58,7 +60,8 @@ def append_rows(path: str, events: Iterable) -> int:
 
 
 def rows(path: str) -> List[Row]:
-    """색인을 읽는다. 잘린 마지막 행은 건너뛴다 — 중단된 쓰기의 정상적 결과다."""
+    """Reads the index. Skips a truncated last row — the normal result of an
+    interrupted write."""
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             raw = fh.read()
@@ -66,7 +69,8 @@ def rows(path: str) -> List[Row]:
         return []
     out: List[Row] = []
     lines = raw.split("\n")
-    # 마지막 원소는 개행 뒤의 빈 문자열이어야 한다. 아니면 잘린 행이다.
+    # The last element should be the empty string after the final newline.
+    # If it isn't, the last row was truncated.
     if lines and lines[-1] != "":
         lines = lines[:-1]
     for line in lines:
@@ -98,16 +102,16 @@ def _parse(line: str) -> Optional[Row]:
         return None
 
 
-# 꼬리에서 읽을 바이트 수. 한 행이 115바이트쯤이므로 4KB면 마지막 온전한 행을
-# 확실히 담는다.
+# Bytes to read from the tail. A row is roughly 115 bytes, so 4KB reliably
+# captures the last complete row.
 _TAIL_BYTES = 4096
 
 
 def last_row(path: str) -> Optional[Row]:
-    """마지막 온전한 행. 파일 전체를 파싱하지 않는다.
+    """Last complete row. Doesn't parse the whole file.
 
-    실측: 56KB 색인에서 rows() 는 473행을 파싱해 정수 하나를 돌려주느라 2.05ms 가
-    걸렸고, status 와 watch.lag 은 그것을 세션마다 루프로 돌린다.
+    Measured: on a 56KB index, rows() took 2.05ms parsing 473 rows just to
+    return a single integer, and status/watch.lag loop this per session.
     """
     try:
         size = os.path.getsize(path)
@@ -121,9 +125,9 @@ def last_row(path: str) -> Optional[Row]:
     if lines and lines[-1] == b"":
         lines = lines[:-1]
     else:
-        lines = lines[:-1]  # 잘린 마지막 행은 버린다
+        lines = lines[:-1]  # drop the truncated last row
     if size > _TAIL_BYTES and lines:
-        lines = lines[1:]  # 앞쪽 잘린 행도 버린다
+        lines = lines[1:]  # drop the truncated leading row too
     for raw in reversed(lines):
         parsed = _parse(raw.decode("utf-8", "replace"))
         if parsed is not None:
@@ -132,7 +136,7 @@ def last_row(path: str) -> Optional[Row]:
 
 
 def watermark(path: str) -> int:
-    """다음 읽기를 시작할 소스 파일 내 바이트 위치."""
+    """The byte position in the source file where the next read should start."""
     last = last_row(path)
     return (last.offset + last.length) if last else 0
 
@@ -143,19 +147,23 @@ def last_seq(path: str) -> int:
 
 
 def append_new(path: str, events: Iterable) -> int:
-    """아직 색인되지 않은 이벤트만 덧붙인다. brief 와 watch.sweep 이 같은 규칙을
-    쓴다 — 둘이 어긋나면 데몬이 돌 때 같은 이벤트가 두 번 색인된다.
+    """Appends only events not yet indexed. `brief` and `watch.sweep` share this
+    rule — if they diverged, the daemon running would double-index the same
+    event.
 
-    커서는 seq 가 아니라 소스 파일의 바이트 offset 이다(#23). seq 는 파서가 매기는
-    서수라 파서가 레코드를 더 버리도록 바뀌면 업그레이드 전에 색인된 세션의 이후
-    이벤트 seq 가 예전보다 작아지고, `seq > last_seq` 로 고르면 그만큼이 영영
-    색인되지 않는다(반대로 더 많이 읽게 바뀌면 중복된다). 바이트 위치는 파서와
-    무관하다. 한 레코드에서 나온 이벤트는 같은 offset 을 공유하고 항상 한 번에
-    읽히므로 "마지막 행의 레코드 끝 이후" 로 고르면 빠짐도 겹침도 없다.
+    The cursor is the source file's byte offset, not seq (#23). seq is an
+    ordinal the parser assigns; if the parser later changes to drop more
+    records, seq for later events in an already-indexed session shifts down,
+    and picking by `seq > last_seq` would leave that many events unindexed
+    forever (conversely, parsing more would duplicate them). A byte position
+    is parser-independent. Events from one record share an offset and are
+    always read together, so picking "after the last row's record end" misses
+    nothing and double-counts nothing.
 
-    덧붙이는 행의 seq 는 이 색인의 마지막 seq 에서 이어 다시 매긴다. 파서 seq 를
-    그대로 쓰면 위 경우에 기존 행과 번호가 겹쳐 `show <세션>#N` 이 엉뚱한 행을
-    연다. 파서가 그대로면 두 번호는 같다.
+    Appended rows get seq renumbered continuing from this index's last seq.
+    Using the parser's seq as-is would collide with existing rows in the case
+    above and make `show <session>#N` open the wrong row. If the parser is
+    unchanged the two numbers are the same anyway.
     """
     cursor = watermark(path)
     seq = last_seq(path)
@@ -179,8 +187,9 @@ REFS_NAME = "refs.tsv"
 
 
 def write_refs(state_dir: str, ref, tags) -> None:
-    """태그 → (세션, 소스 경로, 오프셋, 길이). 900바이트 안에 세션 id 가 없어도
-    `omhc show E1` 이 풀리는 근거다. 매 표식마다 다시 쓴다."""
+    """Tag -> (session, source path, offset, length). This is what lets
+    `omhc show E1` resolve even though the 900-byte body has no session id.
+    Rewritten on every handoff."""
     lines = [
         "\t".join((tag, ref.session_id, ref.source_path, str(ev.offset),
                    str(ev.length), str(ev.seq)))
