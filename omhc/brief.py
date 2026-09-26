@@ -172,6 +172,7 @@ def compute(
     budget: int = mint.BUDGET,
     force: bool = False,
     dry_run: bool = False,
+    from_hook: bool = False,
 ) -> str:
     """The marker body to deliver, or an empty string if there's nothing to send.
 
@@ -282,7 +283,8 @@ def compute(
     # went in.
     try:
         receipt = deliver.deliver(
-            HandoffBundle(body_md=body, repo_root=repo_root, to_adapter_id=my_harness),
+            HandoffBundle(body_md=body, repo_root=repo_root, to_adapter_id=my_harness,
+                          from_hook=from_hook),
             home=home, now=stamp,
         )
         if receipt.channel == "nowhere":
@@ -294,6 +296,16 @@ def compute(
     due.mark_delivered(state, watermark, to_harness=my_harness, epoch=stamp,
                        offset=end_offset)
     return body
+
+
+def _called_from_hook(payload: dict, session_id: str) -> bool:
+    """Is brief running inside a real SessionStart hook (#38).
+
+    Both harnesses send a session id and `source` (startup/resume/compact) —
+    `mark` already relies on `source`, measured on both. A hand-piped
+    `{"cwd": ...}` has neither, so manual calls keep the config check.
+    """
+    return bool(session_id) and bool(payload.get("source") or payload.get("hook_event_name"))
 
 
 def emit(
@@ -338,6 +350,7 @@ def emit(
             budget=budget,
             force=force,
             dry_run=dry_run,
+            from_hook=_called_from_hook(payload, session_id),
         )
         if not body:
             return 0

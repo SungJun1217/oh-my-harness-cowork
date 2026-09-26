@@ -944,3 +944,34 @@ class TestLastRead(unittest.TestCase):
         with open(os.path.join(state, brief.LAST_READ_NAME), "w") as fh:
             fh.write("{not json")
         self.assertIsNone(brief.read_last_read(state))
+
+
+class TestCalledFromHook(unittest.TestCase):
+    """#38: only a real hook payload proves the hook's stdout is being read."""
+
+    def test_a_hook_payload_has_a_session_id_and_a_source(self):
+        self.assertTrue(brief._called_from_hook({"session_id": "s", "source": "startup"}, "s"))
+        self.assertTrue(brief._called_from_hook(
+            {"session_id": "s", "hook_event_name": "SessionStart"}, "s"))
+
+    def test_a_hand_piped_payload_is_not_a_hook(self):
+        self.assertFalse(brief._called_from_hook({"cwd": "/r"}, ""))
+        self.assertFalse(brief._called_from_hook({}, ""))
+        self.assertFalse(brief._called_from_hook({"session_id": "s"}, "s"))
+
+    def test_emit_passes_it_through_to_delivery(self):
+        h = Harness()
+        self.addCleanup(h.close)
+        h.plant_codex_session()
+        seen = []
+        real = deliver.deliver
+
+        def spy(bundle, **kw):
+            seen.append(bundle.from_hook)
+            return real(bundle, **kw)
+
+        with mock.patch.object(brief.deliver, "deliver", side_effect=spy):
+            brief.emit(harness="claude-code", home=h.home, now=NOW, out=io.StringIO(),
+                       stdin_text=json.dumps({"cwd": h.repo_root, "session_id": "me1",
+                                              "source": "startup"}))
+        self.assertEqual(seen, [True])

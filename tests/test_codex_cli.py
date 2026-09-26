@@ -2430,3 +2430,35 @@ class TestReadSessionSince(unittest.TestCase):
             self.assertEqual(since2.end_offset, os.path.getsize(path))
         finally:
             os.unlink(path)
+
+
+class TestHookProvesPathA(unittest.TestCase):
+    """#38: inside the hook, stdout already delivered — never also write Path B."""
+
+    def _repo(self, base: str) -> str:
+        root = os.path.join(base, "proj")
+        os.makedirs(root)
+        _repo.git(root, "init", "-q")
+        return root
+
+    def _deliver(self, from_hook: bool):
+        from omhc import deliver
+
+        with tempfile.TemporaryDirectory() as base, \
+             tempfile.TemporaryDirectory() as home:
+            root = self._repo(base)
+            # No hooks.json at all: the config check alone says "no hook".
+            bundle = A.HandoffBundle(body_md="[omhc] handoff\nGOAL  x\n", repo_root=root,
+                                     to_adapter_id="codex-cli", from_hook=from_hook)
+            receipt = deliver.deliver(bundle, home=home, now=1000.0)
+            return receipt, os.path.exists(os.path.join(root, "AGENTS.md"))
+
+    def test_a_running_hook_counts_as_path_a_even_if_its_config_is_unrecognized(self):
+        receipt, wrote_agents_md = self._deliver(from_hook=True)
+        self.assertEqual(receipt.channel, "sessionstart-hook")
+        self.assertFalse(wrote_agents_md, "stdout already delivered; Path B would duplicate it")
+
+    def test_a_manual_call_still_falls_back_to_agents_md(self):
+        receipt, wrote_agents_md = self._deliver(from_hook=False)
+        self.assertEqual(receipt.channel, "agents-md")
+        self.assertTrue(wrote_agents_md)
