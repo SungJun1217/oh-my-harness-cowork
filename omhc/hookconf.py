@@ -41,6 +41,15 @@ from . import fsio
 #     doesn't match `'mark` (which starts with a quote).
 _HOME_RE = re.compile(r"\$\{HOME\}|\$HOME\b")
 
+# v2 phase 2 (#42): the events omhc ever installs its own hooks under. Every
+# function below defaults to "SessionStart" (unchanged behavior for existing
+# callers) and takes an explicit `event=` to operate on "UserPromptSubmit"
+# instead — so a caller that never passes `event=` sees exactly today's
+# behavior even though the shipped fragment files now carry a second
+# top-level key. `inspect_all`/`install_all` (below) are what combine both
+# into the single `<adapter-id> hooks` row/install step.
+MANAGED_EVENTS = ("SessionStart", "UserPromptSubmit")
+
 
 class HookConfigError(Exception):
     """Exception merge/strip raise to fail closed. Means nothing was touched."""
@@ -167,7 +176,7 @@ def _parse_call(command: str) -> Optional[OmhcCall]:
         return None
     if os.path.basename(argv[0]) != "omhc":
         return None
-    if len(argv) < 2 or argv[1] not in ("mark", "brief"):
+    if len(argv) < 2 or argv[1] not in ("mark", "brief", "turn"):
         return None
     flags: Dict[str, str] = {}
     rest = argv[2:]
@@ -253,13 +262,18 @@ def _diff_reason(shipped: List[OmhcCall], installed: List[OmhcCall]) -> str:
     return "commands differ"  # shouldn't be reached (if everything above matched this wouldn't be called), kept defensively.
 
 
-def inspect(config_path: str, fragment: Dict[str, list], home: str) -> Tuple[bool, str]:
+def inspect(config_path: str, fragment: Dict[str, list], home: str,
+           event: str = "SessionStart") -> Tuple[bool, str]:
     """Judges install state. Never raises — the caller (cmd_status) wraps it,
     but this function is a diagnostic tool in its own right so it's written
     to fail closed on its own.
 
     `fragment` is the `hooks` value from `load_fragment()`, i.e. the fragment
-    that harness currently ships.
+    that harness currently ships. `event` (v2 phase 2, #42) picks which of
+    its top-level keys to judge — defaults to "SessionStart" so every
+    existing caller that never passes `event=` sees exactly today's
+    behavior, even now that the shipped fragments also carry a
+    "UserPromptSubmit" key for `omhc turn`. `inspect_all` combines both.
     """
     try:
         with open(config_path, encoding="utf-8") as fh:
@@ -276,10 +290,11 @@ def inspect(config_path: str, fragment: Dict[str, list], home: str) -> Tuple[boo
     if not isinstance(conf, dict):
         return False, "cannot parse {}".format(config_path)
 
-    return _judge(conf.get("hooks"), fragment, home, config_path)
+    return _judge(conf.get("hooks"), fragment, home, config_path, event=event)
 
 
-def inspect_toml(config_path: str, fragment: Dict[str, list], home: str) -> Tuple[bool, str]:
+def inspect_toml(config_path: str, fragment: Dict[str, list], home: str,
+                 event: str = "SessionStart") -> Tuple[bool, str]:
     """The TOML counterpart of `inspect()` (per the official docs, config.toml's
     inline `[[hooks.<Event>]]` loads into the same `hooks.<Event>[].hooks[]`
     structure as hooks.json). 3.9 has no tomllib, so `parse_toml_hooks` picks
@@ -302,17 +317,46 @@ def inspect_toml(config_path: str, fragment: Dict[str, list], home: str) -> Tupl
         return False, "cannot parse {}".format(config_path)
     if not hooks_by_event:
         return False, "not installed in {} — run `omhc hooks install`".format(config_path)
-    return _judge(hooks_by_event, fragment, home, config_path)
+    return _judge(hooks_by_event, fragment, home, config_path, event=event)
+
+
+def inspect_all(config_path: str, fragment: Dict[str, list], home: str,
+                events: Tuple[str, ...] = MANAGED_EVENTS) -> Tuple[bool, str]:
+    """Combines `inspect()` across every event the shipped `fragment` actually
+    declares (v2 phase 2, #42) — the single verdict `cmd_status`'s
+    `<adapter-id> hooks` row and `cmd_hooks`'s pre/post-install check use, so
+    an install that only has yesterday's SessionStart group (missing the new
+    `omhc turn` UserPromptSubmit group) is flagged FAIL and the message tells
+    the human to rerun `omhc hooks install`, instead of quietly staying PASS
+    forever. An event absent from `fragment` (e.g. a harness whose fragment
+    never grew a second group) isn't judged at all — same reasoning as
+    `_judge`'s "other events are ignored"."""
+    details = []
+    ok = True
+    for event in events:
+        if not fragment.get(event):
+            continue
+        e_ok, detail = inspect(config_path, fragment, home, event=event)
+        if not e_ok:
+            ok = False
+            details.append("{}: {}".format(event, detail))
+    if not details:
+        return True, "installed"
+    return ok, ("installed" if ok else "; ".join(details))
 
 
 def _judge(hooks_by_event, fragment: Dict[str, list], home: str,
-           config_path: str) -> Tuple[bool, str]:
+           config_path: str, event: str = "SessionStart") -> Tuple[bool, str]:
     """Shared by `inspect`/`inspect_toml` — compares the installed
     hooks.SessionStart shape against the shipped fragment. Whether the
     source is JSON (above) or TOML (parse_toml_hooks), the same
     `{event: [{"matcher":…, "hooks":[{"type":…, "command":…}]}]}` shape gets
-    judged identically."""
-    installed_entries = _extract_entries(hooks_by_event)
+    judged identically. `_matcher_runs_at_startup`'s "startup" semantics are
+    Claude Code SessionStart terminology, but an empty/"*" matcher (what
+    every shipped fragment group uses) means "always" regardless of event, so
+    reusing it for "UserPromptSubmit" groups is still correct — it just never
+    gets exercised by the "narrower than startup" branch on that event."""
+    installed_entries = _extract_entries(hooks_by_event, event=event)
     installed_omhc_any = _omhc_calls(installed_entries)
     if not installed_omhc_any:
         return False, "not installed in {} — run `omhc hooks install`".format(config_path)
@@ -329,10 +373,14 @@ def _judge(hooks_by_event, fragment: Dict[str, list], home: str,
             if _parse_call(entry.command) is not None and not _runnable_at_startup(entry):
                 reason = _not_runnable_reason(entry)
                 break
+        # Kept as "at session start" verbatim (tests pin this substring) even
+        # for the "UserPromptSubmit" event — the phrase describes
+        # `_runnable_at_startup`'s judgment (an empty/"*" matcher fires on
+        # every turn too), not literally the SessionStart event name.
         return False, ("omhc hooks never run at session start ({}) — "
                         "run `omhc hooks install`").format(reason or "not runnable")
 
-    shipped_entries = _extract_entries(fragment)
+    shipped_entries = _extract_entries(fragment, event=event)
     shipped_any = _omhc_calls(shipped_entries)
     # Comparing only runnable calls could still show PASS with an extra omhc
     # group that never actually runs (e.g. a second brief pinned to matcher
@@ -361,9 +409,10 @@ def _judge(hooks_by_event, fragment: Dict[str, list], home: str,
     return True, "installed"
 
 
-def has_runnable_call(config_path: str, sub: str, flags: Optional[Dict[str, str]] = None) -> bool:
-    """Does `config_path`'s SessionStart have an omhc call to `sub` (e.g.
-    "brief") that actually runs at session start? If `flags` is given, that
+def has_runnable_call(config_path: str, sub: str, flags: Optional[Dict[str, str]] = None,
+                      event: str = "SessionStart") -> bool:
+    """Does `config_path`'s `event` (default "SessionStart") have an omhc
+    call to `sub` (e.g. "brief") that actually runs? If `flags` is given, that
     key=value must match too (e.g. `{"--harness": "codex-cli"}`).
 
     Used on the hook path (install_handoff -> hook_is_installed) — never
@@ -375,7 +424,8 @@ def has_runnable_call(config_path: str, sub: str, flags: Optional[Dict[str, str]
             conf = json.loads(fh.read())
         if not isinstance(conf, dict):
             return False
-        for call in _omhc_calls(_extract_entries(conf.get("hooks")), runnable_only=True):
+        for call in _omhc_calls(_extract_entries(conf.get("hooks"), event=event),
+                                runnable_only=True):
             if call.sub != sub:
                 continue
             if flags and any(call.flags.get(k) != v for k, v in flags.items()):
@@ -387,7 +437,8 @@ def has_runnable_call(config_path: str, sub: str, flags: Optional[Dict[str, str]
 
 
 def has_runnable_call_toml(config_path: str, sub: str,
-                          flags: Optional[Dict[str, str]] = None) -> bool:
+                          flags: Optional[Dict[str, str]] = None,
+                          event: str = "SessionStart") -> bool:
     """The TOML counterpart of `has_runnable_call` — looks at config.toml's
     inline `[[hooks.<Event>]]` (#32). Never raises: every failure is False."""
     try:
@@ -396,7 +447,8 @@ def has_runnable_call_toml(config_path: str, sub: str,
         hooks_by_event = parse_toml_hooks(text)
         if not hooks_by_event:
             return False
-        for call in _omhc_calls(_extract_entries(hooks_by_event), runnable_only=True):
+        for call in _omhc_calls(_extract_entries(hooks_by_event, event=event),
+                                runnable_only=True):
             if call.sub != sub:
                 continue
             if flags and any(call.flags.get(k) != v for k, v in flags.items()):
@@ -606,12 +658,16 @@ def _load(config_path: str) -> dict:
     return obj
 
 
-def _strip_hooks(conf: dict) -> dict:
-    """Removes only omhc's own mark/brief hooks from hooks.SessionStart, in a
-    copy of `conf` (the full config object). Unlike install.sh's string
+def _strip_hooks(conf: dict, event: str = "SessionStart") -> dict:
+    """Removes only omhc's own mark/brief/turn hooks from `hooks.<event>`, in
+    a copy of `conf` (the full config object). Unlike install.sh's string
     regex, this judges structurally with `_parse_call` — the same mistake
     (failing to remove a genuinely running hook, or removing someone else's
     hook like `echo 'omhc brief'`) is just as dangerous here.
+
+    `event` (v2 phase 2, #42) defaults to "SessionStart", matching every
+    existing caller unchanged; `strip_all`/`omhc hooks uninstall` also pass
+    "UserPromptSubmit" to remove `omhc turn`'s group.
 
     If the shape is unexpected (e.g. hooks isn't an object), fails closed by
     the same principle as install.sh's uninstall path — it neither leaves nor
@@ -623,19 +679,19 @@ def _strip_hooks(conf: dict) -> dict:
         return conf
     if not isinstance(hooks, dict):
         raise HookConfigError("hooks is not an object")
-    groups = hooks.get("SessionStart")
+    groups = hooks.get(event)
     if groups is None:
         return conf
     if not isinstance(groups, list):
-        raise HookConfigError("hooks.SessionStart is not an array")
+        raise HookConfigError("hooks.{} is not an array".format(event))
 
     kept_groups = []
     removed_any = False
     for group in groups:
         if not isinstance(group, dict):
-            raise HookConfigError("a SessionStart group is not an object")
+            raise HookConfigError("a {} group is not an object".format(event))
         if not isinstance(group.get("hooks"), list):
-            raise HookConfigError("a SessionStart group's hooks is not an array")
+            raise HookConfigError("a {} group's hooks is not an array".format(event))
         original_hooks = group["hooks"]
         kept_hooks = [
             h for h in original_hooks
@@ -658,14 +714,14 @@ def _strip_hooks(conf: dict) -> dict:
         # else: this group had only omhc hooks and is now empty — drop the whole group.
 
     if not removed_any:
-        return conf  # leave SessionStart itself exactly as it was (even if it was an empty array).
+        return conf  # leave this event exactly as it was (even if it was an empty array).
 
     if kept_groups:
-        hooks["SessionStart"] = kept_groups
+        hooks[event] = kept_groups
     else:
-        del hooks["SessionStart"]
+        del hooks[event]
     if not hooks:
-        # If hooks only held SessionStart, it's now an empty object — leaving
+        # If hooks only held this event, it's now an empty object — leaving
         # it would leave `{"hooks": {}}` as a stray artifact in a config that
         # never installed anything.
         del conf["hooks"]
@@ -706,21 +762,35 @@ def _write_if_changed(config_path: str, original: dict, updated: dict) -> bool:
     return True
 
 
-def strip(config_path: str) -> bool:
-    """Removes only omhc's own hooks from `config_path`'s hooks.SessionStart.
+def strip(config_path: str, event: str = "SessionStart") -> bool:
+    """Removes only omhc's own hooks from `config_path`'s `hooks.<event>`.
     True if something changed, False if there was no omhc hook to begin
     with."""
     original = _load(config_path)
-    updated = _strip_hooks(original)
+    updated = _strip_hooks(original, event=event)
     return _write_if_changed(config_path, original, updated)
 
 
-def merge(config_path: str, fragment: Dict[str, list], home: str) -> bool:
+def strip_all(config_path: str, events: Tuple[str, ...] = MANAGED_EVENTS) -> bool:
+    """`strip()` over every managed event in one file write (v2 phase 2,
+    #42) — `omhc hooks uninstall` needs both the SessionStart (mark/brief)
+    and UserPromptSubmit (turn) groups gone, and doing that as two separate
+    `strip()` calls would also produce two separate backups/mtimes for what
+    a human experiences as one uninstall."""
+    original = _load(config_path)
+    updated = original
+    for event in events:
+        updated = _strip_hooks(updated, event=event)
+    return _write_if_changed(config_path, original, updated)
+
+
+def merge(config_path: str, fragment: Dict[str, list], home: str,
+         event: str = "SessionStart") -> bool:
     """Merges `fragment` (=the `hooks` value from `load_fragment()`) into
     `config_path`. First `strip`s to prevent duplicates, then appends
-    fragment's SessionStart groups — so when a `hooks/*.json` command
-    changes (e.g. `--wire sdk` -> `claude`), the new command lands next to
-    the old one instead of making brief run twice.
+    fragment's `event` groups (default "SessionStart") — so when a
+    `hooks/*.json` command changes (e.g. `--wire sdk` -> `claude`), the new
+    command lands next to the old one instead of making brief run twice.
 
     Leaves an install alone if `inspect()` already PASSes it — a person who
     hand-merged their own groups around the omhc group, added fields like
@@ -734,13 +804,50 @@ def merge(config_path: str, fragment: Dict[str, list], home: str) -> bool:
     SessionStart group's omhc calls against the shipped fragment down to
     order, count, and flags, so a PASS already means there are no duplicate
     omhc calls."""
-    ok, _detail = inspect(config_path, fragment, home)
+    ok, _detail = inspect(config_path, fragment, home, event=event)
     if ok:
         return False
     original = _load(config_path)
-    updated = _strip_hooks(original)
-    frag_groups = fragment.get("SessionStart") or []
+    updated = _strip_hooks(original, event=event)
+    frag_groups = fragment.get(event) or []
     if frag_groups:
         hooks = updated.setdefault("hooks", {})
-        hooks["SessionStart"] = list(hooks.get("SessionStart") or []) + copy.deepcopy(frag_groups)
+        hooks[event] = list(hooks.get(event) or []) + copy.deepcopy(frag_groups)
+    return _write_if_changed(config_path, original, updated)
+
+
+def install_all(config_path: str, fragment: Dict[str, list], home: str,
+                events: Tuple[str, ...] = MANAGED_EVENTS) -> bool:
+    """`merge()` over every managed event that `fragment` actually declares —
+    mirrors `strip_all` (v2 phase 2, #42). Written as **one** load/strip/merge/
+    write pass (not one `merge()` call per event) so a fresh install produces
+    one file write and one backup, not one per event — Codex's hook-trust
+    judgment is keyed off hooks.json's content/mtime, and turning one install
+    into several successive rewrites would needlessly invalidate trust an
+    extra time and leave a stale intermediate-state backup behind.
+
+    review #1 finding 4: only strips + re-appends the events whose own
+    `inspect(event=e)` doesn't already PASS — an event that's already
+    installed correctly (even if hand-merged with extra fields like
+    `timeout`, reordered, or sharing a group with a user hook — the same
+    things `merge()`'s own docstring protects for a single event) is left
+    completely untouched. Rewriting an already-passing event too (the
+    original bug here) would strip and rebuild its group from the shipped
+    fragment alone, silently dropping any such hand-added field and, worse,
+    reassigning the group — which can shift a Codex hook-trust entry keyed by
+    group/hook index even for a group that was never actually wrong.
+    """
+    to_fix = [e for e in events
+             if fragment.get(e) and not inspect(config_path, fragment, home, event=e)[0]]
+    if not to_fix:
+        return False
+    original = _load(config_path)
+    updated = original
+    for event in to_fix:
+        updated = _strip_hooks(updated, event=event)
+    for event in to_fix:
+        frag_groups = fragment.get(event) or []
+        if frag_groups:
+            hooks = updated.setdefault("hooks", {})
+            hooks[event] = list(hooks.get(event) or []) + copy.deepcopy(frag_groups)
     return _write_if_changed(config_path, original, updated)

@@ -2,4 +2,12 @@
 # omhc launcher. Finds the package even when installed as a symlink.
 set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+# `turn` (v2 phase 2, #42) runs on every human turn (Codex runs it
+# synchronously on the turn's critical path, measured) — it's routed here
+# without ever importing omhc.cli, which pulls in agents_md/deliver/gate/
+# hookconf/index/managed_block/pin/watch that this path never needs.
+if [ "${1:-}" = "turn" ]; then
+  shift
+  exec python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from omhc.turn import main; sys.exit(main(sys.argv[2:]))' "$here" "$@"
+fi
 exec python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from omhc.cli import main; sys.exit(main(sys.argv[2:]))' "$here" "$@"

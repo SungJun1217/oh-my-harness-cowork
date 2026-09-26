@@ -1186,6 +1186,24 @@ class TestMetadataKindDiscriminator(unittest.TestCase):
         self.assertEqual(len([e for e in read.events if e.author == "human"]), 1)
         self.assertIn("kind:hooks.additional_context", read.dropped)
 
+    def test_turn_hooks_additional_context_developer_message_is_never_a_human_turn(self):
+        """v2 phase 2 (#42) measured fact: `omhc turn`'s own UserPromptSubmit
+        note lands in the rollout as a separate **developer** message tagged
+        content_item_kinds=["hooks.additional_context"] — one role lower on
+        the trust ladder than SessionStart's role=user injection (already
+        pinned above). role=developer is outside _PARSED_ROLES regardless of
+        kind, so this is dropped by role alone before the kind is even
+        looked at — invariant 4."""
+        read = self._read([
+            {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}},
+            self._msg("developer", "[omhc] codex-cli 01a0d2e1 (running) modified files "
+                      "you touched, since your last turn:",
+                      ["hooks.additional_context"]),
+            self._msg("user", "진짜 사람의 말", ["user.text"]),
+        ])
+        self.assertEqual(len([e for e in read.events if e.author == "human"]), 1)
+        self.assertIn("role:developer", read.dropped)
+
     def test_a_new_user_prefixed_kind_is_not_lost(self):
         """Prefix allowance means the human's words aren't lost even when a new user.* kind appears."""
         read = self._read([

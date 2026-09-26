@@ -1458,5 +1458,68 @@ class TestOnSessionStartMarkCli(unittest.TestCase):
         self.assertIsNotNone(self._captured_at())
 
 
+class TestMarkStartSize(unittest.TestCase):
+    """v2 phase 2 round 5/6 (#42): `cmd_mark`'s `start_size` field —
+    review #1 finding 2 (round 6): only recorded when it's actually
+    meaningful, never a bare 0 that would misread a resume as "just started"."""
+
+    def setUp(self):
+        self.h = Harness()
+        self.addCleanup(self.h.close)
+
+    def _mark_row(self, harness, session_id, transcript_path=None, source=None):
+        payload = {"cwd": self.h.root, "session_id": session_id}
+        if transcript_path is not None:
+            payload["transcript_path"] = transcript_path
+        if source is not None:
+            payload["source"] = source
+        args = cli.build_parser().parse_args(
+            ["mark", "--harness", harness, "--stdin", json.dumps(payload)])
+        cli.cmd_mark(args, home=self.h.home, out=io.StringIO())
+        rows = [r for r in ledger.read(repo_key=self.h.key, home=self.h.home)
+               if r.get("session") == session_id]
+        self.assertTrue(rows, "no row written")
+        return rows[-1]
+
+    def test_no_transcript_path_omits_start_size(self):
+        row = self._mark_row("codex-cli", "cx1", transcript_path=None, source="resume")
+        self.assertNotIn("start_size", row)
+
+    def test_empty_transcript_path_omits_start_size(self):
+        row = self._mark_row("codex-cli", "cx1", transcript_path="", source="resume")
+        self.assertNotIn("start_size", row)
+
+    def test_missing_file_with_resume_source_omits_start_size(self):
+        # Review #1 finding 2 (round 6): a missing file plus a non-startup
+        # source is ambiguous ("can't tell" its real history), not "empty" --
+        # recording 0 there would misread a resume as freshly started.
+        missing = os.path.join(self.h.root, "nope.jsonl")
+        row = self._mark_row("codex-cli", "cx1", transcript_path=missing, source="resume")
+        self.assertNotIn("start_size", row)
+
+    def test_missing_file_with_compact_source_omits_start_size(self):
+        missing = os.path.join(self.h.root, "nope.jsonl")
+        row = self._mark_row("codex-cli", "cx1", transcript_path=missing, source="compact")
+        self.assertNotIn("start_size", row)
+
+    def test_missing_file_with_startup_source_records_zero(self):
+        # A brand-new session correctly has nothing before this point.
+        missing = os.path.join(self.h.root, "nope.jsonl")
+        row = self._mark_row("codex-cli", "cx1", transcript_path=missing, source="startup")
+        self.assertEqual(row.get("start_size"), 0)
+
+    def test_existing_empty_file_records_zero_regardless_of_source(self):
+        path = os.path.join(self.h.root, "empty.jsonl")
+        open(path, "w").close()
+        row = self._mark_row("codex-cli", "cx1", transcript_path=path, source="resume")
+        self.assertEqual(row.get("start_size"), 0)
+
+    def test_existing_nonempty_file_records_its_line_aligned_size(self):
+        path = self.h.plant("cx1", time.time(), ledger_home="")
+        expected = os.path.getsize(path)
+        row = self._mark_row("codex-cli", "cx1", transcript_path=path, source="resume")
+        self.assertEqual(row.get("start_size"), expected)
+
+
 if __name__ == "__main__":
     unittest.main()

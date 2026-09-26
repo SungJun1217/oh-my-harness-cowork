@@ -132,11 +132,12 @@ For a project that isn't a git repo, run `touch .omhc-root` at its top once.
 | `omhc trace <path> [--all] [--last N] [--json]` | Every indexed event that modified `path`, across both harnesses' sessions. `--all` adds reads and command mentions |
 | `omhc show <E1\|#137\|abcdef01#137> [--full]` | **Reads the original bytes back by offset.** Bare `#N` means the most recently delivered session |
 | `omhc note "<text>"` | Leaves a note for the next handoff. Either harness's agent can call it |
-| `omhc hooks install\|uninstall [--harness ID]` | Merges or strips omhc's own `SessionStart` hooks |
+| `omhc hooks install\|uninstall [--harness ID]` | Merges or strips omhc's own `SessionStart` and `UserPromptSubmit` hooks |
 | `omhc clear` | Removes this repo's installed markers, outbox files and reject records |
 | `omhc watch [--stop\|--once]` | Optional accelerator daemon; results are identical without it |
 | `omhc brief --harness X --dry-run` | Previews the handoff the next session would get, without claiming it, archiving or delivering |
 | `omhc mark` / `omhc brief --harness X` | Called by the hook: record the session start, then print the handoff |
+| `omhc turn --harness X` | Called by the `UserPromptSubmit` hook on each human turn: warns, once, when the other harness modified a file this session already touched (docs/v2-concurrency.md, phase 2) |
 
 Turn it off with `OMHC_OFF=1` or an `~/.omhc/<repo-key>/off` file. Headless
 sessions (`claude -p`, `codex exec`) are never handoff sources unless you set

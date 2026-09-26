@@ -132,11 +132,12 @@ git 레포가 아닌 프로젝트라면 최상위에서 `touch .omhc-root`를 �
 | `omhc trace <path> [--all] [--last N] [--json]` | `path`를 수정한 인덱싱된 이벤트를 두 하네스 세션에 걸쳐 나열. `--all`은 읽기와 명령 언급까지 포함 |
 | `omhc show <E1\|#137\|abcdef01#137> [--full]` | **원본 바이트를 오프셋으로 조회.** 맨 `#N`은 가장 최근 전달된 세션 기준 |
 | `omhc note "<text>"` | 다음 핸드오프에 실을 메모. 양쪽 하네스의 에이전트도 부를 수 있음 |
-| `omhc hooks install\|uninstall [--harness ID]` | omhc 자신의 `SessionStart` 훅을 병합하거나 제거 |
+| `omhc hooks install\|uninstall [--harness ID]` | omhc 자신의 `SessionStart`와 `UserPromptSubmit` 훅을 병합하거나 제거 |
 | `omhc clear` | 이 레포에 설치된 마커, outbox 파일, 거부 기록을 지움 |
 | `omhc watch [--stop\|--once]` | 선택 사항인 가속용 데몬. 없어도 결과는 같음 |
 | `omhc brief --harness X --dry-run` | 다음 세션이 받을 핸드오프를 미리 봄. gate, 아카이브, 전달은 건드리지 않음 |
 | `omhc mark` / `omhc brief --harness X` | 훅이 부름. 세션 시작을 기록하고 핸드오프를 출력 |
+| `omhc turn --harness X` | `UserPromptSubmit` 훅이 매 사람 턴마다 부름. 상대 하네스가 이 세션이 이미 건드린 파일을 고쳤을 때 한 번 경고 (docs/v2-concurrency.md phase 2) |
 
 끄려면 `OMHC_OFF=1` 또는 `~/.omhc/<repo-key>/off` 파일을 쓰십시오. 헤드리스
 세션(`claude -p`, `codex exec`)은

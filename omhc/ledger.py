@@ -171,6 +171,60 @@ def clear_rejected(repo_key: str, home: Optional[str] = None) -> int:
     return removed
 
 
+# v2 phase 2 (#42): `omhc turn` runs on every human turn, so it can't afford
+# read()'s "read the whole shared ledger.jsonl into memory, then slice" cost
+# on a machine-wide file that grows across every repo ever used. Measured:
+# ~150-220 bytes/row (cmd_mark's own comment measures one mark row at ~220B),
+# so 200_000 bytes covers roughly 900-1300 of the most recent rows — enough
+# margin to find "the other harness's newest few `start` rows for this repo"
+# (capped at 3 candidates) even interleaved with other repos' traffic,
+# without ever reading rows this repo hasn't touched in a very long time.
+TAIL_BYTES = 200_000
+
+
+def read_tail(home: Optional[str] = None, repo_key: Optional[str] = None,
+             max_bytes: int = TAIL_BYTES) -> List[dict]:
+    """Like `read()`, but only looks at the last `max_bytes` of the file —
+    for a per-human-turn caller that can't afford to read a large shared
+    ledger.jsonl in full every time (`stale.py`). Not a substitute for
+    `read()` elsewhere: this can miss a repo's own rows if machine-wide
+    traffic pushed them further back than `max_bytes` — acceptable here
+    since the caller only wants "the other harness's newest few sessions",
+    never a correctness-critical full history.
+    """
+    try:
+        size = os.path.getsize(_path(home))
+    except OSError:
+        return []
+    try:
+        with open(_path(home), "rb") as fh:
+            fh.seek(max(0, size - max_bytes))
+            chunk = fh.read()
+    except OSError:
+        return []
+    lines = chunk.split(b"\n")
+    if size > max_bytes:
+        # The first line after an arbitrary seek is very likely a partial
+        # record (we landed mid-line) — drop it rather than risk feeding
+        # `json.loads` a truncated line that happens to still parse into
+        # some other unrelated (wrong) object.
+        lines = lines[1:]
+    rows: List[dict] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if repo_key is not None and row.get("repo") != repo_key:
+            continue
+        rows.append(row)
+    return rows
+
+
 def read(limit: int = DEFAULT_LIMIT, home: Optional[str] = None,
          repo_key: Optional[str] = None) -> List[dict]:
     """Reads the ledger. Broken lines are skipped (fail-open).

@@ -2,7 +2,7 @@
 
 # v2: using both harnesses at once (#2) — design
 
-Status: **phase 1 implemented** (#41); phases 2 and 3 are still proposals.
+Status: **phases 1 and 2 implemented** (#41, #42); phase 3 is still a proposal.
 v1 handled sequential use only: one harness at a time, and the handoff goes
 in only at SessionStart. Phase 1 is still SessionStart-only — it just stops
 limiting that one handoff to the single newest session.
@@ -132,7 +132,8 @@ This phase needs no new hook, no trust approval and no per-turn cost.
 
 ## Phase 2: overlap warning on each human turn
 
-Solves S2. New command `omhc turn --harness X`, wired to `UserPromptSubmit`.
+**Implemented (#42).** Solves S2. New command `omhc turn --harness X`, wired
+to `UserPromptSubmit`.
 
 **What it does, per human turn:**
 
@@ -143,7 +144,18 @@ Solves S2. New command `omhc turn --harness X`, wired to `UserPromptSubmit`.
    silently.** This is the common case and costs one `stat` per session.
 3. If it grew, read only the new tail with `read_session_since(offset,
    max_bytes=1 MiB)` and keep the `modified` paths. Advance the baseline to the
-   returned `end_offset` (same rule as today's backfill).
+   returned `end_offset` (same rule as today's backfill). The very first
+   baseline for a given foreign session (no prior observation at all) is
+   chosen by ledger **append order** (invariant 6 — never timestamps): if
+   that session's own `start` row comes after this session's (or this
+   session's row isn't even in the bounded tail read for this check), the
+   file is new territory and the baseline starts at 0 instead of the
+   file's current size — otherwise a foreign session that started and
+   edited a shared file before this session ever got to look would have
+   that edit silently skipped forever. Otherwise (the foreign session
+   already existed when this one started) that history is presumed already
+   covered by the SessionStart handoff, so the baseline is the current size
+   as before.
 4. Intersect those paths with the files **this** session has touched, kept in
    the same state file and updated from this session's own tail the same way.
 5. Print a note only when the intersection is non-empty:
@@ -151,18 +163,32 @@ Solves S2. New command `omhc turn --harness X`, wired to `UserPromptSubmit`.
 ```
 [omhc] codex-cli 01a0d2e1 (running) modified files you touched, since your last turn:
 FILE  omhc/brief.py omhc/cli.py
-PULL  omhc trace omhc/brief.py
 ```
 
-- Capped at 300 bytes. `FILE` is machine-observed, like `DID`.
+- Capped at 300 bytes. `FILE` is machine-observed, like `DID`. Every
+  overlapping foreign session is shown (not just the first found); whatever
+  doesn't fit the byte cap is disclosed as `MORE  +N files`/`+N sessions`,
+  never silently dropped.
+- No `PULL` line: unlike `mint()`'s handoff, `omhc trace` only searches the
+  index (`omhc log`/`omhc trace`'s data source), which a still-running,
+  undelivered session doesn't have unless `omhc watch` is running — the hint
+  would usually point at nothing.
 - Printed at most once per changed set; the baseline makes repeats impossible.
 
 **Prerequisite (done, #42):** `read_session_since` for the Claude adapter.
 Without it the Codex-receiving side would have to re-read a whole transcript
 (112 ms for 24 MB) every turn; measured tails on the same transcript are
 0.42 ms (64 KB) / 4.7 ms (1 MB) — same order of magnitude as Codex's. This
-was an adapter-only change (invariant 9); `omhc turn`, its `UserPromptSubmit`
-fragments and the overlap warning below are still proposed.
+was an adapter-only change (invariant 9).
+
+**Measured (this Mac, `bin/omhc turn` end to end, subprocess spawn included):**
+~80-85ms on both the no-growth fast path and the growth path — process
+startup/imports dominate the same way brief's does (the measured-facts table
+above), and the read itself stays cheap either way since it's bounded by
+`READ_CAP_BYTES` and a bounded ledger tail (`ledger.read_tail`, 200KB) rather
+than a full scan. Comfortably under the 150ms p95 target; on the higher side
+of the 80ms fast-path target on this machine, again dominated by Python
+startup, not by the comparison logic itself.
 
 **Latency budget:** 150 ms at p95 per human turn, fast path under 80 ms. The
 entry point imports only `ledger`, `fsio` and the other harness's adapter.
@@ -226,10 +252,11 @@ Other risks:
 ## Open questions
 
 1. How many older sessions should phase 1 list? **Decided: 3** (`due.MAX_SESSIONS`).
-2. Is ~60–110 ms added to every human turn acceptable?
+2. ~80-85ms measured end to end (see phase 2's "Measured" note) — acceptable.
 3. Should phase 3 start opt-in (`OMHC_LIVE=1`)? Proposed: yes.
-4. Does the model actually act on a `UserPromptSubmit` note? To be measured with
-   a logged-in sandbox before phase 2 ships.
+4. Does the model actually act on a `UserPromptSubmit` note? Still to be
+   measured with a logged-in sandbox — unrelated to whether the note is
+   correctly delivered, which phase 2 ships regardless.
 
 ## Plan
 
@@ -237,8 +264,9 @@ Split #2 into three issues, shipped in order:
 
 1. **Phase 1** (done, #41) — `due()` → `List[Watermark]`, `ALSO` slot, cross-session failure
    tags. SessionStart only.
-2. **Phase 2** — Claude `read_session_since`; `omhc turn` entry point and
-   `UserPromptSubmit` fragments; overlap warning; `status` row for the new hook.
+2. **Phase 2** (done, #42) — Claude `read_session_since`; `omhc turn` entry
+   point and `UserPromptSubmit` fragments; overlap warning; `<adapter-id>
+   hooks` row also judges the new group.
 3. **Phase 3** — live `SAID`/`FAIL` deltas behind `OMHC_LIVE=1`.
 
 Each phase adds conformance invariants: the `due()` list never revives a session

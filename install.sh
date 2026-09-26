@@ -33,27 +33,29 @@ if [ "${1:-}" = "--uninstall" ]; then
   codex_hooks=$HOME/.codex/hooks.json
 
   strip_omhc_hooks() {
-    # A direct mirror of omhc/hookconf.py's strip()/_strip_hooks() — only
-    # looks at hooks.SessionStart. Other events (Stop etc.) are left
-    # completely untouched, so a user command like "omhc done" is never
-    # caught by accident. Filters hook-by-hook and only removes a group/event
-    # when it's left empty — doesn't remove a user hook hand-merged into the
-    # same group. Command matching is narrowly scoped to the two commands
-    # (mark/brief) the harness fragments actually use. hookconf judges argv
-    # structurally (_parse_call), while this is a string regex — mistakes on
-    # the deletion side are tolerated broadly since this is delete-only and
-    # safe, but a hook that only resembles the string diverges between the
-    # two judgments. The three measured cases (`echo 'omhc brief'`, `cd ~ &&
-    # omhc brief …`·`/usr/bin/env omhc mark …`, `'omhc' 'mark' …`) are in
-    # omhc/hookconf.py's module comment, and the parity test deliberately
-    # excludes them.
+    # A direct mirror of omhc/hookconf.py's strip_all()/_strip_hooks() — only
+    # looks at hooks.SessionStart and hooks.UserPromptSubmit (v2 phase 2,
+    # #42: `omhc turn`'s hook). Other events (Stop etc.) are left completely
+    # untouched, so a user command like "omhc done" is never caught by
+    # accident. Filters hook-by-hook and only removes a group/event when it's
+    # left empty — doesn't remove a user hook hand-merged into the same
+    # group. Command matching is narrowly scoped to the three commands
+    # (mark/brief/turn) the harness fragments actually use. hookconf judges
+    # argv structurally (_parse_call), while this is a string regex —
+    # mistakes on the deletion side are tolerated broadly since this is
+    # delete-only and safe, but a hook that only resembles the string
+    # diverges between the two judgments. The three measured cases (`echo
+    # 'omhc brief'`, `cd ~ && omhc brief …`·`/usr/bin/env omhc mark …`,
+    # `'omhc' 'mark' …`) are in omhc/hookconf.py's module comment, and the
+    # parity test deliberately excludes them.
     #
     # Exit codes: 0=changed and written, 2=error (die, stops before removing
     # the binary), 3=nothing to change.
     python3 - "$1" <<'PY'
 import json, os, re, shutil, sys, tempfile
 
-OMHC_CMD = re.compile(r'''(^|[/\s"'])omhc["']?\s+(mark|brief)(\s|$|["'])''')
+OMHC_CMD = re.compile(r'''(^|[/\s"'])omhc["']?\s+(mark|brief|turn)(\s|$|["'])''')
+MANAGED_EVENTS = ("SessionStart", "UserPromptSubmit")
 
 def is_omhc_hook(h):
     return isinstance(h, dict) and isinstance(h.get("command"), str) \
@@ -80,43 +82,57 @@ def main():
     if not isinstance(hooks, dict):
         fail("%s's hooks is not an object, leaving it untouched" % target)
 
-    groups = hooks.get("SessionStart")
-    if groups is None:
-        sys.exit(3)
-    if not isinstance(groups, list):
-        fail("%s's hooks.SessionStart is not an array, leaving it untouched" % target)
-
     changed = False
-    kept_groups = []
-    for g in groups:
-        # If the shape deviates from expected (group is an object, hooks is
-        # an array), fail-closed instead of safely skipping — same principle
-        # as guard.py: don't leave or rewrite an unrecognized mechanical
-        # shape on its own.
-        if not isinstance(g, dict):
-            fail("a SessionStart group in %s is not an object, leaving it untouched" % target)
-        if not isinstance(g.get("hooks"), list):
-            fail("a SessionStart group's hooks in %s is not an array, leaving it untouched" % target)
-        kept_hooks = [h for h in g["hooks"] if not is_omhc_hook(h)]
-        if len(kept_hooks) != len(g["hooks"]):
+    for event in MANAGED_EVENTS:
+        groups = hooks.get(event)
+        if groups is None:
+            continue  # this event was never installed — nothing to strip from it.
+        if not isinstance(groups, list):
+            fail("%s's hooks.%s is not an array, leaving it untouched" % (target, event))
+
+        kept_groups = []
+        event_removed_any = False
+        for g in groups:
+            # If the shape deviates from expected (group is an object, hooks
+            # is an array), fail-closed instead of safely skipping — same
+            # principle as guard.py: don't leave or rewrite an unrecognized
+            # mechanical shape on its own.
+            if not isinstance(g, dict):
+                fail("a %s group in %s is not an object, leaving it untouched" % (event, target))
+            if not isinstance(g.get("hooks"), list):
+                fail("a %s group's hooks in %s is not an array, leaving it untouched" % (event, target))
+            kept_hooks = [h for h in g["hooks"] if not is_omhc_hook(h)]
+            if len(kept_hooks) == len(g["hooks"]):
+                # Nothing removed from this group — keep it exactly as-is,
+                # even if it's empty (review #1 finding 8: a pre-existing
+                # empty array/group this event never actually needed
+                # touching must not be reassigned or dropped just because a
+                # *different* managed event changed in this same pass).
+                kept_groups.append(g)
+                continue
             changed = True
-        if kept_hooks:
-            ng = dict(g)
-            ng["hooks"] = kept_hooks
-            kept_groups.append(ng)
-        # else: the whole group was omhc hooks only — drop the whole group
+            event_removed_any = True
+            if kept_hooks:
+                ng = dict(g)
+                ng["hooks"] = kept_hooks
+                kept_groups.append(ng)
+            # else: the whole group was omhc hooks only — drop the whole group
+
+        if not event_removed_any:
+            continue  # this event's groups are untouched — leave hooks[event] exactly as it was.
+
+        if kept_groups:
+            hooks[event] = kept_groups
+        else:
+            del hooks[event]
 
     if not changed:
         sys.exit(3)  # nothing to change — skip backup/rewrite
 
-    if kept_groups:
-        hooks["SessionStart"] = kept_groups
-    else:
-        del hooks["SessionStart"]
     if not hooks:
-        # If hooks held only SessionStart, it's now an empty object — leaving
-        # it would leave {"hooks": {}} as a trace in a config that never
-        # installed anything.
+        # If hooks held only omhc's own managed events, it's now an empty
+        # object — leaving it would leave {"hooks": {}} as a trace in a
+        # config that never installed anything.
         del conf["hooks"]
 
     shutil.copy2(target, target + ".omhc-bak")  # keeps permission bits matching the original too
@@ -168,7 +184,7 @@ PY
     rc=$?
     set -e
     case $rc in
-      0) echo "omhc uninstall: removed omhc's SessionStart hook from $f, backed up to $f.omhc-bak" ;;
+      0) echo "omhc uninstall: removed omhc's hooks from $f, backed up to $f.omhc-bak" ;;
       3) echo "omhc uninstall: no omhc hook in $f" ;;
       *) echo "omhc uninstall: failed to process $f, left it untouched (binary not removed either)" >&2; exit 2 ;;
     esac

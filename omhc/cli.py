@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 from . import (
     adapters, agents_md, brief, deliver, due, fsio, gate, hookconf, index, ledger,
-    locate, managed_block, pin, watch,
+    locate, managed_block, pin, turn, watch,
 )
 from .adapter import AdapterUnavailable, SessionRef
 
@@ -789,15 +789,53 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
         # Hook path — leave nothing in the ledger and exit quietly (invariant 2).
         return 0
     session = gate.session_id_from_hook_payload(raw) or ""
+    transcript_path = str(payload.get("transcript_path") or "")
+    source = str(payload.get("source") or "")
     row = {
         "repo": key,
         "harness": args.harness,
         "session": session,
         "event": args.event,
         "epoch": round(time.time(), 0),
-        "path": str(payload.get("transcript_path") or ""),
+        "path": transcript_path,
         "cwd": root,
+        # SessionStart's source vocabulary (startup/resume/compact/empty),
+        # already used below for the reopen hint — also stored on the row so
+        # a reader can tell a resume's own start row apart from an original
+        # startup's, if that's ever useful (stale.py doesn't need to today:
+        # `start_size` below already distinguishes "just started" from
+        # "resumed, already long").
+        "source": source,
     }
+    # v2 phase 2 round 5 (#42) / round 6 review #1 finding 2: this session's
+    # own transcript size (line-aligned, so a write mid-record never gets
+    # baked in), as of THIS genuine hook firing — lets stale._first_baseline
+    # tell "freshly started, ~0 bytes" apart from "resumed, already long" for
+    # a foreign session without ever looking at timestamps. Named
+    # `start_size`, not `size` — `size` already means something different on
+    # a `via:"scan"` row (_backfill_foreign_sessions/_reactivate_grown_sessions's
+    # own baseline-position bookkeeping, cli.py's `_rebaseline_after_fresh_start`/
+    # `_reactivate_grown_sessions` read `row["size"]` off *any* row for a
+    # session with that key present) — reusing that key here would feed this
+    # session's own transcript size into a *different* harness's backfill
+    # math the next time this row is scanned as one of that harness's own rows.
+    #
+    # Only ever set when it's actually meaningful (round 6 review — round 5
+    # always recorded it, including 0 for a missing transcript_path, which
+    # reads as "freshly started" even for a *resume* whose transcript simply
+    # isn't at that path/hasn't been found for some other reason — masking
+    # its real history exactly like the field exists to prevent):
+    #   - no `transcript_path` at all → omit (nothing to measure).
+    #   - `transcript_path` given but the file doesn't exist yet → 0 only
+    #     for a genuine `startup` (a brand-new session correctly has nothing
+    #     before this point); omit for any other `source` (resume/compact/
+    #     unknown) — a missing file there doesn't mean "no history", it means
+    #     "can't tell", and 0 would claim the opposite.
+    #   - file exists (even 0 bytes) → its line-aligned size, regardless of `source`.
+    if transcript_path:
+        if os.path.exists(transcript_path) or source == "startup":
+            row["start_size"] = fsio.line_aligned_size(
+                transcript_path, fsio.size_of(transcript_path))
     # Whether a session had a human turn isn't judged here (#21). At
     # SessionStart time, Claude's transcript isn't written yet so the
     # judgment always had to fail open, and Codex could be permanently
@@ -1594,11 +1632,8 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
                 # (hookconf.inspect) only knows about one hooks.json
                 # location.
                 custom = getattr(inst, "hooks_status", None)
-                if callable(custom):
-                    ok, detail = custom()
-                else:
-                    fragment = hookconf.load_fragment(hc.fragment_name)
-                    ok, detail = hookconf.inspect(hc.config_path, fragment, inst.home)
+                fragment = hookconf.load_fragment(hc.fragment_name)
+                ok, detail = _judge_hooks_row(hc, fragment, inst, custom)
                 hook_rows.append(("{} hooks".format(adapter_id), ok, detail))
         except Exception as exc:
             # Doesn't drop this silently — the judgment itself dying is a
@@ -1768,6 +1803,23 @@ def cmd_brief(args, *, home=None, out=sys.stdout) -> int:
     )
 
 
+# --- turn ---------------------------------------------------------------
+
+
+def cmd_turn(args, *, home=None, out=sys.stdout) -> int:
+    """`omhc turn` registered here too (v2 phase 2, #42) purely for
+    discoverability (`omhc --help`, `omhc turn --help`) and so a human can
+    call it by hand the same way as `brief`/`mark` — the real hook path goes
+    through `bin/omhc`'s dedicated branch straight to `omhc.turn.main`,
+    never through this module (see bin/omhc's comment)."""
+    return turn.emit(
+        harness=args.harness,
+        stdin_text=args.stdin if args.stdin is not None else _stdin_text(),
+        home=home,
+        out=out,
+    )
+
+
 # --- hooks --------------------------------------------------------------
 
 
@@ -1816,6 +1868,132 @@ def hook_config_targets(home) -> List[str]:
         if detected or os.path.isdir(os.path.dirname(hc.config_path)):
             ids.append(adapter_id)
     return ids
+
+
+# v2 phase 2 (#42) / review #1 finding 5 (round 2) / finding 3 (round 3):
+# omhc's own `omhc hooks install` never auto-installs into Codex's inline
+# config.toml `[hooks]` — it only ever writes hooks.json (see cmd_hooks's
+# inline-install branch below). So when the turn hook genuinely isn't in
+# hooks.json *and* isn't in the inline layer either, there's no defect an
+# `omhc hooks install` rerun could fix — the hint below is the actual fix.
+_TURN_INLINE_HINT = (
+    "turn hook (UserPromptSubmit) isn't installed automatically for an inline "
+    "config.toml install -- add [[hooks.UserPromptSubmit]] / "
+    "[[hooks.UserPromptSubmit.hooks]] (command = omhc turn --harness {}) to "
+    "config.toml by hand"
+)
+
+
+def _has_inline_layer(inst) -> bool:
+    """Does this adapter even have the *concept* of an inline `config.toml
+    [hooks]` layer (#32-style — only codex-cli, via `toml_config_path()`)?
+    Separate from whether that layer currently satisfies anything. Only used
+    by `_turn_inline_ok` below to decide whether checking it is even
+    meaningful — NOT as the gate for the unjudged downgrade (that was round
+    3's bug, see `_sessionstart_lives_inline`): codex-cli *always* has this
+    method regardless of whether config.toml is actually in play at all, so
+    using it alone as the gate downgraded every Codex install missing the
+    turn hook to unjudged — including a plain hooks.json-only install that
+    should FAIL so `omhc hooks install` fixes it (review #1 finding 1,
+    round 4)."""
+    return callable(getattr(inst, "toml_config_path", None))
+
+
+def _turn_inline_ok(inst, fragment: dict) -> bool:
+    """Does this adapter's inline `config.toml [hooks]` layer have a working
+    UserPromptSubmit -> `omhc turn` call (review #1 finding 3, round 3)?
+    False (never raises) if there's no such layer at all, or its check
+    itself fails for any reason."""
+    if not _has_inline_layer(inst):
+        return False
+    try:
+        ok, _detail = hookconf.inspect_toml(
+            inst.toml_config_path(), fragment, inst.home, event="UserPromptSubmit")
+    except Exception:
+        return False
+    return bool(ok)
+
+
+def _sessionstart_lives_inline(inst, hc) -> bool:
+    """Is the omhc SessionStart hook (mark/brief) itself *only* installed via
+    an inline `config.toml` layer — i.e. hooks.json has no omhc mark/brief
+    call at all (review #1 finding 1, round 4)? Only in that specific case is
+    a missing hooks.json turn hook "no gap `omhc hooks install` could fix" —
+    a plain hooks.json SessionStart-only install (by far the more common
+    case) must still FAIL so a rerun of `omhc hooks install` adds the missing
+    turn group, instead of being silently waved through as unjudged forever.
+    `inst.inline_hook_present()` alone isn't enough to tell these two cases
+    apart (it only answers "does config.toml have a working brief call", not
+    "does hooks.json also happen to have one") — the second condition here is
+    what round 3 was missing."""
+    inline_present = getattr(inst, "inline_hook_present", None)
+    if not (callable(inline_present) and inline_present()):
+        return False
+    has_session_start = (
+        hookconf.has_runnable_call(hc.config_path, "mark", event="SessionStart")
+        or hookconf.has_runnable_call(hc.config_path, "brief", event="SessionStart")
+    )
+    return not has_session_start
+
+
+def _judge_hooks_row(hc, fragment: dict, inst, custom) -> Tuple[Optional[bool], str]:
+    """The single `<adapter-id> hooks` verdict `cmd_status`/`cmd_hooks` show —
+    combines the SessionStart judgment (a harness's own `custom_status()`
+    behavioral check, e.g. codex-cli's multi-layer trust judgment, if it
+    implements one — else the plain structural `hookconf.inspect`) with the
+    UserPromptSubmit (`omhc turn`) judgment (v2 phase 2, #42). No adapter's
+    `custom_status()` knows about the turn hook, so an install with only
+    yesterday's SessionStart group must still be flagged FAIL here — this is
+    the "an old install with only SessionStart should be flagged" rule.
+    Skips the turn half entirely if the shipped fragment doesn't declare a
+    UserPromptSubmit group at all (a harness that hasn't shipped one yet).
+
+    Review #1 finding 3 (round 3) / finding 1 (round 4 — round 3's own gate
+    was wrong): a missing hooks.json turn hook is only ever downgraded to
+    unjudged (`----`, `ok=None`) with a hint when hooks.json has no omhc turn
+    call at all, the inline `config.toml` layer doesn't have a working one
+    either (`_turn_inline_ok`), **and** the SessionStart/brief hook itself
+    genuinely lives only in that inline layer (`_sessionstart_lives_inline`).
+    Round 3 downgraded any Codex install missing the turn hook, because
+    codex-cli *always* has a `toml_config_path()` method regardless of
+    whether config.toml is actually used at all — that broke the plain
+    "hooks.json SessionStart-only install → FAIL → `omhc hooks install` adds
+    the turn group → PASS" upgrade path entirely for Codex. An omhc turn call
+    that genuinely exists in hooks.json but fails the check (wrong flags,
+    wrong order, …) always stays FAIL regardless of any of this —
+    `hookconf.has_runnable_call` (ignoring flags) tells "no call at all"
+    apart from "a call exists but is wrong"."""
+    if callable(custom):
+        ok, detail = custom()
+    else:
+        ok, detail = hookconf.inspect(hc.config_path, fragment, inst.home)
+    if fragment.get("UserPromptSubmit"):
+        turn_ok, turn_detail = hookconf.inspect(
+            hc.config_path, fragment, inst.home, event="UserPromptSubmit")
+        if not turn_ok:
+            has_call = hookconf.has_runnable_call(
+                hc.config_path, "turn", event="UserPromptSubmit")
+            if has_call:
+                ok = False
+                detail = "{}; turn hook: {}".format(detail, turn_detail) if detail else \
+                    "turn hook: {}".format(turn_detail)
+            elif _turn_inline_ok(inst, fragment):
+                pass  # satisfied via config.toml -- no FAIL, no downgrade at all.
+            elif _sessionstart_lives_inline(inst, hc):
+                # SessionStart/brief itself only lives inline -- there's no
+                # `omhc hooks install` fix for the missing turn hook either.
+                # Unjudged with a hint, not FAIL.
+                hint = _TURN_INLINE_HINT.format(inst.adapter_id)
+                detail = "{}; {}".format(detail, hint) if detail else hint
+                if ok is not False:
+                    ok = None  # don't downgrade an existing FAIL to unjudged
+            else:
+                # hooks.json is the (or a) real channel here -- a missing
+                # turn hook is a plain FAIL that `omhc hooks install` fixes.
+                ok = False
+                detail = "{}; turn hook: {}".format(detail, turn_detail) if detail else \
+                    "turn hook: {}".format(turn_detail)
+    return ok, detail
 
 
 def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
@@ -1877,16 +2055,32 @@ def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
                         had_error = True
                     else:
                         out.write("{}: already up to date -- {}\n".format(adapter_id, detail))
+                    # Review #1 finding 5 (round 2) / finding 3 (round 3):
+                    # this branch never writes hooks.json at all, so the
+                    # turn (UserPromptSubmit) hook — which omhc only ever
+                    # installs there — is never picked up for an inline
+                    # SessionStart/brief install either, *unless* the inline
+                    # layer already has a working turn entry of its own. Only
+                    # print the hand-add hint when it genuinely doesn't (round
+                    # 2 printed it whenever hooks.json lacked the hook, even
+                    # if the inline layer already had it).
+                    if fragment.get("UserPromptSubmit"):
+                        turn_ok, _turn_detail = hookconf.inspect(
+                            hc.config_path, fragment, inst.home, event="UserPromptSubmit")
+                        if not turn_ok and not _turn_inline_ok(inst, fragment):
+                            out.write("{}: {}\n".format(
+                                adapter_id, _TURN_INLINE_HINT.format(adapter_id)))
                     continue
-                if callable(custom_status):
-                    pre_ok, pre_detail = custom_status()
-                else:
-                    pre_ok, pre_detail = hookconf.inspect(hc.config_path, fragment, inst.home)
+                pre_ok, pre_detail = _judge_hooks_row(hc, fragment, inst, custom_status)
                 if pre_ok is not False:
                     out.write("{}: already up to date -- {}\n".format(adapter_id, pre_detail))
                     continue
                 had_backup = os.path.exists(hc.config_path)
-                changed = hookconf.merge(hc.config_path, fragment, inst.home)
+                # install_all (not merge()) — v2 phase 2 (#42) ships two
+                # event groups (SessionStart's mark/brief, UserPromptSubmit's
+                # turn) in one fragment file; this installs whichever of them
+                # isn't already up to date, in one write.
+                changed = hookconf.install_all(hc.config_path, fragment, inst.home)
                 if changed:
                     out.write("{}: installed -> {}\n".format(adapter_id, hc.config_path))
                     if had_backup:
@@ -1896,10 +2090,7 @@ def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
                         out.write("{}: {}\n".format(adapter_id, hc.post_write_note))
                 else:
                     out.write("{}: already up to date\n".format(adapter_id))
-                if callable(custom_status):
-                    ok, detail = custom_status()
-                else:
-                    ok, detail = hookconf.inspect(hc.config_path, fragment, inst.home)
+                ok, detail = _judge_hooks_row(hc, fragment, inst, custom_status)
                 out.write("{}: {} -- {}\n".format(
                     adapter_id, "PASS" if ok else "FAIL", detail))
                 if not ok:
@@ -1910,7 +2101,7 @@ def cmd_hooks(args, *, home=None, out=sys.stdout, err=None) -> int:
                     # (#7 review 2).
                     had_error = True
             else:
-                changed = hookconf.strip(hc.config_path)
+                changed = hookconf.strip_all(hc.config_path)
                 if changed:
                     out.write("{}: removed from {}\n".format(adapter_id, hc.config_path))
                     out.write("{}: backup {}\n".format(
@@ -2010,6 +2201,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Shows only the body as text; leaves gate/archive/delivery untouched")
     p.add_argument("--stdin", default=None, help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_brief)
+
+    p = sub.add_parser(
+        "turn", help="Hook path: warns when the other harness modified a file you touched")
+    p.add_argument("--harness", required=True)
+    p.add_argument("--stdin", default=None, help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_turn)
 
     p = sub.add_parser("mark", help="Records a session start in the ledger")
     p.add_argument("--harness", required=True)
