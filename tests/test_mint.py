@@ -337,5 +337,110 @@ class TestShape(unittest.TestCase):
         self.assertFalse(out.endswith("\n\n"))
 
 
+class TestAlsoLines(unittest.TestCase):
+    """v2 phase 1 (#41): older undelivered sessions become ALSO lines."""
+
+    def _also_read(self, session_id, human, adapter_id="codex-cli", fail=False):
+        events = [ev(1, text=human, epoch=100)]
+        if fail:
+            events.append(ev(2, author="agent", verb="ran", arg="pytest", ok=False, epoch=101))
+        ref = A.SessionRef(adapter_id=adapter_id, session_id=session_id,
+                           source_path="/{}.jsonl".format(session_id), cwd="/repo",
+                           epoch=1700000000.0, size=100)
+        return A.SessionRead(ref=ref, events=tuple(events), unparsed=0, dropped={})
+
+    def test_also_line_shows_harness_id_age_and_verbatim_goal(self):
+        also = self._also_read("cx-old", "옛 세션의 사람 말")
+        out = mint.mint(read_of([ev(1, text="목표")]), to_adapter_id="claude-code",
+                        now=NOW, also=[also])
+        slots = slots_of(out)
+        self.assertIn("ALSO", slots)
+        line = slots["ALSO"][0]
+        self.assertIn("codex-cli", line)
+        self.assertIn("cx-old"[:8], line)
+        self.assertIn("옛 세션의 사람 말", line)
+
+    def test_also_line_omits_fail_when_no_unresolved_failures(self):
+        also = self._also_read("cx-old", "옛 세션의 사람 말", fail=False)
+        out = mint.mint(read_of([ev(1, text="목표")]), to_adapter_id="claude-code",
+                        now=NOW, also=[also])
+        line = slots_of(out)["ALSO"][0]
+        self.assertNotIn("FAIL", line)
+
+    def test_also_line_carries_a_failure_tag_numbered_after_the_main_session(self):
+        main = read_of([
+            ev(1, text="목표"),
+            ev(2, author="agent", verb="ran", arg="pytest tests/test_a.py", ok=False),
+        ])
+        also = self._also_read("cx-old", "옛 세션의 사람 말", fail=True)
+        out = mint.mint(main, to_adapter_id="claude-code", now=NOW, also=[also])
+        self.assertIn("[E1]", out)  # main session's own failure
+        self.assertIn("[E2]", out)  # also session's failure, numbered after E1
+
+    def test_a_no_human_also_session_does_not_consume_a_tag_number(self):
+        """Review finding 3: a no-human ALSO session must not be numbered at
+        all — the surviving session's tag stays contiguous (E1, not E2)."""
+        main = read_of([ev(1, text="목표")])
+        no_human = A.SessionRead(
+            ref=A.SessionRef(adapter_id="codex-cli", session_id="cx-m",
+                             source_path="/m.jsonl", cwd="/repo",
+                             epoch=1700000000.0, size=100),
+            events=(ev(1, author="agent", verb="ran", arg="pytest", ok=False, epoch=100),),
+            unparsed=0, dropped={},
+        )
+        also = self._also_read("cx-o", "옛 세션의 사람 말", fail=True)
+        out = mint.mint(main, to_adapter_id="claude-code", now=NOW, also=[no_human, also])
+        self.assertIn("[E1]", out)
+        self.assertNotIn("[E2]", out)
+        self.assertEqual(mint.all_tags(main, also=[no_human, also]),
+                         [[], [("E1", also.ref, also.events[1])]])
+
+    def test_also_goal_is_verbatim_human_text_never_agent_text(self):
+        """Invariant 3: never fall back to agent text for an ALSO line's GOAL."""
+        events = [ev(1, author="agent", text="에이전트의 주장")]
+        ref = A.SessionRef(adapter_id="codex-cli", session_id="cx-old",
+                           source_path="/x.jsonl", cwd="/repo", epoch=1700000000.0, size=100)
+        also = A.SessionRead(ref=ref, events=tuple(events), unparsed=0, dropped={})
+        out = mint.mint(read_of([ev(1, text="목표")]), to_adapter_id="claude-code",
+                        now=NOW, also=[also])
+        self.assertNotIn("ALSO", slots_of(out))
+        self.assertNotIn("에이전트의 주장", out)
+
+    def test_also_lines_drop_first_and_more_says_sessions(self):
+        """Under budget pressure ALSO is the lowest priority — the oldest one
+        (last add()-ed) drops first, and MORE reads '+N sessions'."""
+        main = read_of([ev(1, text="목표를 세운다 " * 20)])
+        alsos = [self._also_read("cx-{}".format(i), "옛 세션 {} 의 사람 말".format(i) * 5)
+                for i in range(3)]
+        out = mint.mint(main, to_adapter_id="claude-code", budget=mint.MIN_BUDGET + 40,
+                        now=NOW, also=alsos)
+        self.assertLessEqual(len(out.encode("utf-8")), mint.MIN_BUDGET + 40)
+        self.assertNotIn("also", " ".join(slots_of(out).get("MORE", [])).lower())
+        more = " ".join(slots_of(out).get("MORE", []))
+        if "ALSO" not in slots_of(out):
+            self.assertIn("session", more)
+
+    def test_unread_count_is_disclosed_in_more(self):
+        out = mint.mint(read_of([ev(1, text="목표")]), to_adapter_id="claude-code",
+                        now=NOW, unread=2)
+        more = " ".join(slots_of(out).get("MORE", []))
+        self.assertIn("2 sessions unread", more)
+
+    def test_zero_unread_says_nothing(self):
+        out = mint.mint(read_of([ev(1, text="목표"), ev(2, text="다음 할 일")]),
+                        to_adapter_id="claude-code", now=NOW, unread=0)
+        self.assertNotIn("MORE", slots_of(out))
+
+    def test_budget_holds_with_three_korean_also_sessions_at_min_and_full_budget(self):
+        main = read_of([ev(1, text="목표를 세운다")])
+        alsos = [self._also_read("cx-{}".format(i), "한국어로 된 이전 세션의 목표 문장 " * 6,
+                                 fail=True)
+                for i in range(3)]
+        for budget in (mint.MIN_BUDGET, 900):
+            out = mint.mint(main, to_adapter_id="claude-code", budget=budget,
+                            now=NOW, also=alsos)
+            self.assertLessEqual(len(out.encode("utf-8")), budget, budget)
+
+
 if __name__ == "__main__":
     unittest.main()

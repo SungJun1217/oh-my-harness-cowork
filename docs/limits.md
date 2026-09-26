@@ -230,10 +230,14 @@ root`; the hook path stays silent, per invariant 2) — `$HOME` is fine.
 
 ## Concurrent use is out of scope for v1
 
-The seam is a single function, `omhc/due.py::due()`. v2 changes its
-return type to `List[Watermark]` and adds `stale.py` as a second consumer
-of the same stream. v1 already records the foundation it needs (an
-untruncated `paths` column plus byte-offset ordering).
+The seam is a single function, `omhc/due.py::due()`. Phase 1 (#41) is
+done: `due()` now returns `List[Watermark]` — every eligible, undelivered
+session of the other harness since the last handoff, newest first, capped
+at `due.MAX_SESSIONS` (3) — and the newest keeps the full slot layout while
+each older one becomes one `ALSO` line in the same 900-byte budget. Phases 2
+and 3 (a per-turn overlap warning, and live progress from a still-running
+session) are still proposals. v1 already recorded the foundation this
+needed (an untruncated `paths` column plus byte-offset ordering).
 The v2 design (three phases, with measurements) is in
 [v2-concurrency.md](v2-concurrency.md) (#2).
 

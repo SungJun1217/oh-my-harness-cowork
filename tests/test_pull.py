@@ -140,14 +140,14 @@ class TestPullRowsAreInvisibleToTheThreeConsumers(unittest.TestCase):
     def test_pull_row_alone_does_not_make_a_session_due(self):
         self._write_pull_row("cx1")
         self.assertIsNone(
-            due.due(self.t.key, "claude-code", "me1", time.time(), home=self.t.home))
+            due.due_one(self.t.key, "claude-code", "me1", time.time(), home=self.t.home))
 
     def test_pull_rows_interleaved_do_not_change_due(self):
         ledger.append({"repo": self.t.key, "harness": "codex-cli", "session": "cx1",
                        "event": "start", "epoch": time.time() - 10, "path": "/p/cx1",
                        "cwd": self.t.root}, home=self.t.home)
         self._write_pull_row("cx1")
-        got = due.due(self.t.key, "claude-code", "me1", time.time(), home=self.t.home)
+        got = due.due_one(self.t.key, "claude-code", "me1", time.time(), home=self.t.home)
         self.assertIsNotNone(got)
         self.assertEqual(got.session_id, "cx1")
 

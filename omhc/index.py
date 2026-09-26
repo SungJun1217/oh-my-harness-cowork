@@ -186,14 +186,19 @@ def find(path: str, seq: int) -> Optional[Row]:
 REFS_NAME = "refs.tsv"
 
 
-def write_refs(state_dir: str, ref, tags) -> None:
+def write_refs(state_dir: str, triples) -> None:
     """Tag -> (session, source path, offset, length). This is what lets
     `omhc show E1` resolve even though the 900-byte body has no session id.
-    Rewritten on every handoff."""
+    Rewritten on every handoff.
+
+    Takes (tag, ref, event) triples rather than a single shared ref (v2
+    phase 1, #41) — a handoff can now cover several sessions (the main one
+    plus ALSO lines), and each tag needs to resolve against **its own**
+    session's ref, e.g. `omhc show E3` opening an older session's bytes."""
     lines = [
         "\t".join((tag, ref.session_id, ref.source_path, str(ev.offset),
                    str(ev.length), str(ev.seq)))
-        for tag, ev in tags
+        for tag, ref, ev in triples
     ]
     fsio.write_atomic(os.path.join(state_dir, REFS_NAME),
                       "\n".join(lines) + "\n" if lines else "")
