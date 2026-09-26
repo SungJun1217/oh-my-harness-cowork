@@ -240,6 +240,68 @@ class TestStatusRows(unittest.TestCase):
         code_json, payload = self.run_status_json()
         self.assertEqual(payload["injections"], 1)
 
+    def test_an_also_row_does_not_count_as_a_separate_injection(self):
+        """v2 phase 1 (#41): one handoff can pin/index/mark-deliver several
+        sessions (the head plus ALSO lines) — but it's still one injection,
+        not one per row."""
+        os.makedirs(self.t.state, exist_ok=True)
+        with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",
+                  encoding="utf-8") as fh:
+            fh.write("s-old2\tclaude-code\tcodex-cli\t1700000000\t\talso\n")
+            fh.write("s-old1\tclaude-code\tcodex-cli\t1700000001\t\talso\n")
+            fh.write("s-head\tclaude-code\tcodex-cli\t1700000002\t123\n")
+
+        code, text = self.run_status()
+        word, detail = _find_row(text, "pull rate")
+        self.assertEqual(word, "----")
+        self.assertIn("pulled 0 of 1 recent injections", detail)
+
+        code_json, payload = self.run_status_json()
+        self.assertEqual(payload["injections"], 1)
+
+    def test_pulling_an_also_sessions_tag_counts_toward_its_handoffs_pull_rate(self):
+        """Review finding 6: `omhc show E3` records a pull against the ALSO
+        session's own id (so `omhc log`/`show` credit the session actually
+        read) — that must still count as the handoff (head row) being
+        pulled, not vanish from the denominator entirely."""
+        os.makedirs(self.t.state, exist_ok=True)
+        with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",
+                  encoding="utf-8") as fh:
+            fh.write("s-old\tclaude-code\tcodex-cli\t1700000000\t\talso\n")
+            fh.write("s-head\tclaude-code\tcodex-cli\t1700000000\t123\n")
+        from omhc import ledger
+
+        ledger.append({"repo": self.t.key, "event": "pull", "via": "show",
+                       "session": "s-old", "epoch": 1700000001}, home=self.t.home)
+
+        code, text = self.run_status()
+        word, detail = _find_row(text, "pull rate")
+        self.assertEqual(word, "----")
+        self.assertIn("pulled 1 of 1 recent injections", detail)
+
+        code_json, payload = self.run_status_json()
+        self.assertEqual(payload["injections"], 1)
+        self.assertEqual(payload["pulls"], 1)
+
+    def test_a_session_that_was_also_and_later_a_head_counts_both_pulls(self):
+        """Mapping an ALSO pull to its head must not hide the same session's
+        own later delivery as a head (resumed and re-delivered)."""
+        os.makedirs(self.t.state, exist_ok=True)
+        with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",
+                  encoding="utf-8") as fh:
+            fh.write("x\tclaude-code\tcodex-cli\t1700000000\t\talso\n")
+            fh.write("h1\tclaude-code\tcodex-cli\t1700000000\t123\n")
+            fh.write("x\treopen\tcodex-cli\t1700000100\n")
+            fh.write("x\tclaude-code\tcodex-cli\t1700000200\t456\n")
+        from omhc import ledger
+
+        for sid in ("h1", "x"):
+            ledger.append({"repo": self.t.key, "event": "pull", "via": "show",
+                           "session": sid, "epoch": 1700000300}, home=self.t.home)
+        _code, payload = self.run_status_json()
+        self.assertEqual(payload["injections"], 2)
+        self.assertEqual(payload["pulls"], 2)
+
     def test_pull_rate_windows_the_denominator_to_the_most_recent_injections(self):
         """#25: keeping the denominator as the whole of delivered.tsv means the
         longer a repo is used, the more old deliveries linger in the denominator

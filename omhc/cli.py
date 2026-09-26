@@ -1483,26 +1483,47 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     # PULL_RATE_WINDOW deliveries, N = that window's delivery count (§9
     # "pulled X of N injections"). injections separately keeps the full
     # delivered.tsv line count (used for the archive row's judgment).
-    pull_sessions = {r.get("session") for r in rows
-                      if r.get("event") == "pull" and r.get("session")}
+    pull_sessions_raw = {r.get("session") for r in rows
+                         if r.get("event") == "pull" and r.get("session")}
     delivered = os.path.join(state, due.DELIVERED_NAME)
     # Collected in append order as-is — delivered.tsv's epoch field is a
     # timestamp that can go backward (invariant 6), so line order itself is
     # used instead of it as a sort key.
     delivered_order: List[str] = []
+    # An ALSO row's session never appears in delivered_order (below), but
+    # `omhc show` can still pull its tag directly — mapped here to the head
+    # session of the same handoff (the next non-also, non-reopen line after
+    # it; brief.py always writes ALSO rows immediately before their head, #41
+    # review finding 6) so that pull still counts toward its handoff.
+    also_to_head: Dict[str, str] = {}
+    pending_also: List[str] = []
     if os.path.exists(delivered):
         with open(delivered, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if not line.strip():
                     continue
-                parts = line.split("\t")
+                parts = line.rstrip("\n").split("\t")
                 # A reopen line isn't a delivery — counting it would let a
                 # session that merely resumed and hasn't been redelivered yet
                 # sneak into the injections/pull-rate denominator (#22).
                 if len(parts) >= 2 and parts[1] == due.REOPEN_MARKER:
                     continue
+                # An ALSO row (v2 phase 1, #41) is one row of a handoff that's
+                # already counted via its main (head) row — without this, one
+                # handoff covering 3 sessions would count as 3 injections.
+                if len(parts) >= 6 and parts[5] == due.ALSO_MARKER:
+                    pending_also.append(parts[0])
+                    continue
+                for sid in pending_also:
+                    also_to_head[sid] = parts[0]
+                pending_also = []
                 delivered_order.append(parts[0])
     injections = len(delivered_order)
+    # Add the head a pulled ALSO session belongs to without dropping the
+    # session's own id: the same session can later be a handoff head itself
+    # (resumed and re-delivered), and that delivery must count as pulled too.
+    pull_sessions = set(pull_sessions_raw) | {
+        also_to_head[s] for s in pull_sessions_raw if s in also_to_head}
 
     # Leaving the pull rate's denominator as all of delivered.tsv would make
     # it grow unboundedly the longer a repo is used, so the rate would look

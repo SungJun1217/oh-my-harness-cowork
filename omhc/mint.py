@@ -33,6 +33,11 @@ _RESOLVE_PREFIX = 40
 _SAID_MAX = 3
 _FAIL_MAX = 2
 _DID_MAX_PATHS = 4
+# An ALSO line shows only its session's failure count and one tag (the
+# first unresolved failure) — the full FAIL_MAX detail is reserved for the
+# session that gets the full slot layout.
+_ALSO_FAIL_MAX = 1
+_ALSO_MAX = 160
 
 # Slot priority. Lowest is dropped first.
 #
@@ -52,6 +57,11 @@ _SLOTS = {
     "DID": (38, 180),
     "PLAN?": (35, 190),
     "SAID": (10, 190),
+    # Lowest priority (v2 phase 1, #41): under budget pressure an older
+    # session's one-line summary is the first thing to go, and MORE counts
+    # it as "+N sessions" rather than a slot name a human would need to
+    # decode.
+    "ALSO": (5, _ALSO_MAX),
 }
 _PRIORITY = {k: v[0] for k, v in _SLOTS.items()}
 _LIMIT = {k: v[1] for k, v in _SLOTS.items()}
@@ -158,17 +168,90 @@ def _unresolved_failures(events) -> Tuple[List, int]:
     return unresolved, fixed
 
 
-def failure_tags(read) -> List[Tuple[str, object]]:
-    """Pairs of [E1], [E2] … tags with their source Event.
+def failure_tags(read, start: int = 1, limit: int = _FAIL_MAX) -> List[Tuple[str, object]]:
+    """Pairs of [E<n>], [E<n+1>] … tags with their source Event, numbered
+    starting at `start`.
 
-    Kept in one place so mint and the refs.tsv record use the same
-    computation — counting separately in two places would leave `omhc show
-    E1` pointing at something else.
+    Kept in one place so mint's own FAIL text, the ALSO lines, and the
+    refs.tsv record all use the same computation and numbering — counting
+    separately in more than one place is exactly how mint used to have two
+    copies of "i + 1" that could drift apart (#41 review).
     """
     unresolved, _fixed = _unresolved_failures(list(read.events))
     return [
-        ("E{}".format(i + 1), ev) for i, ev in enumerate(unresolved[:_FAIL_MAX])
+        ("E{}".format(start + i), ev) for i, ev in enumerate(unresolved[:limit])
     ]
+
+
+def has_human_turn(read) -> bool:
+    """Does this session have anything verbatim-human to hand off at all.
+
+    An older session with nothing human said has no GOAL to show (invariant
+    3 forbids falling back to agent text), so it must be filtered out
+    **before** tag numbering — otherwise it silently consumes a failure-tag
+    number that no line on screen ever shows, and `omhc show`'s numbering
+    stops being contiguous over the sessions actually mentioned (#41 review
+    finding 3). Shared by all_tags()/mint() and by brief.py, which must
+    filter the exact same sessions out of pin/index/delivered-marking too.
+    """
+    return any(e.author == "human" and e.text for e in read.events)
+
+
+def filter_also(also: Sequence) -> List:
+    """`also` sessions actually worth a tag/line — see has_human_turn()."""
+    return [r for r in also if has_human_turn(r)]
+
+
+def all_tags(read, also: Sequence = ()) -> List[List[Tuple[str, object, object]]]:
+    """Per-session (tag, ref, event) triples, numbered continuously across
+    the main session and every ALSO session with a human turn: index 0 is
+    the main session's tags (up to _FAIL_MAX), index 1+ is each surviving
+    ALSO session's (up to _ALSO_FAIL_MAX, in the same relative order as
+    `also`).
+
+    One shared computation so mint() (building its own FAIL/ALSO text) and
+    index.write_refs (so `omhc show E3` resolves against the right session)
+    can never disagree on which tag is which — that drift is exactly what
+    used to happen with two separate "i + 1" copies (#41 review).
+    """
+    also = filter_also(also)
+    sessions = [(read, _FAIL_MAX)] + [(r, _ALSO_FAIL_MAX) for r in also]
+    per_session: List[List[Tuple[str, object, object]]] = []
+    next_start = 1
+    for sess_read, limit in sessions:
+        tags = failure_tags(sess_read, start=next_start, limit=limit)
+        per_session.append([(tag, sess_read.ref, ev) for tag, ev in tags])
+        next_start += len(tags)
+    return per_session
+
+
+def _also_value(also_read, tags, now: float, limit: int) -> Optional[str]:
+    """The ALSO line's value (everything after 'ALSO  '), or None if this
+    older session has nothing verbatim-human worth saying.
+
+    Byte-budgets the fixed prefix/suffix first and clips only the GOAL text
+    — otherwise a long Korean GOAL could eat into the trailing `[E<k>]` tag
+    and leave it truncated, which `omhc show` could never resolve.
+    """
+    events = list(also_read.events)
+    humans = [e for e in events if e.author == "human" and e.text]
+    if not humans:
+        # Never fall back to agent text for GOAL (invariant 3) — a foreign
+        # session with no human turn at all is also the shape a headless run
+        # takes, so the safer choice is to say nothing about it rather than
+        # print a bare, content-free ALSO line.
+        return None
+    ref = also_read.ref
+    unresolved, _fixed = _unresolved_failures(events)
+    prefix = "{} {} · {} · GOAL ".format(
+        ref.adapter_id, (ref.session_id or "-")[:8], _age(now, events))
+    suffix = ""
+    if unresolved and tags:
+        suffix = " · {} FAIL [{}]".format(len(unresolved), tags[0][0])
+    room = limit - len(prefix.encode("utf-8")) - len(suffix.encode("utf-8"))
+    if room < 8:
+        return None
+    return prefix + _clip(humans[0].text, room) + suffix
 
 
 def mint(
@@ -178,18 +261,28 @@ def mint(
     budget: int = BUDGET,
     now: float,
     notes: Sequence[str] = (),
+    also: Sequence = (),
+    unread: int = 0,
 ) -> str:
     """Turns Events into a ≤budget-byte marker. The single generation point
     for injected text.
 
     An empty string is a normal "nothing to send" response — same vendor, or
     no Events. Callers must not inject an empty string as-is.
+
+    `also` (v2 phase 1, #41) is older undelivered sessions, newest first —
+    `read` keeps the full slot layout, and each of `also` that has a human
+    turn (has_human_turn) becomes one lowest-priority ALSO line in the same
+    budget (see docs/handoff.md). `unread` is the count of still-older
+    sessions the caller (brief.py) chose not to even read (time budget or a
+    read failure) — disclosed in MORE, never silently retried.
     """
     if budget < MIN_BUDGET:
         raise ValueError(
             "budget {} is below the {}-byte floor; a marker that small carries "
             "nothing but its own header".format(budget, MIN_BUDGET)
         )
+    also = filter_also(also)
 
     ref = read.ref
     # DID relativizes against the **repo root**, not ref.cwd. ref.cwd is the
@@ -235,12 +328,20 @@ def mint(
     ][:_SAID_MAX]
 
     unresolved, fixed_later = _unresolved_failures(events)
+    tag_sessions = all_tags(read, also=also)
     # Clip short so an inline script doesn't eat the whole FAIL line. Full
     # text is looked up by tag — that's the reason tier (b) exists.
     fail_values = [
-        "{} -> failed [E{}]".format(_clip(e.arg, 60) or e.verb, i + 1)
-        for i, e in enumerate(unresolved[:_FAIL_MAX])
+        "{} -> failed [{}]".format(_clip(ev.arg, 60) or ev.verb, tag)
+        for tag, _ref, ev in tag_sessions[0]
     ]
+
+    # --- ALSO lines (v2 phase 1, #41): one per older undelivered session ----
+    also_values = []
+    for also_read, also_tags in zip(also, tag_sessions[1:]):
+        value = _also_value(also_read, also_tags, now, _LIMIT["ALSO"])
+        if value:
+            also_values.append(value)
 
     # Same file gets modified repeatedly, so dedupe paths — measured 136
     # occurrences down to 55 unique paths, and realpath lstats every path segment.
@@ -273,6 +374,8 @@ def mint(
     for value in fail_values:
         add("FAIL", value)
     add("DID", did_value)
+    for value in also_values:
+        add("ALSO", value)
 
     # --- header and PULL (never dropped) ------------------------------------
     # The 8 chars here are deliberately fixed-width, unlike the unique prefix
@@ -321,7 +424,12 @@ def mint(
     def more_text() -> str:
         bits = []
         for key, count in sorted(dropped_slots.items()):
-            bits.append("+{} {}".format(count, key.lower()))
+            if key == "ALSO":
+                # "+N also" would read as jargon — MORE is read by a human,
+                # and what got dropped is whole older sessions, not a slot.
+                bits.append("+{} session{}".format(count, "" if count == 1 else "s"))
+            else:
+                bits.append("+{} {}".format(count, key.lower()))
         if fixed_later:
             bits.append("({} fixed later)".format(fixed_later))
         if len(unresolved) > _FAIL_MAX:
@@ -329,6 +437,12 @@ def mint(
         if hidden_events > 0:
             bits.append("{} event{} hidden".format(
                 hidden_events, "" if hidden_events == 1 else "s"))
+        if unread > 0:
+            # Distinct from an ALSO line dropped for budget — these were
+            # never even read (brief.py's time budget or a read failure) and
+            # are not retried later (#41 review finding 2), so say so plainly.
+            bits.append("+{} session{} unread".format(
+                unread, "" if unread == 1 else "s"))
         return ", ".join(bits)
 
     active = list(slots)

@@ -2,8 +2,10 @@
 
 # v2: using both harnesses at once (#2) — design
 
-Status: **proposal**, not implemented. v1 handles sequential use only: one
-harness at a time, and the handoff goes in only at SessionStart.
+Status: **phase 1 implemented** (#41); phases 2 and 3 are still proposals.
+v1 handled sequential use only: one harness at a time, and the handoff goes
+in only at SessionStart. Phase 1 is still SessionStart-only — it just stops
+limiting that one handoff to the single newest session.
 
 - [Problems](#problems)
 - [Measured facts](#measured-facts)
@@ -79,17 +81,21 @@ new tail is read.
 
 ## Phase 1: every undelivered session at SessionStart
 
-Solves S1 with the existing SessionStart hook.
+**Implemented (#41).** Solves S1 with the existing SessionStart hook.
 
 **`due()` returns `List[Watermark]`.** It walks the ledger backward as today and
 collects foreign sessions that are eligible, younger than `MAX_AGE_SECONDS`
 and not yet delivered to this harness. It still **stops at the first one that
 was already delivered**, so v1's rule that old sessions are never revived as
 "just happened" holds: only sessions newer than the last handoff come back.
-The list is capped (proposed: newest 3).
+The list is capped at `due.MAX_SESSIONS` (3). Each session id is only ever
+listed once, even though the ledger can hold several `start` rows for the
+same session (a resume, `_reactivate_grown_sessions`, a late compact) — only
+the first (newest) row for a given session is considered, or it would be
+built into two Watermarks and walk into the list twice (#41 review).
 
-**The newest session keeps the full slot layout.** Every other one gets a single
-`ALSO` line inside the same 900-byte budget:
+**The newest session keeps the full slot layout.** Every other one with a
+human turn gets a single `ALSO` line inside the same 900-byte budget:
 
 ```
 ALSO  codex-cli 01a0d2e1 · 40m ago · GOAL <first human turn, verbatim, cut at a line boundary> · 2 FAIL [E3]
@@ -99,9 +105,26 @@ ALSO  codex-cli 01a0d2e1 · 40m ago · GOAL <first human turn, verbatim, cut at 
   dropped first and `MORE` counts them ("2 more sessions").
 - Its `GOAL` is the same verbatim human text the main slot uses (invariant 3).
   No summary of the older session is written — only what v1 already extracts.
-- Failure tags keep numbering across sessions (`[E3]` after the main session's
-  `[E1]`/`[E2]`) so `omhc show E3` opens the right session.
-- Every listed session is marked delivered.
+- An older session with **no** human turn at all is filtered out before
+  numbering — it gets no line, consumes no failure-tag number, and is not
+  marked delivered (there is nothing to hand off).
+- Failure tags keep numbering across the sessions that do get a line (`[E3]`
+  after the main session's `[E1]`/`[E2]`) so `omhc show E3` opens the right
+  session.
+- Every *listed* session is marked delivered — but reading an older session
+  is itself bounded (see below), and a session `brief.py` chose not to read
+  is neither listed nor delivered.
+
+**Reading is bounded, and a skip is final, not "later".** Reading 3 sessions
+can cost more than the ~150ms hook budget (measured 105ms for one 13MB
+transcript alone), so sessions past the head are only read while a ~90ms
+sub-budget holds, and a read that raises is caught the same way. The first
+such session **stops the list right there** (not "skip it and try an even
+older one") — an unread session sitting between two read ones would leave a
+silent gap. It is disclosed once, as `+N sessions unread` in `MORE`, and it
+is **not a candidate next time**: once the session ahead of it is delivered,
+`due()`'s "never revive older than the last delivered one" rule means it can
+never be reached again.
 
 This phase needs no new hook, no trust approval and no per-turn cost.
 
@@ -197,7 +220,7 @@ Other risks:
 
 ## Open questions
 
-1. How many older sessions should phase 1 list? Proposed: 3.
+1. How many older sessions should phase 1 list? **Decided: 3** (`due.MAX_SESSIONS`).
 2. Is ~60–110 ms added to every human turn acceptable?
 3. Should phase 3 start opt-in (`OMHC_LIVE=1`)? Proposed: yes.
 4. Does the model actually act on a `UserPromptSubmit` note? To be measured with
@@ -207,7 +230,7 @@ Other risks:
 
 Split #2 into three issues, shipped in order:
 
-1. **Phase 1** — `due()` → `List[Watermark]`, `ALSO` slot, cross-session failure
+1. **Phase 1** (done, #41) — `due()` → `List[Watermark]`, `ALSO` slot, cross-session failure
    tags. SessionStart only.
 2. **Phase 2** — Claude `read_session_since`; `omhc turn` entry point and
    `UserPromptSubmit` fragments; overlap warning; `status` row for the new hook.
