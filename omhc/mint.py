@@ -16,10 +16,18 @@ SEP = "  "
 
 # Approval-style turn. Using this as NEXT launders the prior agent's proposal
 # into a human instruction.
+# #44: common Korean approvals ("네 그렇게 해주세요", "진행시켜", "ㄱㄱ",
+# "좋아요 진행하세요") weren't in the list, so they became NEXT (or a live
+# SAID line) as if they were instructions. The whole turn must still consist
+# of tokens only, so a real instruction that merely contains one of them
+# ("그렇게 하지 말고 파서부터 고쳐") is unaffected. Words that can be an
+# instruction on their own (e.g. 확인, "check") stay out.
 _ACK_TOKEN = (
-    r"(?:응|넵|네|그래|오케이|오키|ok|okay|yes|yep|sure|good|굿|ㅇㅇ|"
-    r"계속|진행|진행해|진행해줘|해줘|해|가자|continue|go|ahead|please|"
-    r"그대로|알아서|부탁)"
+    r"(?:응|넵|넹|네|네네|예|그래|그래요|오케이|오케|오키|ok|okay|yes|yep|sure|good|굿|"
+    r"ㅇㅇ|ㅇㅋ|ㄱㄱ|ㄱ|고고|lgtm|좋아|좋아요|좋습니다|그렇게|그렇게요|"
+    r"계속|진행|진행해|진행해줘|진행해요|진행하세요|진행해주세요|진행시켜|진행시켜줘|"
+    r"해줘|해줘요|해주세요|해요|하세요|해|하자|가자|가시죠|시작|시작해|"
+    r"continue|go|ahead|please|그대로|알아서|부탁|부탁해|부탁해요|부탁드려요)"
 )
 # A chain of approval tokens is still approval — "계속 진행해", "응 진행해줘", "go ahead".
 _ACK = re.compile(
