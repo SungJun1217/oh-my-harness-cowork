@@ -44,4 +44,4 @@ body:
     id: records
     attributes:
       label: 새로 보이는 레코드 모양 (선택)
-      description: 값은 지우고 키 구조만 적어 주십시오. 예를 들어 `{"type": "...", "payload": {"kind": "...", ...}}`
+      description: '값은 지우고 키 구조만 적어 주십시오. 예를 들어 `{"type": "...", "payload": {"kind": "...", ...}}`'
