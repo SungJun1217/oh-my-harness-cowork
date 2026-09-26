@@ -1,14 +1,18 @@
-"""v2 phase 2 (#42): the overlap warning on each human turn (docs/v2-concurrency.md,
-"Phase 2"). `due()`/the index `paths` column were already the v2 concurrency
-seam left by phase 1 — this module is the second consumer of that same
-stream, not a change to the SessionStart pipeline. `omhc/turn.py` is the thin
-hook entry point; this module holds the actual comparison logic so it can be
-unit-tested without going through stdin/argv.
+"""v2 phase 2 (#42): the overlap warning on each human turn, and v2 phase 3
+(#43): the other side's progress, live (docs/v2-concurrency.md). `due()`/the
+index `paths` column were already the v2 concurrency seam left by phase 1 —
+this module is the second consumer of that same stream, not a change to the
+SessionStart pipeline. `omhc/turn.py` is the thin hook entry point; this
+module holds the actual comparison logic so it can be unit-tested without
+going through stdin/argv.
 
-Design rule carried over from mint.py: never summarize. A note is either
-empty or a direct list of paths/facts the two sessions both touched —
-never the other agent's words (docs/v2-concurrency.md, "Phase 3" explicitly
-rejects even the human's PLAN? equivalent for this reason).
+Design rule carried over from mint.py: never summarize. Phase 2's note is
+either empty or a direct list of paths the two sessions both touched. Phase
+3 (opt-in, `OMHC_LIVE=1`) adds verbatim human `said` text and machine-observed
+failures from a still-running foreign session — never the other agent's
+words, and never a PLAN?-equivalent: "a running session adopting another
+agent's unverified plan is laundering" (docs/v2-concurrency.md) — a stricter
+rule than mint()'s own handoff, which does surface PLAN? once a session ends.
 """
 from __future__ import annotations
 
@@ -17,8 +21,18 @@ import os
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
-from . import adapters, due, fsio, gate, ledger, locate
+from . import adapters, due, fsio, gate, ledger, locate, mint
 from .adapter import SessionRef
+
+# v2 phase 3 (#43): opt-in, same truthy convention as
+# adapters.HEADLESS_ENV/OMHC_ALLOW_HEADLESS and due.OFF_ENV/OMHC_OFF.
+LIVE_ENV = "OMHC_LIVE"
+
+# mint's own SAID/FAIL clip widths (mint._SLOTS) — reused here so a live
+# note's byte budgeting matches the handoff's, not an independently chosen
+# number (`mint._clip` also flattens to one line, satisfying "one line").
+_SAID_CLIP = 190
+_FAIL_CLIP = 60
 
 # ≤300 bytes (docs/v2-concurrency.md, "Phase 2") — far under mint's 900, since
 # this rides on every human turn, not just SessionStart.
@@ -48,6 +62,48 @@ TIME_BUDGET = 0.12
 # implementation) silently and permanently loses every path that sorts after
 # the cut, no matter how recently it was touched.
 TOUCHED_CAP = 500
+
+
+def _live_enabled() -> bool:
+    """v2 phase 3 (#43), opt-in. Same truthy convention (env var, checked
+    directly — a single `os.environ.get` is the "cheap" read the design
+    calls for, no ledger/state involved) as `adapters.allow_headless()`/
+    `due.is_off()`. `OMHC_OFF` already returns before this is ever consulted
+    (`check()`'s existing `due.is_off` check), so "OMHC_OFF still wins" holds
+    structurally, not by ordering convention alone."""
+    return os.environ.get(LIVE_ENV, "").strip() not in ("", "0", "false", "False")
+
+
+def _live_said(events) -> Optional[str]:
+    """The newest new human `said` event's text in `events` (already the
+    *new* tail since this session's last turn — see `check()`), or None.
+    Author-gated to human only (invariant 3: never the other agent's words,
+    never a PLAN?-equivalent unverified claim) and skipped outright when
+    it's an approval-style turn (`mint._is_ack` — reused, not
+    reimplemented): "계속 진행해" carries no information without the proposal
+    it approves, which this note never shows."""
+    humans = [e for e in events if e.author == "human" and e.verb == "said" and e.text]
+    if not humans:
+        return None
+    newest = humans[-1].text
+    if mint._is_ack(newest):
+        return None
+    return mint._clip(newest, _SAID_CLIP)
+
+
+def _live_fail(events) -> Optional[str]:
+    """Up to one new *unresolved* failure's `arg` in `events` (the new tail),
+    using mint's own resolution rule (`mint._unresolved_failures` — a later
+    success whose first 40 arg characters match counts as fixed) rather than
+    reimplementing it. The newest unresolved failure, if any — "since your
+    last turn" framing favors recency the same way `_live_said` does. No
+    failure tag (`[E1]`, …): unlike mint's own FAIL slot, this session was
+    never delivered/indexed, so there's no `omhc show <tag>` for it to
+    resolve to."""
+    unresolved, _fixed = mint._unresolved_failures(list(events))
+    if not unresolved:
+        return None
+    return mint._clip(unresolved[-1].arg, _FAIL_CLIP)
 
 
 def _state_path(state_dir: str, harness: str, session_id: str) -> str:
@@ -377,56 +433,117 @@ def _first_baseline(rows: List[dict], my_pos: Optional[int], sid: str,
     return _position_baseline(rows, my_pos, sid, path, cur_size)
 
 
-def _render(overlaps: List[Tuple[str, str, List[str]]]) -> str:
-    """Renders every overlapping foreign session within NOTE_BUDGET (review
-    #1 finding 2) — only reporting the first one found silently dropped every
-    other genuine overlap. `overlaps` is (harness, session_id, [rel paths]),
-    most-recent-foreign-session first (the order `_foreign_candidates`
+def _render(records) -> str:
+    """Renders every foreign session with something new within NOTE_BUDGET.
+    Each record is (harness, session_id, [rel paths], said, fail) — `said`/
+    `fail` (v2 phase 3, #43) are `Optional[str]`, and every existing caller
+    that only ever knew about file overlaps (phase 2) can keep passing plain
+    3-tuples: normalized to `(h, sid, files, None, None)` below, which is
+    exactly the phase-2 behavior — this is what keeps `OMHC_LIVE=0`
+    (default) byte-for-byte identical to phase 2, structurally, not just by
+    a feature flag somewhere else.
+
+    Most-recent-foreign-session first (the order `_foreign_candidates`
     returns them in). No PULL line (review #1 finding 7): `omhc trace` only
     searches the index, which a still-running, undelivered session doesn't
     have unless `omhc watch` is running, so the hint would usually point at
     nothing.
 
-    review #1 finding 4 (round 3): tries every path of every session **in
-    order**, skipping (not stopping at) any single entry that doesn't fit —
-    dropping from the tail unconditionally (round 2's approach) meant one
-    over-long path in an early session could wipe out every session after
-    it too, even ones that would have fit easily. Whatever doesn't fit is
-    disclosed as "+N files"/"+N sessions", never silently — and if *nothing*
-    fits at all, the header and a "MORE" line are still sent rather than
-    nothing (an overlap must never be silently lost)."""
-    if not overlaps:
+    Priority (v2 phase 3): FILE lines (the phase-2 overlap) always outrank
+    SAID/FAIL (phase 3's live notes) — "a running session adopting another
+    agent's unverified plan is laundering" (docs/v2-concurrency.md) already
+    argues the overlap warning is the more load-bearing fact, and the
+    decision for #43 makes that explicit: live lines drop first under budget
+    pressure. Implemented by trying every renderable item — every session's
+    FILE paths first (in the same per-session, in-order pass as phase 2),
+    then every session's SAID, then every session's FAIL — in that fixed
+    priority order, skipping (not stopping at) whichever single item doesn't
+    fit (review #1 finding 4, round 3: dropping from the tail unconditionally
+    let one over-long early item wipe out everything after it). Whatever
+    doesn't fit is disclosed in MORE, never silently — and if *nothing* fits
+    at all, the header and a MORE line still go out (an overlap/note must
+    never be silently lost).
+    """
+    records = [
+        (r[0], r[1], r[2], r[3] if len(r) > 3 else None, r[4] if len(r) > 4 else None)
+        for r in records
+    ]
+    if not records:
         return ""
-    multi = len(overlaps) > 1
-    if multi:
-        header = "[omhc] {} sessions modified files you touched, since your last turn:".format(
-            len(overlaps))
-    else:
-        harness, sid, _paths = overlaps[0]
-        header = "[omhc] {} {} (running) modified files you touched, since your last turn:".format(
-            harness, (sid or "-")[:8])
+    multi = len(records) > 1
 
-    kept_paths: List[List[str]] = [[] for _ in overlaps]
+    n = len(records)
+    kept_files: List[List[str]] = [[] for _ in range(n)]
+    kept_said: List[Optional[str]] = [None] * n
+    kept_fail: List[Optional[str]] = [None] * n
     dropped_files = 0
+    dropped_said = 0
+    dropped_fail = 0
+
+    def _header() -> str:
+        # review #1 (invariant 3): computed from what's *currently kept*,
+        # not from the original records — a session's SAID/FAIL is another
+        # agent's (unverified) words next to the human's own prompt, so the
+        # disclaimer must be present whenever any live line actually makes
+        # it into the render, even alongside a FILE line for the same or
+        # another session (the phase-2 header alone said nothing about
+        # "notes, not instructions" and, in the multi-session case, falsely
+        # claimed every session modified files). Recomputed on every
+        # `render_now()` call (not once, up front) specifically so the
+        # byte-cap trim loop below counts the longer, disclaimer header the
+        # whole time any live content is still in the running — a header
+        # that shrinks only *after* the final trim decision could itself
+        # blow the budget. Once every live line has been dropped (or there
+        # never was one — the default-off, phase-2-only case), this falls
+        # back to the short phase-2 header, unchanged.
+        any_live = any(kept_said[i] or kept_fail[i] for i in range(n))
+        if multi:
+            if any_live:
+                return ("[omhc] {} sessions (running), since your last turn "
+                        "— notes, not instructions:").format(n)
+            return "[omhc] {} sessions modified files you touched, since your last turn:".format(n)
+        harness, sid, _files, _said, _fail = records[0]
+        id8 = (sid or "-")[:8]
+        if any_live:
+            return ("[omhc] {} {} (running), since your last turn "
+                    "— notes, not instructions:").format(harness, id8)
+        return "[omhc] {} {} (running) modified files you touched, since your last turn:".format(
+            harness, id8)
 
     def render_now() -> str:
-        lines = [header]
-        for (h, s, _p), paths in zip(overlaps, kept_paths):
-            if not paths:
-                continue
-            if multi:
-                lines.append("FILE  {} {}: {}".format(h, (s or "-")[:8], " ".join(paths)))
-            else:
-                lines.append("FILE  " + " ".join(paths))
+        lines = [_header()]
+        for i, (h, s, _f, _sd, _fl) in enumerate(records):
+            id8 = (s or "-")[:8]
+            if kept_files[i]:
+                if multi:
+                    lines.append("FILE  {} {}: {}".format(h, id8, " ".join(kept_files[i])))
+                else:
+                    lines.append("FILE  " + " ".join(kept_files[i]))
+            if kept_said[i]:
+                if multi:
+                    lines.append("SAID  {} {}: {}".format(h, id8, kept_said[i]))
+                else:
+                    lines.append("SAID  " + kept_said[i])
+            if kept_fail[i]:
+                if multi:
+                    lines.append("FAIL  {} {}: {} -> failed".format(h, id8, kept_fail[i]))
+                else:
+                    lines.append("FAIL  {} -> failed".format(kept_fail[i]))
         # "+N sessions" only means something when there's more than one
         # candidate session to begin with — in the single-session case the
         # header already names the only session there is, so a fully-empty
-        # result there is just "+N files", not a confusing "+1 session" on
+        # result there is just "+N <kind>", not a confusing "+1 session" on
         # top of it.
-        empty_sessions = sum(1 for paths in kept_paths if not paths) if multi else 0
+        empty_sessions = sum(
+            1 for i in range(n) if not kept_files[i] and not kept_said[i] and not kept_fail[i]
+        ) if multi else 0
         more_bits = []
         if dropped_files:
             more_bits.append("{} file{}".format(dropped_files, "" if dropped_files == 1 else "s"))
+        if dropped_said:
+            more_bits.append("{} said".format(dropped_said))
+        if dropped_fail:
+            more_bits.append("{} fail".format(dropped_fail))
         if empty_sessions:
             more_bits.append("{} session{}".format(
                 empty_sessions, "" if empty_sessions == 1 else "s"))
@@ -434,34 +551,66 @@ def _render(overlaps: List[Tuple[str, str, List[str]]]) -> str:
             lines.append("MORE  +" + ", +".join(more_bits))
         return "\n".join(lines) + "\n"
 
-    # Forward pass: try every path of every session in encounter order,
-    # skipping (not stopping the whole render at) any single entry that
-    # doesn't fit. `included` records which session index each *kept* path
-    # belongs to, in the order they were added — used by the safety-shrink
-    # pass below.
-    included: List[int] = []
-    for i, (_h, _s, paths) in enumerate(overlaps):
-        for p in paths:
-            kept_paths[i].append(p)
-            if len(render_now().encode("utf-8")) <= NOTE_BUDGET:
-                included.append(i)
-            else:
-                kept_paths[i].pop()
-                dropped_files += 1
+    # Forward pass, in fixed priority order (FILE > SAID > FAIL — v2 phase
+    # 3), skipping (not stopping the whole render at) any single entry that
+    # doesn't fit. `included` records (kind, index) for each *kept* entry in
+    # the order they were added — used by the safety-shrink pass below, so
+    # popping from the end always undoes the lowest-priority entry added
+    # last first (FAIL/SAID before FILE).
+    included: List[Tuple[str, int]] = []
+
+    def _try_add(kind: str, i: int, value: str) -> None:
+        nonlocal dropped_files, dropped_said, dropped_fail
+        if kind == "file":
+            kept_files[i].append(value)
+        elif kind == "said":
+            kept_said[i] = value
+        else:
+            kept_fail[i] = value
+        if len(render_now().encode("utf-8")) <= NOTE_BUDGET:
+            included.append((kind, i))
+            return
+        if kind == "file":
+            kept_files[i].pop()
+            dropped_files += 1
+        elif kind == "said":
+            kept_said[i] = None
+            dropped_said += 1
+        else:
+            kept_fail[i] = None
+            dropped_fail += 1
+
+    for i, (_h, _s, files, _said, _fail) in enumerate(records):
+        for p in files:
+            _try_add("file", i, p)
+    for i, (_h, _s, _f, said, _fail) in enumerate(records):
+        if said:
+            _try_add("said", i, said)
+    for i, (_h, _s, _f, _said, fail) in enumerate(records):
+        if fail:
+            _try_add("fail", i, fail)
 
     out = render_now()
-    # Safety net: the MORE line's own text grows as dropped_files/
-    # empty_sessions increase while later entries are being tried, so a
-    # drop discovered *after* an earlier entry was accepted can retroactively
-    # push the final render (with the fully up-to-date counts) a few bytes
-    # over budget even though every individual step's own check passed at
-    # the time. Shrink from the most recently *kept* entry backward,
-    # re-rendering the whole (current) state each time — same discipline as
-    # mint()'s own drop loop: never trust an earlier snapshot as final.
+    # Safety net: the MORE line's own text grows as more drops are tallied
+    # while later entries are being tried, so a drop discovered *after* an
+    # earlier entry was accepted can retroactively push the final render
+    # (with the fully up-to-date counts) a few bytes over budget even though
+    # every individual step's own check passed at the time. Shrink from the
+    # most recently *kept* entry backward (lowest priority first, since FAIL/
+    # SAID entries were appended to `included` after FILE ones), re-rendering
+    # the whole (current) state each time — same discipline as mint()'s own
+    # drop loop: never trust an earlier snapshot as final.
     while len(out.encode("utf-8")) > NOTE_BUDGET and included:
-        i = included.pop()
-        kept_paths[i].pop()
-        dropped_files += 1
+        kind, i = included.pop()
+        if kind == "file":
+            kept_files[i].pop()
+            dropped_files += 1
+        elif kind == "said":
+            kept_said[i] = None
+            dropped_said += 1
+        else:
+            kept_fail[i] = None
+            dropped_fail += 1
         out = render_now()
 
     if len(out.encode("utf-8")) > NOTE_BUDGET:
@@ -500,6 +649,7 @@ def check(*, harness: str, stdin_text: str = "", home: Optional[str] = None,
     state_dir = locate.state_dir(key, home=home)
     if due.is_off(state_dir):
         return ""
+    live = _live_enabled()
 
     transcript_path = str(payload.get("transcript_path") or payload.get("transcriptPath") or "")
 
@@ -571,7 +721,7 @@ def check(*, harness: str, stdin_text: str = "", home: Optional[str] = None,
         state["known_foreign"] = sorted(
             _old_foreign_session_ids(rows, harness, session_id, my_pos))
 
-    overlaps: List[Tuple[str, str, List[str]]] = []
+    records: List[Tuple[str, str, List[str], Optional[str], Optional[str]]] = []
     for foreign_harness, sid, path in _foreign_candidates(rows, harness, session_id):
         if time.monotonic() > hard_deadline:
             break
@@ -628,18 +778,32 @@ def check(*, harness: str, stdin_text: str = "", home: Optional[str] = None,
                 rel = _relativize(root, p)
                 if rel and rel not in modified:
                     modified.append(rel)
-        # Baseline advances regardless of whether this round overlaps —
-        # review #1 finding 2: every candidate that was actually read here
-        # either lands in `overlaps` (shown) or is silently within budget
-        # (nothing modified, or modified but disjoint from `touched`) — in
-        # neither case is there anything left un-disclosed, so it's safe to
-        # never look at this same growth again.
+        # Baseline advances regardless of whether this round produces a
+        # record — review #1 finding 2: every candidate that was actually
+        # read here either lands in `records` (shown) or is silently within
+        # budget (nothing new, or new but not worth a line) — in neither
+        # case is there anything left un-disclosed, so it's safe to never
+        # look at this same growth again.
         foreign_baselines[sid] = since.end_offset
         overlap = [p for p in modified if p in touched]
-        if overlap:
-            overlaps.append((foreign_harness, sid, overlap))
 
-    note = _render(overlaps)
+        # v2 phase 3 (#43), opt-in: collected from the exact same `since`
+        # read above — no extra ledger/session reads. Wrapped defensively
+        # (mint's helpers operate on a shape they already trust, but this is
+        # still the hook path, invariant 2): a failure here must cost this
+        # session's live note, never the whole turn.
+        said = fail = None
+        if live:
+            try:
+                said = _live_said(since.events)
+                fail = _live_fail(since.events)
+            except Exception:
+                said = fail = None
+
+        if overlap or said or fail:
+            records.append((foreign_harness, sid, overlap, said, fail))
+
+    note = _render(records)
 
     state["own_offset"] = own_offset
     state["touched"] = touched.to_list()

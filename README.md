@@ -137,7 +137,7 @@ For a project that isn't a git repo, run `touch .omhc-root` at its top once.
 | `omhc watch [--stop\|--once]` | Optional accelerator daemon; results are identical without it |
 | `omhc brief --harness X --dry-run` | Previews the handoff the next session would get, without claiming it, archiving or delivering |
 | `omhc mark` / `omhc brief --harness X` | Called by the hook: record the session start, then print the handoff |
-| `omhc turn --harness X` | Called by the `UserPromptSubmit` hook on each human turn: warns, once, when the other harness modified a file this session already touched (docs/v2-concurrency.md, phase 2) |
+| `omhc turn --harness X` | Called by the `UserPromptSubmit` hook on each human turn: warns, once, when the other harness modified a file this session already touched, plus — opt-in via [`OMHC_LIVE=1`](docs/install.md#live-notes-from-a-still-running-session) — the other session's newest human turn and unresolved failures (docs/v2-concurrency.md, phases 2-3) |
 
 Turn it off with `OMHC_OFF=1` or an `~/.omhc/<repo-key>/off` file. Headless
 sessions (`claude -p`, `codex exec`) are never handoff sources unless you set
