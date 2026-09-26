@@ -205,6 +205,23 @@ def has_human_turn(read) -> bool:
     return any(e.author == "human" and e.text for e in read.events)
 
 
+def unique_prefix_len(ids: Sequence[str], minlen: int = 8) -> int:
+    """The shortest prefix length (>= minlen) that tells these ids apart.
+
+    Codex's UUIDv7 only changes its first 8 chars every ~65 seconds, so a
+    fixed 8-char cut collides for sessions started in quick succession in the
+    same repo (#15c). It keeps growing until the ids are unique; otherwise
+    `show` would reject a ref `log` just printed as ambiguous. Shared by log,
+    status, the handoff and turn notes (#47).
+    """
+    uniq = list(dict.fromkeys(ids))
+    n = minlen
+    longest = max((len(i) for i in uniq), default=minlen)
+    while n < longest and len({i[:n] for i in uniq}) < len(uniq):
+        n += 1
+    return n
+
+
 def filter_also(also: Sequence) -> List:
     """`also` sessions actually worth a tag/line — see has_human_turn()."""
     return [r for r in also if has_human_turn(r)]
@@ -233,7 +250,8 @@ def all_tags(read, also: Sequence = ()) -> List[List[Tuple[str, object, object]]
     return per_session
 
 
-def _also_value(also_read, tags, now: float, limit: int) -> Optional[str]:
+def _also_value(also_read, tags, now: float, limit: int,
+                id_len: int = 8) -> Optional[str]:
     """The ALSO line's value (everything after 'ALSO  '), or None if this
     older session has nothing verbatim-human worth saying.
 
@@ -252,7 +270,7 @@ def _also_value(also_read, tags, now: float, limit: int) -> Optional[str]:
     ref = also_read.ref
     unresolved, _fixed = _unresolved_failures(events)
     prefix = "{} {} · {} · GOAL ".format(
-        ref.adapter_id, (ref.session_id or "-")[:8], _age(now, events))
+        ref.adapter_id, (ref.session_id or "-")[:id_len], _age(now, events))
     suffix = ""
     if unresolved and tags:
         suffix = " · {} FAIL [{}]".format(len(unresolved), tags[0][0])
@@ -293,6 +311,11 @@ def mint(
     also = filter_also(also)
 
     ref = read.ref
+    # Session ids shown in one handoff must be told apart (#47): two Codex
+    # sessions started seconds apart share their first 8 chars. With a single
+    # session this stays 8, so the budget is unchanged in the common case (#19).
+    id_len = unique_prefix_len(
+        [ref.session_id or "-"] + [a.ref.session_id or "-" for a in also])
     # DID relativizes against the **repo root**, not ref.cwd. ref.cwd is the
     # working directory the session started in and can be a subdirectory
     # (that's why the adapter matches equal-or-descendant) — using it as the
@@ -347,7 +370,7 @@ def mint(
     # --- ALSO lines (v2 phase 1, #41): one per older undelivered session ----
     also_values = []
     for also_read, also_tags in zip(also, tag_sessions[1:]):
-        value = _also_value(also_read, also_tags, now, _LIMIT["ALSO"])
+        value = _also_value(also_read, also_tags, now, _LIMIT["ALSO"], id_len)
         if value:
             also_values.append(value)
 
@@ -386,17 +409,16 @@ def mint(
         add("ALSO", value)
 
     # --- header and PULL (never dropped) ------------------------------------
-    # The 8 chars here are deliberately fixed-width, unlike the unique prefix
-    # (_unique_prefix_len) used by log/status — a longer header line eats
-    # directly into the body within the 900-byte budget, so budget wins over
-    # collision risk (#15c) here (#19).
+    # Normally 8 chars: a longer header line eats directly into the body
+    # within the 900-byte budget (#19). It grows only when sessions shown in
+    # this same handoff (the ALSO lines) would otherwise look identical (#47).
     header = [
         # The wording is defined in exactly one place, guard.HEADER_LINE1_FMT —
         # it must not drift from the pattern guard uses to recognize its own
         # echoed text (#24).
         guard.HEADER_LINE1_FMT.format(
             ref.adapter_id,
-            (ref.session_id or "-")[:8],
+            (ref.session_id or "-")[:id_len],
             _duration(events),
             _age(now, events),
         ),

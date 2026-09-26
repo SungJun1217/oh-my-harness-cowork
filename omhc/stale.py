@@ -480,6 +480,10 @@ def _render(records) -> str:
     dropped_said = 0
     dropped_fail = 0
 
+    # Session ids in one note must be told apart (#47); 8 chars unless two
+    # shown sessions share that prefix.
+    id_len = mint.unique_prefix_len([r[1] or "-" for r in records])
+
     def _header() -> str:
         # review #1 (invariant 3): computed from what's *currently kept*,
         # not from the original records — a session's SAID/FAIL is another
@@ -504,7 +508,7 @@ def _render(records) -> str:
                 return "[omhc] {} sessions (running), {}".format(n, guard.TURN_HEADER_LIVE)
             return "[omhc] {} sessions {}".format(n, guard.TURN_HEADER_OVERLAP)
         harness, sid, _files, _said, _fail = records[0]
-        id8 = (sid or "-")[:8]
+        id8 = (sid or "-")[:id_len]
         if any_live:
             return "[omhc] {} {} (running), {}".format(harness, id8, guard.TURN_HEADER_LIVE)
         return "[omhc] {} {} (running) {}".format(harness, id8, guard.TURN_HEADER_OVERLAP)
@@ -512,7 +516,7 @@ def _render(records) -> str:
     def render_now() -> str:
         lines = [_header()]
         for i, (h, s, _f, _sd, _fl) in enumerate(records):
-            id8 = (s or "-")[:8]
+            id8 = (s or "-")[:id_len]
             if kept_files[i]:
                 if multi:
                     lines.append("FILE  {} {}: {}".format(h, id8, " ".join(kept_files[i])))

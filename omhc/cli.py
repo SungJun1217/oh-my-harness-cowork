@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 from . import (
     adapters, agents_md, brief, deliver, due, fsio, gate, hookconf, index, ledger,
-    locate, managed_block, pin, turn, watch,
+    locate, managed_block, mint, pin, turn, watch,
 )
 from .adapter import AdapterUnavailable, SessionRef
 
@@ -998,20 +998,8 @@ def _all_session_ids(state: str) -> List[str]:
 
 
 def _unique_prefix_len(ids: List[str], minlen: int = 8) -> int:
-    """The shortest prefix length (>=minlen) that tells these ids apart.
-    Codex's UUIDv7 only changes its first 8 chars every ~65 seconds, so a
-    fixed 8-char cut collides often for sessions started in quick succession
-    in the same repo (#15c). Around 13 chars is a nice-looking cap, but
-    that's purely a display preference — it keeps growing past that until
-    unique if it still hasn't split them. Otherwise `show` would reject a
-    ref `log` just printed as "ambiguous", while the candidate list itself
-    shows the same string twice (a review defect)."""
-    uniq = list(dict.fromkeys(ids))
-    n = minlen
-    longest = max((len(i) for i in uniq), default=minlen)
-    while n < longest and len({i[:n] for i in uniq}) < len(uniq):
-        n += 1
-    return n
+    """See mint.unique_prefix_len — one rule for log, status, handoff and notes."""
+    return mint.unique_prefix_len(ids, minlen)
 
 
 def _session_log_rank(key: str, state: str, home):

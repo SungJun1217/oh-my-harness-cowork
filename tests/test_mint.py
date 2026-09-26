@@ -384,6 +384,22 @@ class TestAlsoLines(unittest.TestCase):
         self.assertIn("cx-old"[:8], line)
         self.assertIn("옛 세션의 사람 말", line)
 
+    def test_colliding_session_ids_are_told_apart_in_header_and_also(self):
+        """#47: Codex UUIDv7 ids started seconds apart share their first 8
+        chars; header and ALSO line must not both read `01a0c9f4`."""
+        also = self._also_read("01a0c9f4-99aa-72d0", "옛 세션의 사람 말")
+        out = mint.mint(read_of([ev(1, text="목표")]), to_adapter_id="claude-code",
+                        now=NOW, also=[also])
+        header = out.splitlines()[0]
+        also_line = slots_of(out)["ALSO"][0]
+        self.assertIn("codex-cli 01a0c9f4-0 ·", header)
+        self.assertIn("codex-cli 01a0c9f4-9 ·", also_line)
+        self.assertLessEqual(len(out.encode("utf-8")), mint.BUDGET)
+
+    def test_a_single_session_keeps_the_8_char_id(self):
+        out = mint.mint(read_of([ev(1, text="목표")]), to_adapter_id="claude-code", now=NOW)
+        self.assertIn("codex-cli 01a0c9f4 ·", out.splitlines()[0])
+
     def test_also_line_omits_fail_when_no_unresolved_failures(self):
         also = self._also_read("cx-old", "옛 세션의 사람 말", fail=False)
         out = mint.mint(read_of([ev(1, text="목표")]), to_adapter_id="claude-code",

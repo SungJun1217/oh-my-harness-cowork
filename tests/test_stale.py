@@ -833,6 +833,20 @@ def _codex_assistant_row(text: str, ordinal: int = 1) -> dict:
     }
 
 
+class TestSessionIdPrefix(unittest.TestCase):
+    """#47: sessions shown in one turn note must be told apart."""
+
+    def test_colliding_ids_grow_until_unique(self):
+        note = stale._render([("codex-cli", "01a0ded8-84f8", ["a.py"]),
+                              ("codex-cli", "01a0ded8-e1c2", ["b.py"])])
+        self.assertIn("codex-cli 01a0ded8-8:", note)
+        self.assertIn("codex-cli 01a0ded8-e:", note)
+
+    def test_distinct_ids_stay_8_chars(self):
+        note = stale._render([("codex-cli", "01a0ded8-84f8", ["a.py"])])
+        self.assertIn("codex-cli 01a0ded8 (running)", note)
+
+
 class TestLive(unittest.TestCase):
     """v2 phase 3 (#43): live SAID/FAIL notes from a still-running foreign
     session, opt-in via OMHC_LIVE=1. Off by default -- every assertion here
