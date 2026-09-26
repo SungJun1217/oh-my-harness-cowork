@@ -320,6 +320,7 @@ def emit(
     home: Optional[str] = None,
     now: Optional[float] = None,
     out=None,
+    err=None,
 ) -> int:
     """Hook entrypoint. **Never raises; on any failure, empty stdout + exit 0.**
 
@@ -338,6 +339,15 @@ def emit(
     try:
         payload = gate.hook_payload(stdin_text)
         session_id = gate.session_id_from_payload(payload) or ""
+        if not session_id and not dry_run and not force:
+            # #39: without a session id the gate refuses, so a hand-run
+            # `omhc brief --text` used to exit silently — indistinguishable
+            # from "nothing to hand off". A real hook always sends a session
+            # id, and stdout stays empty either way (invariant 2).
+            (sys.stderr if err is None else err).write(
+                "omhc brief: no hook payload with a session id, so nothing was delivered."
+                " Preview with --dry-run, or deliver anyway with --force.\n")
+            return 0
         repo_root = locate.resolve_repo_root(str(payload.get("cwd") or "") or None)
         if locate.refused_root(repo_root):
             return 0
