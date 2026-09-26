@@ -13,7 +13,7 @@ README.md (English) and README.ko.md (Korean) carry the same facts — change bo
 ## Commands
 
 ```bash
-python3 -m unittest discover -s tests -t . -q        # full suite, ~12s, never launches a harness
+python3 -m unittest discover -s tests -t . -q        # full suite, ~25s, never launches a harness
 python3 -m unittest tests.test_mint                   # one module
 python3 -m unittest tests.test_mint.TestBudget.test_output_never_exceeds_the_budget   # one test
 bash tests/smoke.sh                                   # 8 adversarial inputs: hook path must give empty stdout + exit 0
@@ -49,7 +49,7 @@ Entry: `bin/omhc` → `omhc/cli.py` (subcommands `mark`, `brief`, `note`, `log`,
 
 State lives in `~/.omhc/<repo-key>/` (`locate.py`); `fsio.py` owns atomic writes/appends. `watch.py` is an optional accelerator daemon; correctness never depends on it. `hookconf.py` owns the shared `hooks.<Event>[].hooks[].command` schema both harnesses' SessionStart fragments use, so `cmd_status`'s `<adapter-id> hooks` row and `omhc hooks install` judge installs the same way without vendor names in the core.
 
-**Adapters** (`omhc/adapter.py` contract, `omhc/adapters/`): a new harness = one file implementing `detect`, `list_sessions`, `read_session`, `native_resume_hint`, `install_handoff` with `@_register`, one import line in `adapters/__init__.py`, one fixture. No core changes — needing one is a contract defect. `tests/conformance/test_suite.py` parameterizes 22 invariants over the registry, so every adapter gets them automatically. Read-only adapters are a normal state.
+**Adapters** (`omhc/adapter.py` contract, `omhc/adapters/`): a new harness = one file implementing `detect`, `list_sessions`, `read_session`, `native_resume_hint`, `install_handoff` with `@_register`, one import line in `adapters/__init__.py`, one fixture. No core changes — needing one is a contract defect. `tests/conformance/test_suite.py` parameterizes 31 invariants over the registry, so every adapter gets them automatically. Read-only adapters are a normal state.
 
 ## Invariants (violating any is a bug)
 
