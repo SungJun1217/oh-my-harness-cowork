@@ -1148,6 +1148,25 @@ class TestLastRead(unittest.TestCase):
         self.assertEqual(summary["unparsed"], 0)
         self.assertEqual(summary["epoch"], round(NOW))
 
+    def test_a_delivery_is_recorded_as_handed_off_and_a_gated_read_is_not(self):
+        """#48: the read is recorded before the gate, so status must tell a
+        delivered read from one that ended in no handoff."""
+        self.h.plant_codex_session(session_id="cx1")
+        payload = json.dumps({"cwd": self.h.repo_root, "session_id": "me1"})
+        brief.emit(harness="claude-code", stdin_text=payload, home=self.h.home,
+                   now=NOW, out=io.StringIO())
+        self.assertIs(brief.read_last_read(self._state())["delivered"], True)
+        # A phantom reopen (no new human turn): due() offers cx1 again, brief
+        # reads it, and the #27 guard sends nothing.
+        due.mark_reopened(self._state(), "cx1", "codex-cli", NOW + 1)
+        out = io.StringIO()
+        brief.emit(harness="claude-code", home=self.h.home, now=NOW + 2, out=out,
+                   stdin_text=json.dumps({"cwd": self.h.repo_root, "session_id": "me2"}))
+        self.assertEqual(out.getvalue(), "")
+        summary = brief.read_last_read(self._state())
+        self.assertEqual(summary["epoch"], round(NOW + 2), "the phantom reopen was read")
+        self.assertIs(summary["delivered"], False)
+
     def test_recording_never_raises_even_when_the_state_dir_is_unusable(self):
         blocker = os.path.join(self.h.home, "not-a-dir")
         with open(blocker, "w") as fh:
