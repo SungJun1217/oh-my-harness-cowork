@@ -975,3 +975,42 @@ class TestCalledFromHook(unittest.TestCase):
                        stdin_text=json.dumps({"cwd": h.repo_root, "session_id": "me1",
                                               "source": "startup"}))
         self.assertEqual(seen, [True])
+
+
+class TestManualCallHint(unittest.TestCase):
+    """#39: a hand-run brief without a session id says why nothing happened."""
+
+    def setUp(self):
+        self.h = Harness()
+        self.addCleanup(self.h.close)
+        self.h.plant_codex_session()
+
+    def _emit(self, **kw):
+        out, err = io.StringIO(), io.StringIO()
+        code = brief.emit(harness="claude-code", home=self.h.home, now=NOW,
+                          out=out, err=err, as_text=True, **kw)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_no_session_id_prints_a_hint_to_stderr_and_nothing_to_stdout(self):
+        code, out, err = self._emit(stdin_text="")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertIn("--dry-run", err)
+        self.assertIn("--force", err)
+
+    def test_the_hint_consumes_nothing(self):
+        self._emit(stdin_text=json.dumps({"cwd": self.h.repo_root}))
+        code, out, err = self._emit(
+            stdin_text=json.dumps({"cwd": self.h.repo_root, "session_id": "me1",
+                                   "source": "startup"}))
+        self.assertTrue(out.startswith("[omhc]"), "the manual call must not use up the delivery")
+        self.assertEqual(err, "")
+
+    def test_dry_run_and_force_are_not_interrupted(self):
+        manual = json.dumps({"cwd": self.h.repo_root})
+        _code, out, err = self._emit(stdin_text=manual, dry_run=True)
+        self.assertTrue(out.startswith("[omhc]"))
+        self.assertEqual(err, "")
+        _code, out, err = self._emit(stdin_text=manual, force=True)
+        self.assertTrue(out.startswith("[omhc]"))
+        self.assertEqual(err, "")
