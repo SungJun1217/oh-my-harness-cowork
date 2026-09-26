@@ -90,6 +90,11 @@ class HandoffBundle(NamedTuple):
     body_md: str
     repo_root: str
     to_adapter_id: str
+    # True when brief runs inside the receiving harness's SessionStart hook,
+    # so the hook's stdout is already the delivery (Path A). An adapter that
+    # otherwise infers Path A from its hook config must trust this instead —
+    # a wrapper script it can't recognize still runs (#38).
+    from_hook: bool = False
 
 
 class InstallReceipt(NamedTuple):
