@@ -137,7 +137,7 @@ git 레포가 아닌 프로젝트라면 최상위에서 `touch .omhc-root`를 �
 | `omhc watch [--stop\|--once]` | 선택 사항인 가속용 데몬. 없어도 결과는 같음 |
 | `omhc brief --harness X --dry-run` | 다음 세션이 받을 핸드오프를 미리 봄. gate, 아카이브, 전달은 건드리지 않음 |
 | `omhc mark` / `omhc brief --harness X` | 훅이 부름. 세션 시작을 기록하고 핸드오프를 출력 |
-| `omhc turn --harness X` | `UserPromptSubmit` 훅이 매 사람 턴마다 부름. 상대 하네스가 이 세션이 이미 건드린 파일을 고쳤을 때 한 번 경고 (docs/v2-concurrency.md phase 2) |
+| `omhc turn --harness X` | `UserPromptSubmit` 훅이 매 사람 턴마다 부름. 상대 하네스가 이 세션이 이미 건드린 파일을 고쳤을 때 한 번 경고. 여기에 더해 — [`OMHC_LIVE=1`](docs/install.md#live-notes-from-a-still-running-session)로 켜면 — 상대 세션의 최신 사람 발화와 미해결 실패도 알림 (docs/v2-concurrency.md phase 2-3) |
 
 끄려면 `OMHC_OFF=1` 또는 `~/.omhc/<repo-key>/off` 파일을 쓰십시오. 헤드리스
 세션(`claude -p`, `codex exec`)은

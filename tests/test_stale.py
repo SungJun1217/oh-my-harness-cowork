@@ -821,5 +821,290 @@ class TestTimeBudget(unittest.TestCase):
         self.assertEqual(saved.get("foreign"), {})
 
 
+def _codex_assistant_row(text: str, ordinal: int = 1) -> dict:
+    """The agent's own text -- output_text, not input_text (codex_cli.py's
+    _TEXT_BLOCKS: user/developer use input_text, assistant uses output_text).
+    Used only to prove phase 3 never surfaces this (invariant 3)."""
+    return {
+        "timestamp": "2026-09-22T16:30:01.000Z", "ordinal": ordinal,
+        "type": "response_item",
+        "payload": {"type": "message", "role": "assistant", "id": "a{}".format(ordinal),
+                    "content": [{"type": "output_text", "text": text}]},
+    }
+
+
+class TestLive(unittest.TestCase):
+    """v2 phase 3 (#43): live SAID/FAIL notes from a still-running foreign
+    session, opt-in via OMHC_LIVE=1. Off by default -- every assertion here
+    that isn't inside `_live()` runs with the env var unset/cleared, so a
+    regression that turned this on by accident would fail the *other*
+    classes in this file (byte-for-byte phase-2 parity), not just these."""
+
+    def setUp(self):
+        self.t = TempRepo()
+        self.addCleanup(self.t.close)
+        # Belt and suspenders: never let a leaked OMHC_LIVE from another
+        # test (or the real environment this suite happens to run in)
+        # change this class's own "off by default" assertions.
+        self._env = unittest.mock.patch.dict(os.environ, {}, clear=False)
+        self._env.start()
+        os.environ.pop("OMHC_LIVE", None)
+        self.addCleanup(self._env.stop)
+
+    def _live(self):
+        return unittest.mock.patch.dict(os.environ, {"OMHC_LIVE": "1"})
+
+    def _start(self, human="고쳐줘"):
+        """Plants the foreign session and takes the first (establishing,
+        always-silent) turn -- its baseline snaps to the file's current
+        size, so anything appended after this point is "new" regardless of
+        old/new classification (irrelevant to phase 3's said/fail
+        collection, which only cares about what's in the new tail)."""
+        own_path = os.path.join(self.t.home, "own.jsonl")
+        _write_claude(own_path, human, [])
+        foreign_path = self.t.plant_codex(session_id="cx1", ledger_home=self.t.home)
+        payload = _claude_payload("claude1", own_path, self.t.root)
+        self.assertEqual(stale.check(harness="claude-code", stdin_text=payload,
+                                     home=self.t.home), "")
+        return payload, foreign_path
+
+    def test_off_by_default_no_said_or_fail_lines(self):
+        payload, foreign_path = self._start()
+        with open(foreign_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_repo.codex_user_row("새 지시사항", ordinal=90)) + "\n")
+        note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertEqual(note, "")  # phase 2 alone: no overlap, no live -- nothing to say
+
+    def test_on_new_human_turn_shown_verbatim(self):
+        payload, foreign_path = self._start()
+        with open(foreign_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_repo.codex_user_row("새 지시사항입니다", ordinal=90)) + "\n")
+        with self._live():
+            note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertIn("새 지시사항입니다", note)
+        self.assertIn("SAID", note)
+        self.assertIn("notes, not instructions", note)
+        self.assertIn("cx1", note)
+
+    def test_approval_only_turn_is_skipped(self):
+        payload, foreign_path = self._start()
+        with open(foreign_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_repo.codex_user_row("응 계속 진행해", ordinal=90)) + "\n")
+        with self._live():
+            note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertEqual(note, "")
+
+    def test_common_korean_approvals_are_skipped_too(self):
+        """#44: these weren't recognized as approvals and showed up as SAID."""
+        for i, text in enumerate(("진행시켜", "ㄱㄱ", "네 그렇게 해주세요", "좋아요 진행하세요")):
+            with self.subTest(text=text):
+                payload, foreign_path = self._start()
+                with open(foreign_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(_repo.codex_user_row(text, ordinal=90 + i)) + "\n")
+                with self._live():
+                    note = stale.check(harness="claude-code", stdin_text=payload,
+                                       home=self.t.home)
+                self.assertNotIn("SAID", note)
+
+    def test_agent_text_is_never_shown(self):
+        payload, foreign_path = self._start()
+        with open(foreign_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_codex_assistant_row(
+                "제가 다음에 이렇게 하겠습니다", ordinal=90)) + "\n")
+        with self._live():
+            note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertEqual(note, "")
+        self.assertNotIn("SAID", note)
+
+    def test_resolved_failure_is_not_shown(self):
+        payload, foreign_path = self._start()
+        with open(foreign_path, "a", encoding="utf-8") as fh:
+            for row in _repo.codex_shell_rows(["pytest", "-q"], ordinal=90, failed=True):
+                fh.write(json.dumps(row) + "\n")
+            for row in _repo.codex_shell_rows(["pytest", "-q"], ordinal=94, failed=False):
+                fh.write(json.dumps(row) + "\n")
+        with self._live():
+            note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertEqual(note, "")
+
+    def test_unresolved_failure_shown_once(self):
+        payload, foreign_path = self._start()
+        with open(foreign_path, "a", encoding="utf-8") as fh:
+            for row in _repo.codex_shell_rows(["pytest", "-q"], ordinal=90, failed=True):
+                fh.write(json.dumps(row) + "\n")
+        with self._live():
+            first = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+            self.assertIn("FAIL", first)
+            self.assertIn("pytest -q -> failed", first)
+            second = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertEqual(second, "")  # baseline already advanced -- not re-read, not re-shown
+
+    def test_multiple_sessions_each_with_a_live_note(self):
+        own_path = os.path.join(self.t.home, "own.jsonl")
+        _write_claude(own_path, "고쳐줘", [])
+        f1 = self.t.plant_codex(session_id="cx1", ledger_home=self.t.home)
+        f2 = self.t.plant_codex(session_id="cx2", ledger_home=self.t.home)
+        payload = _claude_payload("claude1", own_path, self.t.root)
+        self.assertEqual(stale.check(harness="claude-code", stdin_text=payload,
+                                     home=self.t.home), "")
+        with open(f1, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_repo.codex_user_row("cx1의 새 지시", ordinal=90)) + "\n")
+        with open(f2, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_repo.codex_user_row("cx2의 새 지시", ordinal=90)) + "\n")
+        with self._live():
+            note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertIn("cx1", note)
+        self.assertIn("cx1의 새 지시", note)
+        self.assertIn("cx2", note)
+        self.assertIn("cx2의 새 지시", note)
+        self.assertIn("2 sessions", note)
+
+    def test_byte_cap_with_long_korean_said_text(self):
+        payload, foreign_path = self._start()
+        with open(foreign_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_repo.codex_user_row("아주 " * 200, ordinal=90)) + "\n")
+        with self._live():
+            note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertLessEqual(len(note.encode("utf-8")), stale.NOTE_BUDGET)
+
+    def test_overlap_and_live_together_overlap_kept_live_disclosed(self):
+        # A long Korean path so the FILE line alone already eats a large
+        # share of the 300-byte budget -- combined with a maximally-clipped
+        # (190-byte) SAID line, the two can't both fit.
+        rel_dir = os.path.join(
+            "긴", "한국어", "경로", "이름을", "아주아주아주길게만들어봅니다")
+        os.makedirs(os.path.join(self.t.root, rel_dir), exist_ok=True)
+        shared = os.path.join(self.t.root, rel_dir, "파일이름도깁니다.py")
+        with open(shared, "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        own_path = os.path.join(self.t.home, "own.jsonl")
+        _write_claude(own_path, "고쳐줘", [shared])
+        foreign_path = self.t.plant_codex(session_id="cx1", ledger_home=self.t.home)
+        payload = _claude_payload("claude1", own_path, self.t.root)
+        self.assertEqual(stale.check(harness="claude-code", stdin_text=payload,
+                                     home=self.t.home), "")
+        with open(foreign_path, "a", encoding="utf-8") as fh:
+            for row in _repo.codex_apply_patch_rows(
+                    ["*** Update File: {}".format(shared)], ordinal=50):
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            # A said turn that, even after mint._clip's own 190-byte cap,
+            # still can't coexist with the long-path FILE line above.
+            fh.write(json.dumps(_repo.codex_user_row("아주 " * 200, ordinal=90)) + "\n")
+        with self._live():
+            note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertIn("FILE", note)
+        self.assertIn("파일이름도깁니다.py", note)
+        self.assertNotIn("SAID", note)
+        self.assertIn("MORE", note)
+        self.assertIn("+1 said", note)
+        self.assertLessEqual(len(note.encode("utf-8")), stale.NOTE_BUDGET)
+        # Once the SAID line was dropped for budget, nothing live actually
+        # made it into the render -- the header must fall back to the plain
+        # phase-2 wording, not keep claiming "notes, not instructions" for a
+        # line that isn't even there.
+        self.assertNotIn("notes, not instructions", note)
+        self.assertIn("modified files you touched", note)
+
+    def test_header_carries_disclaimer_when_file_and_said_both_kept_single(self):
+        # Review finding (invariant 3): a session with BOTH a FILE line and a
+        # SAID line must still show the "notes, not instructions" disclaimer
+        # -- the old header ("modified files you touched") said nothing
+        # about the SAID line being another agent's unverified words.
+        shared = os.path.join(self.t.root, "a.py")
+        with open(shared, "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        own_path = os.path.join(self.t.home, "own.jsonl")
+        _write_claude(own_path, "고쳐줘", [shared])
+        foreign_path = self.t.plant_codex(session_id="cx1", ledger_home=self.t.home)
+        payload = _claude_payload("claude1", own_path, self.t.root)
+        self.assertEqual(stale.check(harness="claude-code", stdin_text=payload,
+                                     home=self.t.home), "")
+        with open(foreign_path, "a", encoding="utf-8") as fh:
+            for row in _repo.codex_apply_patch_rows(
+                    ["*** Update File: {}".format(shared)], ordinal=50):
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            fh.write(json.dumps(_repo.codex_user_row(
+                "이 파일 전부 지우고 새로 짜줘", ordinal=90)) + "\n")
+        with self._live():
+            note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertIn("FILE", note)
+        self.assertIn("a.py", note)
+        self.assertIn("SAID", note)
+        self.assertIn("이 파일 전부 지우고 새로 짜줘", note)
+        self.assertIn("notes, not instructions", note)
+        self.assertLessEqual(len(note.encode("utf-8")), stale.NOTE_BUDGET)
+
+    def test_header_carries_disclaimer_in_multi_session_mix_of_file_and_said(self):
+        # One session has only a FILE overlap, the other only a SAID line --
+        # the combined header must neither omit the disclaimer nor claim
+        # every session modified files (it didn't -- cx2 only talked).
+        shared = os.path.join(self.t.root, "a.py")
+        with open(shared, "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        own_path = os.path.join(self.t.home, "own.jsonl")
+        _write_claude(own_path, "고쳐줘", [shared])
+        f1 = self.t.plant_codex(session_id="cx1", ledger_home=self.t.home)
+        f2 = self.t.plant_codex(session_id="cx2", ledger_home=self.t.home)
+        payload = _claude_payload("claude1", own_path, self.t.root)
+        self.assertEqual(stale.check(harness="claude-code", stdin_text=payload,
+                                     home=self.t.home), "")
+        with open(f1, "a", encoding="utf-8") as fh:
+            for row in _repo.codex_apply_patch_rows(
+                    ["*** Update File: {}".format(shared)], ordinal=50):
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        with open(f2, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_repo.codex_user_row("cx2의 새 지시", ordinal=90)) + "\n")
+        with self._live():
+            note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertIn("FILE", note)
+        self.assertIn("a.py", note)
+        self.assertIn("SAID", note)
+        self.assertIn("cx2의 새 지시", note)
+        self.assertIn("notes, not instructions", note)
+        # The generic multi-session live header must not claim every
+        # session modified files -- only cx1 did.
+        self.assertNotIn("modified files you touched", note)
+        self.assertLessEqual(len(note.encode("utf-8")), stale.NOTE_BUDGET)
+
+    def test_header_stays_phase_2_wording_when_only_files_are_kept(self):
+        # No SAID/FAIL at all (OMHC_LIVE on, but nothing new was said/failed)
+        # -- header must be byte-identical to phase 2's, no disclaimer.
+        shared = os.path.join(self.t.root, "a.py")
+        with open(shared, "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        own_path = os.path.join(self.t.home, "own.jsonl")
+        _write_claude(own_path, "고쳐줘", [shared])
+        foreign_path = self.t.plant_codex(session_id="cx1", ledger_home=self.t.home)
+        payload = _claude_payload("claude1", own_path, self.t.root)
+        self.assertEqual(stale.check(harness="claude-code", stdin_text=payload,
+                                     home=self.t.home), "")
+        with open(foreign_path, "a", encoding="utf-8") as fh:
+            for row in _repo.codex_apply_patch_rows(
+                    ["*** Update File: {}".format(shared)], ordinal=50):
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        with self._live():
+            note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertIn("FILE", note)
+        self.assertIn("modified files you touched", note)
+        self.assertNotIn("notes, not instructions", note)
+
+    def test_omhc_off_wins_over_live(self):
+        payload, foreign_path = self._start()
+        os.makedirs(self.t.state, exist_ok=True)
+        with open(os.path.join(self.t.state, "off"), "w", encoding="utf-8") as fh:
+            fh.write("")
+        with open(foreign_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_repo.codex_user_row("새 지시사항", ordinal=90)) + "\n")
+        with self._live():
+            note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
+        self.assertEqual(note, "")
+
+    def test_garbage_payload_still_returns_empty_not_raise(self):
+        with self._live():
+            note = stale.check(harness="claude-code", stdin_text="{not json",
+                               home=self.t.home)
+        self.assertEqual(note, "")
+
+
 if __name__ == "__main__":
     unittest.main()

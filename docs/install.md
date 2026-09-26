@@ -11,6 +11,7 @@
 - [Delivery fallbacks](#delivery-fallbacks)
 - [Repos that share AGENTS.md with Claude Code](#repos-that-share-agentsmd-with-claude-code)
 - [Headless sessions](#headless-sessions)
+- [Live notes from a still-running session](#live-notes-from-a-still-running-session)
 - [Uninstall](#uninstall)
 
 ## The install script
@@ -242,6 +243,19 @@ ones in a sandbox, export `OMHC_ALLOW_HEADLESS=1` for the receiving launch: elig
 is judged when the receiving session starts, so it also admits headless sessions that
 ran before you set it. Exporting it once for the whole run is simplest. Subagents and
 sidechains stay excluded even then.
+
+## Live notes from a still-running session
+
+`omhc turn`'s per-turn overlap warning (the `UserPromptSubmit` hook) can also
+report the other harness's newest human turn and any new unresolved failure,
+not just file overlaps — v2 phase 3 (docs/v2-concurrency.md). This is
+opt-in: export `OMHC_LIVE=1` for the receiving launch (same convention as
+`OMHC_ALLOW_HEADLESS`) to turn it on; unset (the default), the per-turn note
+is byte-for-byte identical to phase 2 (file-overlap warnings only). It never
+shows the other agent's own words or an unverified plan — only the human's
+verbatim text and machine-observed pass/fail facts (invariant 3) — and it
+shares the same 300-byte note and budget as the overlap warning, with file
+overlaps always kept first.
 
 ## Uninstall
 
