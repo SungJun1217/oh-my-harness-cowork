@@ -894,6 +894,18 @@ class TestLive(unittest.TestCase):
             note = stale.check(harness="claude-code", stdin_text=payload, home=self.t.home)
         self.assertEqual(note, "")
 
+    def test_common_korean_approvals_are_skipped_too(self):
+        """#44: these weren't recognized as approvals and showed up as SAID."""
+        for i, text in enumerate(("진행시켜", "ㄱㄱ", "네 그렇게 해주세요", "좋아요 진행하세요")):
+            with self.subTest(text=text):
+                payload, foreign_path = self._start()
+                with open(foreign_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(_repo.codex_user_row(text, ordinal=90 + i)) + "\n")
+                with self._live():
+                    note = stale.check(harness="claude-code", stdin_text=payload,
+                                       home=self.t.home)
+                self.assertNotIn("SAID", note)
+
     def test_agent_text_is_never_shown(self):
         payload, foreign_path = self._start()
         with open(foreign_path, "a", encoding="utf-8") as fh:

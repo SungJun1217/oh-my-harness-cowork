@@ -156,6 +156,30 @@ class TestProvenanceSlots(unittest.TestCase):
         self.assertIn("PLAN?", slots)
         self.assertIn("Codex 파서", slots["PLAN?"][0])
 
+    def test_common_korean_approvals_never_become_next(self):
+        """#44: these slipped past the approval check and became NEXT, laundering
+        the prior agent's proposal into a human instruction (invariant 3)."""
+        for text in ("진행시켜", "ㄱㄱ", "네 그렇게 해주세요", "좋아요 진행하세요",
+                     "그래 그렇게 가자", "ㅇㅋ", "부탁드려요"):
+            with self.subTest(text=text):
+                out = mint.mint(read_of([
+                    ev(1, text="목표를 세운다"),
+                    ev(2, author="agent", text="다음으로 Codex 파서를 붙이겠습니다."),
+                    ev(3, text=text),
+                ]), to_adapter_id="claude-code", now=NOW)
+                self.assertNotIn("NEXT", slots_of(out))
+                self.assertIn("PLAN?", slots_of(out))
+
+    def test_instructions_that_contain_an_approval_word_still_become_next(self):
+        for text in ("그렇게 하지 말고 파서부터 고쳐", "좋아 그런데 테스트는 빼줘",
+                     "네 그리고 README도 고쳐줘", "진행 상황 알려줘", "확인"):
+            with self.subTest(text=text):
+                out = mint.mint(read_of([
+                    ev(1, text="목표를 세운다"),
+                    ev(3, text=text),
+                ]), to_adapter_id="claude-code", now=NOW)
+                self.assertEqual(slots_of(out).get("NEXT"), [text])
+
     def test_plan_question_mark_is_the_label(self):
         out = mint.mint(read_of([
             ev(1, text="목표"),
