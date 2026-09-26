@@ -901,3 +901,46 @@ class TestOutboxHygieneIntegration(unittest.TestCase):
             os.chdir(cwd)
 
         self.assertFalse(os.path.exists(fresh))
+
+
+class TestLastRead(unittest.TestCase):
+    """#37: every real read leaves a summary for `omhc status`'s `last read` row."""
+
+    def setUp(self):
+        self.h = Harness()
+
+    def tearDown(self):
+        self.h.close()
+
+    def _state(self):
+        return locate.state_dir(locate.repo_key(self.h.repo_root), home=self.h.home)
+
+    def test_a_real_read_records_the_summary(self):
+        self.h.plant_codex_session(session_id="cx1")
+        brief.emit(harness="claude-code",
+                   stdin_text=json.dumps({"cwd": self.h.repo_root, "session_id": "me1"}),
+                   home=self.h.home, now=NOW, out=io.StringIO())
+        summary = brief.read_last_read(self._state())
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["harness"], "codex-cli")
+        self.assertTrue(summary["session"].startswith("cx1"))
+        self.assertGreater(summary["events"], 0)
+        self.assertEqual(summary["unparsed"], 0)
+        self.assertEqual(summary["epoch"], round(NOW))
+
+    def test_recording_never_raises_even_when_the_state_dir_is_unusable(self):
+        blocker = os.path.join(self.h.home, "not-a-dir")
+        with open(blocker, "w") as fh:
+            fh.write("x")
+        read = mock.Mock()
+        read.ref.adapter_id, read.ref.session_id = "codex-cli", "cx1"
+        read.events, read.unparsed, read.dropped = (), 0, {}
+        brief.record_read(blocker, read, NOW, home=self.h.home)  # must not raise
+        self.assertIsNone(brief.read_last_read(blocker))
+
+    def test_an_unreadable_summary_reads_as_none(self):
+        state = self._state()
+        os.makedirs(state, exist_ok=True)
+        with open(os.path.join(state, brief.LAST_READ_NAME), "w") as fh:
+            fh.write("{not json")
+        self.assertIsNone(brief.read_last_read(state))

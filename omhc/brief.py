@@ -14,6 +14,7 @@ from .adapter import HandoffBundle
 GUARD_LOG = "guard.log"
 NOTES_NAME = "notes.txt"
 ARTIFACT_NAME = "omhc.txt"
+LAST_READ_NAME = "last_read.json"
 
 
 def log_failure(home: Optional[str], detail: str) -> None:
@@ -30,6 +31,44 @@ def log_failure(home: Optional[str], detail: str) -> None:
                 time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), detail))
     except OSError:
         pass
+
+
+def record_read(state_dir: str, read, now: float, home: Optional[str] = None) -> None:
+    """Records how the last session read went, for `omhc status` (#37). Never raises.
+
+    Invariant 7 asks for degradation to be reported in status, but the
+    `SessionRead` tallies were thrown away right after mint(). `unparsed` only
+    counts lines that aren't JSON objects (measured: 0 in 58 real sessions);
+    unknown record types land in `dropped` by name, by design. So the useful
+    signal is how many events came out of a non-empty session, next to how
+    much was skipped. A per-process tmp suffix keeps concurrent SessionStart
+    hooks (Codex runs them in parallel) from replacing each other's tmp file.
+    """
+    try:
+        summary = {
+            "harness": read.ref.adapter_id,
+            "session": read.ref.session_id,
+            "events": len(read.events),
+            "unparsed": int(read.unparsed),
+            "skipped": sum(int(v) for v in read.dropped.values()),
+            "skipped_types": len(read.dropped),
+            "epoch": round(now),
+        }
+        fsio.write_atomic(os.path.join(state_dir, LAST_READ_NAME),
+                          json.dumps(summary, sort_keys=True) + "\n",
+                          fsync=False, suffix=".{}.tmp".format(os.getpid()))
+    except Exception as exc:  # a status aid must never break the hook path
+        log_failure(home, "last_read record failed: {}".format(exc))
+
+
+def read_last_read(state_dir: str) -> Optional[dict]:
+    """The summary record_read left, or None if missing or unreadable."""
+    try:
+        with open(os.path.join(state_dir, LAST_READ_NAME), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 # Line format `omhc note` writes: "<epoch>\t<text>". Old lines (no timestamp) are also read.
@@ -179,6 +218,8 @@ def compute(
 
     ref = refs[0]
     read = adapter.read_session(ref)
+    if not dry_run:
+        record_read(state, read, stamp, home=home)
 
     # reopen is only a hint mark leaves saying "this may have reopened", not a
     # guarantee that a new human turn actually exists (#27) — an empty-prompt
