@@ -3,18 +3,26 @@
 # `omhc status`가 확인하는 것
 
 `omhc status`의 모든 행은 세 라벨 중 하나입니다. 실제로 판정되어 exit
-code를 게이팅할 수 있는 **PASS**/**FAIL**(adapters, archive, instruction
-files, `ledger rejects`, `codex hook` 같은 어댑터 health 행), 그리고
-정보성이거나 아직 판단할 근거가 없는 행을 위한 **`----`**(ledger, off
-switch, pull rate, watcher)입니다. `----`는 게이팅하지 않습니다. SKIP은
+code를 게이팅할 수 있는 **PASS**/**FAIL**, 그리고 정보성이거나 아직 판단할
+근거가 없는 행을 위한 **`----`**입니다. `----`는 게이팅하지 않습니다. SKIP은
 없습니다.
 
-- [ledger rejects](#ledger-rejects)
-- [codex hook](#codex-hook)
-- [codex root markers](#codex-root-markers)
-- [codex agents.md budget](#codex-agentsmd-budget)
-- [`<adapter-id>` hooks](#adapter-id-hooks)
-- [pull rate](#pull-rate)
+| 행 | 보여 주는 것 |
+|---|---|
+| `adapters` | 이 머신에서 감지된 하네스. 하나도 없으면 FAIL |
+| `ledger` | 이 레포에 기록된 세션 시작 수(`----`) |
+| [`ledger rejects`](#ledger-rejects) | 너무 길어서 버려진 ledger 행 |
+| `archive` | 아카이브한 세션마다 아직 따라잡지 못한 꼬리(`tail=…B`). 핸드오프는 전달됐는데 아카이브된 것이 없으면 FAIL |
+| `off switch` | `OMHC_OFF`나 `off` 파일로 omhc가 꺼져 있는지(`----`) |
+| `instruction files` | `AGENTS.md`를 `CLAUDE.md`와 공유하는지(공유하면 Path B 대신 outbox로 떨어짐). 오래된 omhc block이 Claude Code로 샐 상황이면 FAIL |
+| [`codex hook`](#codex-hook), [`codex root markers`](#codex-root-markers), [`codex agents.md budget`](#codex-agentsmd-budget) | Codex 상태 행 |
+| [`<adapter-id> hooks`](#adapter-id-hooks) | omhc 훅이 그 하네스 설정에 병합돼 있는지 |
+| [`pull rate`](#pull-rate) | 최근 핸드오프 중 실제로 파본 것의 수 |
+| `watcher (optional)` | `omhc watch` 데몬이 도는지(`----`) |
+
+행 다음의 `events`는 인덱싱된 이벤트를 verb별로 세고, `artifact`는 마지막으로
+만든 핸드오프(상태 디렉터리의 `omhc.txt`) 크기를 보여 줍니다. `--json`은
+같은 행과 원래 숫자를 함께 출력합니다.
 
 ## ledger rejects
 

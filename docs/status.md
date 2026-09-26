@@ -3,18 +3,26 @@
 # What `omhc status` checks
 
 `omhc status` gives every row one of three labels: **PASS** or **FAIL** for
-checks that were actually judged and can gate the exit code (adapters,
-archive, instruction files, `ledger rejects`, and adapter health rows such as
-`codex hook`), and **`----`** for rows that are informational or not
-judgeable yet (ledger, off switch, pull rate, watcher) — `----` never gates.
-There is no SKIP.
+checks that were actually judged and can gate the exit code, and **`----`** for
+rows that are informational or not judgeable yet — `----` never gates. There
+is no SKIP.
 
-- [ledger rejects](#ledger-rejects)
-- [codex hook](#codex-hook)
-- [codex root markers](#codex-root-markers)
-- [codex agents.md budget](#codex-agentsmd-budget)
-- [`<adapter-id>` hooks](#adapter-id-hooks)
-- [pull rate](#pull-rate)
+| Row | What it shows |
+|---|---|
+| `adapters` | Which harnesses are detected on this machine. FAIL when none is |
+| `ledger` | How many session starts are recorded for this repo (`----`) |
+| [`ledger rejects`](#ledger-rejects) | Ledger rows dropped for being too long |
+| `archive` | Each archived session with its unarchived tail (`tail=…B`). FAIL when handoffs were delivered but nothing got archived |
+| `off switch` | Whether `OMHC_OFF` or the `off` file has turned omhc off (`----`) |
+| `instruction files` | Whether `AGENTS.md` is shared with `CLAUDE.md` (Path B then falls to the outbox). FAIL when a stale omhc block would leak into Claude Code |
+| [`codex hook`](#codex-hook), [`codex root markers`](#codex-root-markers), [`codex agents.md budget`](#codex-agentsmd-budget) | Codex health rows |
+| [`<adapter-id> hooks`](#adapter-id-hooks) | Whether omhc's hooks are merged into that harness's config |
+| [`pull rate`](#pull-rate) | How many recent handoffs were actually dug into |
+| `watcher (optional)` | Whether the `omhc watch` daemon is running (`----`) |
+
+After the rows, `events` counts indexed events by verb and `artifact` shows the
+size of the last minted handoff (`omhc.txt` in the state directory). `--json`
+prints the same rows plus the raw numbers.
 
 ## ledger rejects
 

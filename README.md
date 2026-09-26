@@ -134,6 +134,7 @@ For a project that isn't a git repo, run `touch .omhc-root` at its top once.
 | `omhc hooks install\|uninstall [--harness ID]` | Merges or strips omhc's own `SessionStart` hooks |
 | `omhc clear` | Removes this repo's installed markers, outbox files and reject records |
 | `omhc watch [--stop\|--once]` | Optional accelerator daemon; results are identical without it |
+| `omhc brief --harness X --dry-run` | Previews the handoff the next session would get, without claiming it, archiving or delivering |
 | `omhc mark` / `omhc brief --harness X` | Called by the hook: record the session start, then print the handoff |
 
 Turn it off with `OMHC_OFF=1` or an `~/.omhc/<repo-key>/off` file. Headless
@@ -168,7 +169,7 @@ The measured facts behind the design are in
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t . -q   # ~12s, never launches a harness
+python3 -m unittest discover -s tests -t . -q   # ~25s, never launches a harness
 bash tests/smoke.sh                             # 8 adversarial inputs
 ```
 
@@ -180,6 +181,6 @@ A new harness costs **one file and one fixture**: implement `detect`,
 `list_sessions`, `read_session`, `native_resume_hint` and `install_handoff` in
 `omhc/adapters/<harness>.py` with `@_register`, add one import line to
 `omhc/adapters/__init__.py`, and freeze one real session under
-`tests/fixtures/<harness>/`. The conformance suite parameterizes 22 invariants
+`tests/fixtures/<harness>/`. The conformance suite parameterizes 31 invariants
 over the registry, so the new adapter is tested for free. A harness with no
 session hook is simply read-only.
