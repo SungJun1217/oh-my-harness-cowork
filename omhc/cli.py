@@ -1078,7 +1078,9 @@ def cmd_log(args, *, home=None, out=sys.stdout) -> int:
     # unbounded output F7 exists to prevent. A negative value would also
     # produce a nonsensical cut from the front.
     if args.last is not None and args.last >= 0:
-        rows = rows[len(rows) - args.last :] if args.last else []
+        # max(0, ...): with fewer rows than --last, len - N goes negative and
+        # slices from the end instead (9 rows, --last 10 gave 1 line, #46).
+        rows = rows[max(0, len(rows) - args.last):] if args.last else []
 
     # Made unique across the whole state directory, not just this batch —
     # otherwise a prefix shortened by filtering could collide with another
@@ -1223,7 +1225,7 @@ def cmd_trace(args, *, home=None, out=sys.stdout) -> int:
     matches.sort(key=lambda pair: (_session_rank(pair[0]), pair[1].seq))
 
     if args.last is not None and args.last >= 0:
-        matches = matches[len(matches) - args.last :] if args.last else []
+        matches = matches[max(0, len(matches) - args.last):] if args.last else []  # #46
 
     if not matches:
         if args.json:

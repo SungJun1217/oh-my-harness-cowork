@@ -195,6 +195,16 @@ class TestLogRefsAndSaidPreview(unittest.TestCase):
         ref = line.split()[0]
         self.assertRegex(ref, r"^[0-9a-f]+#1$")
 
+    def test_last_n_larger_than_the_row_count_shows_every_row(self):
+        """#46: with 9 rows, --last 10 printed 1 line and --last 11 printed 2,
+        because len - N went negative and sliced from the end."""
+        _write_idx(self.t.state, "aaaaaaaa1111", [(i, "ran", "cmd{}".format(i)) for i in range(1, 10)])
+        for n, expected in ((5, 5), (9, 9), (10, 9), (11, 9), (17, 9), (30, 9)):
+            with self.subTest(last=n):
+                code, out = self._log(["--last", str(n)])
+                self.assertEqual(code, 0)
+                self.assertEqual(len(out.strip().splitlines()), expected)
+
     def test_said_row_without_text_shows_a_hint(self):
         _write_idx(self.t.state, "aaaaaaaa1111", [(1, "said", "")])
         code, out = self._log()
