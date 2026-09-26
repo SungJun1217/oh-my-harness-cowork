@@ -19,9 +19,10 @@ from . import stale
 
 PROG = "omhc turn"
 
-# Same select-based non-blocking read `cli._stdin_text` uses — kept as its
-# own tiny copy rather than importing cli (see module docstring) or fsio
-# (stdin reading isn't a filesystem op fsio owns).
+# Same read-to-EOF as `cli._stdin_text` (the hook harness writes the payload
+# and closes the pipe) — kept as its own tiny copy rather than importing cli
+# (see module docstring) or fsio (stdin reading isn't a filesystem op fsio
+# owns). Callers that aren't a hook must pass --stdin.
 _STDIN_CAP = 1 << 20
 
 # review #1 finding 3: NOTE_BUDGET (300) bounds the raw note text, but the

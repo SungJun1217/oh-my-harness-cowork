@@ -25,6 +25,15 @@ class TestMainNeverExitsNonzero(unittest.TestCase):
     """Review #1 finding 3: argparse errors on UserPromptSubmit must never
     become exit 2 — that would block the user's own prompt (invariant 2)."""
 
+    def setUp(self):
+        # main() without --stdin reads the real stdin to EOF, as the hook
+        # does. A test runner's stdin can be an open pipe or socket that never
+        # reaches EOF (a backgrounded run hung for 84 minutes), so give every
+        # call here an empty, closed stdin.
+        patcher = unittest.mock.patch.object(turn.sys, "stdin", io.StringIO(""))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_missing_harness_is_silent(self):
         self.assertEqual(turn.main([]), 0)
 
