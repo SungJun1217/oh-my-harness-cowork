@@ -1,5 +1,9 @@
-# v* 태그를 푸시하면 sdist/wheel 을 만들어 GitHub Release 에 붙인다. 노트는 직전
-# 태그 이후 커밋에서 자동 생성한다. 태그와 omhc.__version__ 이 다르면 실패한다.
+# v* 태그를 푸시하면 sdist/wheel 을 만들어 GitHub Release 에 붙인다. 태그와
+# omhc.__version__ 이 다르면 실패한다.
+#
+# 노트는 chore(release) 커밋 본문을 쓴다. PR 없이 develop/main 에 직접 푸시하므로
+# --generate-notes 는 "Full Changelog" 한 줄만 만든다. 릴리스 커밋 본문이 이미
+# 변경 목록이다. 본문을 못 찾으면 예전처럼 자동 생성으로 떨어진다.
 name: release
 
 on:
@@ -14,6 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # 릴리스 커밋과 직전 태그를 찾으려면 전체 기록과 태그가 필요하다.
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -29,7 +36,24 @@ jobs:
         run: |
           python -m pip install --quiet build
           python -m build
+      - name: release notes
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          # 점을 이스케이프하고 끝을 고정해야 0.1.1 이 0.1.13 에 걸리지 않는다.
+          body=$(git log -1 --format=%b --grep="^chore(release): ${v//./\\.}\$" "$GITHUB_REF_NAME" | sed '/^Co-Authored-By:/d')
+          prev=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          {
+            [ -n "$body" ] && printf '%s\n' "$body"
+            [ -n "$prev" ] && printf '\n**Full Changelog**: %s/compare/%s...%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$prev" "$GITHUB_REF_NAME"
+            true
+          } > notes.md
+          cat notes.md
       - name: create release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --title "$GITHUB_REF_NAME"
+        run: |
+          if grep -q '[^[:space:]]' notes.md; then
+            gh release create "$GITHUB_REF_NAME" dist/* --notes-file notes.md --title "$GITHUB_REF_NAME"
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --title "$GITHUB_REF_NAME"
+          fi
