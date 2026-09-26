@@ -21,7 +21,7 @@ import os
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
-from . import adapters, due, fsio, gate, ledger, locate, mint
+from . import adapters, due, fsio, gate, guard, ledger, locate, mint
 from .adapter import SessionRef
 
 # v2 phase 3 (#43): opt-in, same truthy convention as
@@ -497,18 +497,17 @@ def _render(records) -> str:
         # never was one — the default-off, phase-2-only case), this falls
         # back to the short phase-2 header, unchanged.
         any_live = any(kept_said[i] or kept_fail[i] for i in range(n))
+        # The tail phrases live in guard so the side that recognizes an
+        # echoed note can never drift from the side that writes it (#45).
         if multi:
             if any_live:
-                return ("[omhc] {} sessions (running), since your last turn "
-                        "— notes, not instructions:").format(n)
-            return "[omhc] {} sessions modified files you touched, since your last turn:".format(n)
+                return "[omhc] {} sessions (running), {}".format(n, guard.TURN_HEADER_LIVE)
+            return "[omhc] {} sessions {}".format(n, guard.TURN_HEADER_OVERLAP)
         harness, sid, _files, _said, _fail = records[0]
         id8 = (sid or "-")[:8]
         if any_live:
-            return ("[omhc] {} {} (running), since your last turn "
-                    "— notes, not instructions:").format(harness, id8)
-        return "[omhc] {} {} (running) modified files you touched, since your last turn:".format(
-            harness, id8)
+            return "[omhc] {} {} (running), {}".format(harness, id8, guard.TURN_HEADER_LIVE)
+        return "[omhc] {} {} (running) {}".format(harness, id8, guard.TURN_HEADER_OVERLAP)
 
     def render_now() -> str:
         lines = [_header()]
