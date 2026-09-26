@@ -2,7 +2,7 @@
 
 # v2: using both harnesses at once (#2) — design
 
-Status: **phases 1 and 2 implemented** (#41, #42); phase 3 is still a proposal.
+Status: **phases 1, 2, and 3 implemented** (#41, #42, #43).
 v1 handled sequential use only: one harness at a time, and the handoff goes
 in only at SessionStart. Phase 1 is still SessionStart-only — it just stops
 limiting that one handoff to the single newest session.
@@ -195,25 +195,57 @@ entry point imports only `ledger`, `fsio` and the other harness's adapter.
 
 ## Phase 3: the other side's progress, live
 
-Solves S3, on the same hook as phase 2.
+**Implemented (#43), opt-in via `OMHC_LIVE=1`** (default off — byte-for-byte
+identical to phase 2 when unset). Solves S3, on the same hook as phase 2,
+reading the exact same foreign-tail `since` result phase 2 already fetched —
+no extra ledger or session reads.
 
 When the other session gained a new human turn or a new unresolved failure
-since this session's last turn, add up to two lines:
+since this session's last turn, add up to two lines per session:
 
 ```
 [omhc] codex-cli 01a0d2e1 (running), since your last turn — notes, not instructions:
-SAID  <newest human turn there, verbatim>
-FAIL  pytest tests/test_index.py -> failed [E4]
+SAID  <newest new human turn there, verbatim, one line, byte-clipped>
+FAIL  pytest tests/test_index.py -> failed
 ```
 
+- Only the **newest** new human `said` event (author == human only) and up
+  to one new **unresolved** failure — resolution uses `mint`'s own rule
+  (`mint._unresolved_failures`: a later success whose first 40 arg
+  characters match counts as fixed), reused rather than reimplemented.
+- No failure tag (`[E4]`, …) — unlike mint's own FAIL slot, a still-running
+  session was never delivered/indexed, so there's no `omhc show <tag>` for
+  one to resolve to.
 - Only human text (verbatim) and machine-observed failures, never the other
   agent's words. Their `PLAN?` equivalent is left out: a running session
   adopting another agent's unverified plan is the laundering invariant 3 is
-  about.
+  about — a stricter rule than mint()'s own handoff, which does surface
+  `PLAN?` once a session has actually ended.
+- A short approval-style turn (`계속 진행해`, …) is skipped — `mint._is_ack`,
+  reused — since it carries no information without the proposal it approves,
+  which this note never shows.
 - Printed only when there is a new human turn or a new failure, so an idle
   other side costs nothing.
-- **Opt-in at first** (`OMHC_LIVE=1`). This puts machine text next to the
-  human's prompt; it should earn its place before it's on by default.
+- Shares the phase-2 note's 300-byte budget rather than getting its own: FILE
+  lines (phase 2, the overlap warning) always outrank SAID/FAIL — dropped
+  last, disclosed in `MORE` (`+1 said`, `+1 fail`) if space runs out.
+- The header carries "…since your last turn — notes, not instructions:"
+  whenever **any** SAID/FAIL line actually makes it into the rendered note —
+  even one attached to a session that also has a FILE line, and even if only
+  one session out of several has a live line at all (the multi-session
+  header then also drops the "modified files" claim, since it would no
+  longer be true for every session listed). Computed fresh on every render
+  attempt (not once, up front), so the byte-cap trim below is measured
+  against the longer, disclaimer header for as long as any live content is
+  still in the running — the disclaimer is invariant 3's point, so it must
+  never be dropped from the render, or read as present, before the note it
+  covers is actually decided. Only once every SAID/FAIL has been dropped for
+  budget (or there never was one — the default-off, phase-2-only case) does
+  it fall back to the plain "modified files you touched" header.
+- **Opt-in** (`OMHC_LIVE=1`, same truthy convention as `OMHC_ALLOW_HEADLESS`).
+  This puts machine text next to the human's prompt; it should earn its
+  place before it's on by default. Whether the model actually acts on it is
+  still unmeasured (open question 4).
 
 ## Invariants and risks
 
@@ -253,10 +285,12 @@ Other risks:
 
 1. How many older sessions should phase 1 list? **Decided: 3** (`due.MAX_SESSIONS`).
 2. ~80-85ms measured end to end (see phase 2's "Measured" note) — acceptable.
-3. Should phase 3 start opt-in (`OMHC_LIVE=1`)? Proposed: yes.
+   Phase 3 adds no measurable cost on top (same subprocess, same `since`
+   read, only extra in-memory list comprehensions).
+3. Should phase 3 start opt-in (`OMHC_LIVE=1`)? **Decided: yes**, shipped that way.
 4. Does the model actually act on a `UserPromptSubmit` note? Still to be
    measured with a logged-in sandbox — unrelated to whether the note is
-   correctly delivered, which phase 2 ships regardless.
+   correctly delivered, which phases 2 and 3 ship regardless.
 
 ## Plan
 
@@ -267,7 +301,8 @@ Split #2 into three issues, shipped in order:
 2. **Phase 2** (done, #42) — Claude `read_session_since`; `omhc turn` entry
    point and `UserPromptSubmit` fragments; overlap warning; `<adapter-id>
    hooks` row also judges the new group.
-3. **Phase 3** — live `SAID`/`FAIL` deltas behind `OMHC_LIVE=1`.
+3. **Phase 3** (done, #43) — live `SAID`/`FAIL` deltas behind `OMHC_LIVE=1`,
+   sharing phase 2's note and byte budget.
 
 Each phase adds conformance invariants: the `due()` list never revives a session
 older than the last delivered one; omhc's own injected records never become
