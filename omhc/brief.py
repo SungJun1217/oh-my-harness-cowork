@@ -237,8 +237,13 @@ def compute(
             stopped = True
         return verdict
 
+    # Asks for more than MAX_SESSIONS candidates (#49 review finding 2) — a
+    # phantom reopen can survive as far as the #27 guard below, and plain
+    # cap overflow (4+ fresh sessions) both need to be *visible* here so they
+    # can be disclosed via `unread` instead of due() silently truncating
+    # them where nothing downstream could ever notice.
     marks = due.due(key, my_harness, my_session_id, stamp, home=home,
-                    eligible=eligible)
+                    eligible=eligible, limit=due.SCAN_LIMIT)
     if not marks:
         return ""
 
@@ -270,15 +275,34 @@ def compute(
     # single session. The #27 guard, in contrast, only drops **that one**
     # session — an ALSO session's phantom reopen must not block the others.
     #
-    # A session that's skipped because reading it ran out of time or raised
-    # is **not retried later** — it's disclosed via `unread` (MORE) instead.
-    # due()'s own "never revive older than the last delivered one" rule means
-    # once the head is marked delivered, an unread session sitting behind it
-    # can never be reached again; the alternative (delivering an older
-    # session while skipping a newer, unread one in between) would be worse
-    # — a gap in the middle with no way to tell the receiving agent about it
-    # (#41 review finding 2).
-    clock_start = time.monotonic()
+    # A mark that's never even attempted (past the time budget, past the
+    # MAX_SESSIONS cap, or after a read that raised) is **not retried
+    # later** — it's disclosed via `unread` (MORE) instead. due()'s own
+    # "never revive older than the last delivered one" rule means once the
+    # head is marked delivered, anything sitting behind it can never be
+    # reached again; the alternative (delivering an older session while
+    # skipping a newer one in between) would be worse — a gap in the middle
+    # with no way to tell the receiving agent about it (#41 review finding 2,
+    # #49 review findings 1-2).
+    #
+    # The **head** is the first mark that survives the #27 guard below, not
+    # index 0 (#49 review finding 1) — marks[0] can be a phantom reopen, and
+    # if it were treated as the head, the time budget below would already be
+    # running (and could already be exhausted) by the time the real head is
+    # reached, breaking out with nothing delivered at all, every time. So the
+    # unbounded, raise-allowed read (and record_read) apply to every mark
+    # tried while no head has been established yet (`processed` empty); the
+    # time budget and swallowed-exception path only start once a head exists.
+    #
+    # `has_human_turn` is checked **inside** this loop, before a session
+    # counts toward MAX_SESSIONS (#49 review finding 2) — checking it only
+    # after the loop (post-hoc trimming) let no-human sessions burn cap slots
+    # that a real, human-bearing session needed, silently losing it. Since
+    # it's checked before the cap, "MAX_SESSIONS sessions collected" always
+    # means MAX_SESSIONS sessions that will actually be sent, so stopping the
+    # read loop right there (#49 review finding 1) is exact, not approximate
+    # — nothing past that point is read at all, only disclosed as unread.
+    clock_start = None
     processed = []
     unread = 0
     for i, mark in enumerate(marks):
@@ -286,24 +310,26 @@ def compute(
         if not refs:
             break
         ref = refs[0]
-        if i == 0:
-            # The main session's read is allowed to raise — compute() itself
-            # can raise (see docstring); the hook wrapper (emit) is what
-            # upholds invariant 2. Never disable the main handoff to protect
-            # a read that already failed once.
+        if not processed:
+            # No head established yet. The read is allowed to raise —
+            # compute() itself can raise (see docstring); the hook wrapper
+            # (emit) is what upholds invariant 2. Never disable the main
+            # handoff to protect a read that already failed once.
             read = adapter.read_session(ref)
             # Recorded right after the read, before the #27 guard below, so
-            # `omhc status`'s last-read row still updates even when the head
-            # turns out to be a phantom reopen (matches v1; #41 review finding 4).
+            # `omhc status`'s last-read row still updates even when this
+            # candidate turns out to be a phantom reopen (matches v1; #41
+            # review finding 4). Overwritten by whichever candidate actually
+            # becomes head.
             if not dry_run:
                 record_read(state, read, stamp, home=home)
         else:
             # Reading 3 sessions can exceed the hook's latency budget
             # (measured 105ms for one 13MB transcript alone) — only spend
-            # time on older sessions while there's room, and never let one
-            # of them break the main handoff (invariant 2).
+            # time on sessions past the head while there's room, and never
+            # let one of them break the main handoff (invariant 2).
             if (time.monotonic() - clock_start) > OLDER_SESSION_TIME_BUDGET:
-                unread = len(marks) - i
+                unread += len(marks) - i
                 break
             try:
                 read = adapter.read_session(ref)
@@ -311,22 +337,38 @@ def compute(
                 if not dry_run:
                     log_failure(home, "also-session {} read failed: {}".format(
                         mark.session_id, exc))
-                unread = len(marks) - i
+                unread += len(marks) - i
                 break
 
         if not new_human_turn(mark.session_id, read.events):
             continue
+        if processed and not mint.has_human_turn(read):
+            # An older session with nothing verbatim-human said has nothing
+            # to hand off (invariant 3) — skipped silently, same as before;
+            # doesn't consume a cap slot or count toward `unread` (#49
+            # review finding 2). Never applied to the head itself (`not
+            # processed` above) — an empty GOAL there is an existing,
+            # separate, out-of-scope edge case.
+            continue
         processed.append((mark, ref, read))
+        if len(processed) == 1:
+            # The head is now established — the time budget for everything
+            # after it starts counting from here, not from before the
+            # (possibly slow) phantom reads that preceded it.
+            clock_start = time.monotonic()
+        if len(processed) >= due.MAX_SESSIONS:
+            # Enough sessions that will actually be sent are already in
+            # hand — stop reading further marks entirely; everything left
+            # is only disclosed, never read (#49 review finding 1).
+            unread += len(marks) - i - 1
+            break
 
     if not processed:
         return ""
 
     head_mark, head_ref, head_read = processed[0]
-    # An older session with nothing verbatim-human said has nothing to hand
-    # off (invariant 3) — filtered out here, before mint() and before
-    # anything below marks it delivered or tags it (#41 review finding 3).
-    older = [(m, r, rd) for (m, r, rd) in processed[1:] if mint.has_human_turn(rd)]
-    kept = [processed[0]] + older
+    older = processed[1:]
+    kept = processed
 
     also_reads = [r for (_m, _ref, r) in older]
     body = mint.mint(head_read, to_adapter_id=my_harness, budget=budget, now=stamp,

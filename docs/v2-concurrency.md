@@ -96,6 +96,18 @@ same session (a resume, `_reactivate_grown_sessions`, a late compact) — only
 the first (newest) row for a given session is considered, or it would be
 built into two Watermarks and walk into the list twice (#41 review).
 
+A reopened session's *own* older `start` row still ends the walk — but only
+once the walk actually reaches it, not the instant the resume row is seen
+(#49). A resume can land as the newest row in the whole ledger while real,
+never-delivered sessions started between the original delivery and the
+resume; stopping right at the resume would hide all of them. So: a reopened
+session with no older row of its own (the common case) still ends the walk
+immediately, same as before — there is nothing to walk past. One with an
+older row still ahead gets that row remembered as its boundary and the walk
+**continues**, since anything encountered in between is genuinely newer
+(append order mirrors real write order); the walk stops for good only when
+it reaches that remembered row, never reviving whatever came before it.
+
 **The newest session keeps the full slot layout.** Every other one with a
 human turn gets a single `ALSO` line inside the same 900-byte budget:
 
