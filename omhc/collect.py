@@ -29,17 +29,21 @@ except ImportError:  # pragma: no cover - not exercised on POSIX CI
 # before the other starts) — it does not make the second run a no-op: the
 # second holder still repeats the same `discover()` scan and finds it all
 # already known, so the cost isn't eliminated, only the two scans no longer
-# overlap. What correctness actually needs is narrower: reactivation
-# (`_reactivate_grown_sessions`) must not run twice concurrently (review
-# finding 1 below) — everything else is idempotent by construction and would
-# be harmless run twice even with no lock at all.
+# overlap. What correctness actually needs is narrower: reactivation's
+# actual ledger writes (`_apply_grown_sessions`) must not run twice
+# concurrently (review finding 1 below) — its own read side
+# (`_analyze_grown_sessions`) is read-only and safe either way, and
+# everything else here is idempotent by construction and would be harmless
+# run twice even with no lock at all.
 LOCK_NAME = "collect.lock"
 
 # Bounded wait for the lock — a non-blocking poll loop, not a blocking
 # LOCK_EX, so a stuck holder (or a platform without fcntl) can never hang
-# the hook path (invariant 2). 150ms leaves room for the collection itself
-# within the ~150ms-per-phase hook budget the callers already budget for.
-LOCK_WAIT_BUDGET = 0.15
+# the hook path (invariant 2). It must outlast the holder's whole
+# collection (both phase budgets plus one tail read past a deadline, #54
+# review): a waiter that gives up first skips collecting and the handoff
+# arrives one start late again. tests pin that inequality.
+LOCK_WAIT_BUDGET = 0.20
 LOCK_POLL_INTERVAL = 0.01
 
 
@@ -52,7 +56,7 @@ def try_lock(state: str, timeout: float = LOCK_WAIT_BUDGET):
     timeout (redundant with whatever the lock holder is doing, but idempotent
     and therefore harmless), while it skips reactivation specifically
     (`reactivate=False`) — the one piece that isn't safe to run twice at the
-    same time (review finding 1: two concurrent `_reactivate_grown_sessions`
+    same time (review finding 1: two concurrent `_apply_grown_sessions`
     runs can each append their own `grew` start row for the same session,
     reproducing the #49 duplicate-row bug). brief skips collecting entirely
     on a timeout (fails open — the handoff just lags one start)."""
@@ -114,10 +118,20 @@ BACKFILL_CAP = 5
 # passed straight through to discover() too, letting the adapter cut its own
 # scan short — measuring only here would let the discover() call itself
 # finish late and delay this mark call, and session start with it.
-BACKFILL_TIME_BUDGET = 0.08
+#
+# #54: measured on a real sandbox state (~75 Codex rollouts, real Claude
+# receiver): discover() alone took 55ms, and the two steps used to share
+# this one budget with backfill running *first* — by the time it returned,
+# barely 25ms of the 80ms were left, `_analyze_grown_sessions` (needing
+# ~56ms unconstrained) hit the deadline immediately, and a session someone
+# was still typing in reached the other harness two SessionStarts late,
+# missing #50's whole point. Fixed by giving reactivation (below) its own
+# budget and running it **first** — see `REACTIVATE_TIME_BUDGET`'s comment
+# for why order was safe to flip.
+BACKFILL_TIME_BUDGET = 0.06
 
 # How many recent sessions to check at once for one harness (used both by
-# `_backfill_foreign_sessions`'s rebaselining and `_reactivate_grown_sessions`).
+# `_backfill_foreign_sessions`'s rebaselining and `_analyze_grown_sessions`).
 # Unlike discover()/list_sessions()'s full scan (#22: a session started more
 # than 14 days ago must still be able to have its resume caught — that's
 # outside discover()'s SCAN_DAYS window), this only stats paths already
@@ -181,7 +195,7 @@ def _rebaseline_after_fresh_start(adapter_id: str, key: str, root: str, home,
     """Review (#22 re-examined): this round just backfilled a newer session
     (B) for `adapter_id` into the ledger. If other existing sessions' (A's)
     baselines still sit before B's start row, the next
-    `_reactivate_grown_sessions` round compares A's "current size" wholesale
+    `_analyze_grown_sessions` round compares A's "current size" wholesale
     against that stale baseline — lumping in even a **genuine** resume that
     happened to A after B arrived as "already superseded by B", absorbing it
     into a seen row, and never judging it again (even though what got
@@ -198,7 +212,7 @@ def _rebaseline_after_fresh_start(adapter_id: str, key: str, root: str, home,
     `_backfill_foreign_sessions` sees that session as "already known"
     (already in known_sessions) and doesn't backfill it again, so this
     function never gets called at all. That path is instead caught by the
-    lazy rebaseline inside `_reactivate_grown_sessions` (see its comment) —
+    lazy rebaseline inside `_analyze_grown_sessions` (see its comment) —
     this function isn't removed because, on the backfill origin, it stamps
     at **the exact moment B arrives** (when A is most likely not to have
     grown yet), so the ambiguous window that could get absorbed (until the
@@ -236,7 +250,7 @@ def _rebaseline_after_fresh_start(adapter_id: str, key: str, root: str, home,
     a session that fell outside this round's candidates entirely because of
     the cap (`REACTIVATE_SCAN_CAP`) isn't "unconfirmed", it's "this marker
     never promised anything about it in the first place" (the range the
-    marker covers is itself reconstructed on the `_reactivate_grown_sessions`
+    marker covers is itself reconstructed on the `_analyze_grown_sessions`
     side as "the top-N at the time this marker was written" — see its
     comment). Tying the cap to `complete` (a mistake in round 1) would
     permanently fall back to individual seen rows for any repo with more
@@ -306,13 +320,14 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
                                 deadline: Optional[float] = None) -> Dict[str, set]:
     """If `deadline` isn't given, times itself off this call's own budget
     (the old behavior, kept for standalone calls/test compatibility).
-    `cmd_mark` needs to share the **same** budget as
-    `_reactivate_grown_sessions` instead of doubling the hook time, so it
-    passes its own deadline through.
+    `collect_foreign_state` passes its own `BACKFILL_TIME_BUDGET`-derived
+    deadline through — #54: this is a separate budget from reactivation's
+    now, not a shared one.
 
     Returns: {adapter_id: {newly backfilled session_id, ...}} —
-    `_reactivate_grown_sessions` uses this to judge "this mark just
-    backfilled a newer session for this harness" (condition b)."""
+    `_apply_grown_sessions` uses this to skip writing this round's analyzed
+    rows for a harness "this mark just backfilled a newer session for"
+    (condition b)."""
     if deadline is None:
         deadline = time.time() + BACKFILL_TIME_BUDGET
     fresh: Dict[str, set] = {}
@@ -334,7 +349,7 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
         newest_start = 0.0
         for r in own_rows:
             # A grew row's epoch is not the session's actual start time — it's
-            # the "now" when the resume was detected (_reactivate_grown_sessions)
+            # the "now" when the resume was detected/applied (_apply_grown_sessions)
             # — mixing this into newest_start would make a genuinely older,
             # not-yet-backfilled session get caught by "already older than
             # the latest" and never backfilled.
@@ -397,7 +412,7 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
                 # same harness, but what's appended here belongs to a
                 # different harness.
                 "via": "scan",
-                # Baseline for `_reactivate_grown_sessions` — discover()
+                # Baseline for `_analyze_grown_sessions` — discover()
                 # already read this via os.path.getsize, so there's no extra
                 # stat cost.
                 "size": ref.size,
@@ -422,10 +437,28 @@ def _backfill_foreign_sessions(harness: str, root: str, key: str, state: str,
 # it at all".
 REACTIVATE_TAIL_CAP = 1_000_000
 
+# #54: reactivation's own budget, separate from `BACKFILL_TIME_BUDGET` and
+# spent first (`collect_foreign_state` runs `_analyze_grown_sessions` before
+# `_backfill_foreign_sessions`) — it only stats up to `REACTIVATE_SCAN_CAP`
+# already-known sessions and reads a bounded tail for ones that grew, no
+# `discover()` scan, so it's normally cheap (measured on a real sandbox
+# state, warm cache: ~1.5ms for 6 known sessions); giving it a dedicated
+# budget means a slow `discover()` (Codex scanning many date directories)
+# can no longer starve it, which is what happened in practice (see
+# `BACKFILL_TIME_BUDGET`'s comment — the same measurement needed ~56ms
+# unconstrained at `REACTIVATE_SCAN_CAP`'s full 20 sessions, several of
+# them grown). Reactivation is also the more useful signal moment to
+# moment — a live-continue in an already-delivered session — so it goes
+# first and gets first claim on the time budget. 60ms each covers the
+# measured worst cases (~56ms reactivation, ~55ms discover) while keeping
+# the holder's total (both budgets plus one ~22ms tail read past a
+# deadline) under LOCK_WAIT_BUDGET, so the other process waits it out
+# instead of skipping collection. The common case is under 15ms combined.
+REACTIVATE_TIME_BUDGET = 0.06
 
-def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
-                               home, now: float, deadline: float,
-                               fresh: Dict[str, set]) -> None:
+
+def _analyze_grown_sessions(harness: str, root: str, key: str,
+                            home, now: float, deadline: float) -> Dict[str, dict]:
     """#22's last gap: on an untrusted Codex hook, `codex exec resume`
     doesn't create a new rollout — it **appends to the same file** — and
     doesn't rewrite `session_meta` either. `_backfill_foreign_sessions`
@@ -439,12 +472,37 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
     turn is confirmed directly via `read_session_since` (agent monologue,
     turn_aborted alone aren't treated as a resume).
 
-    Skipped if this harness is in `fresh` (sessions this mark just backfilled
-    via `_backfill_foreign_sessions`) — if a newer session already came in
-    during the same call, a resume row isn't stacked after it too (ledger
-    append order is what due() uses to judge "most recent", so stacking it
-    would let the resumed old session win over the just-backfilled newer
-    one).
+    #54: read-only — decides what *would* be written, but never touches the
+    ledger itself. Split from the old `_reactivate_grown_sessions` (which
+    wrote as it went) so this can run **before** `_backfill_foreign_sessions`
+    and get its own time budget (`REACTIVATE_TIME_BUDGET`), instead of
+    sharing one budget where a slow `discover()` running first could (and
+    did, measured) starve it entirely. `_apply_grown_sessions` performs the
+    actual writes afterward, once `_backfill_foreign_sessions`'s `fresh` is
+    known — see its docstring for why the same-round skip (condition
+    b, below) still has to happen at that point, not here.
+
+    Returns `{adapter_id: verdict}`, where `verdict` holds, per session,
+    which of five outcomes it fell into (first observation / superseded and
+    grew / superseded and unchanged / grown with a human turn / grown
+    without one) plus `complete` (**read-side** only: whether every
+    candidate session was actually confirmed this round, before any
+    ledger write is attempted — `_apply_grown_sessions` ANDs in write-side
+    failures before making the same fold-or-not decision `_reactivate_grown_sessions`
+    used to make in one pass).
+
+    Skipped by `_apply_grown_sessions` if this harness is in `fresh` (sessions
+    the same call's `_backfill_foreign_sessions` just backfilled) — if a
+    newer session already came in during the same call, a resume row isn't
+    stacked after it too (ledger append order is what due() uses to judge
+    "most recent", so stacking it would let the resumed old session win over
+    the just-backfilled newer one). This function runs *before* that's known,
+    so it always analyzes every adapter; discarding an adapter's whole
+    verdict at apply time reproduces the exact same outcome as the old
+    skip-early behavior (same ambiguous pre-B growth is absorbed by
+    `_rebaseline_after_fresh_start`'s rebaseline instead of ever surfacing as
+    a resume — nothing here writes anything either way when discarded, so
+    there's no ledger footprint to distinguish the two implementations).
 
     #28: under condition (a), a session that's superseded but didn't grow
     used to get its own seen row on every single mark (the lazy rebaseline
@@ -488,17 +546,16 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
     superseded judgment stays accurate — due() doesn't misjudge that
     ambiguous prior growth as a resume.
 
-    Hook path, so never raises — the caller (collect_foreign_state) wraps it
+    Never raises (hook path) — the caller (collect_foreign_state) wraps it
     entirely.
     """
+    verdicts: Dict[str, dict] = {}
     rows = ledger.read(repo_key=key, home=home)
     for adapter_id in sorted(adapters.REGISTRY):
         if adapter_id == harness:
             continue
         if time.time() > deadline:
-            return
-        if fresh.get(adapter_id):
-            continue
+            return verdicts
         try:
             inst = adapters.get(adapter_id, home=home)
         except Exception:
@@ -556,7 +613,16 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
         recent_sessions = _distinct_sessions_with_path(own_rows)[:REACTIVATE_SCAN_CAP]
         complete = True  # the cap no longer affects completeness (#28 round 2).
 
+        # Read-only outcome buckets — `_apply_grown_sessions` turns these
+        # into the exact same ledger rows `_reactivate_grown_sessions` used
+        # to write directly, one bucket per outcome (see this function's
+        # per-session branches below for which bucket each session lands in).
+        first_observation = []  # (sid, path, size)
+        superseded_grown = []   # (sid, path, size) — fallback-adjusted size
+        grown = []              # (sid, path, end_offset) — genuine resume
+        seen_growth_no_human = []  # (sid, path, end_offset)
         unchanged = []  # (sid, path, size) — confirmed not to have grown this round
+
         for sid in recent_sessions:
             if time.time() > deadline:
                 complete = False
@@ -593,19 +659,14 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
                 # (review) — a baseline mid-record would make the
                 # skip-to-newline logic skip the whole record once it
                 # finishes being written.
-                if not ledger.append({
-                    "repo": key, "harness": adapter_id, "session": sid,
-                    "event": "seen", "via": "scan",
-                    # First observation, so there's no prior baseline. Don't
-                    # substitute 0 — the next judgment would read from the
-                    # start and re-surface an old human turn as if it were
-                    # new (reproduced in review). If none is found, leaves
-                    # size as-is (a known limitation only while writing a
-                    # record over 64KB).
-                    "size": fsio.line_aligned_size(path, cur_size),
-                    "epoch": now, "path": path, "cwd": root,
-                }, home=home):
-                    complete = False
+                #
+                # First observation, so there's no prior baseline. Don't
+                # substitute 0 — the next judgment would read from the
+                # start and re-surface an old human turn as if it were
+                # new (reproduced in review). If none is found, leaves
+                # size as-is (a known limitation only while writing a
+                # record over 64KB).
+                first_observation.append((sid, path, fsio.line_aligned_size(path, cur_size)))
                 continue
 
             # Condition (a): if a **different** session's start row for the
@@ -619,7 +680,7 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
             # never saw, this session would never get judged again (the
             # moment that hook writes to the ledger, this function isn't
             # even called — args.harness is that harness itself, so it's
-            # excluded from `_reactivate_grown_sessions`'s targets from the
+            # excluded from `_analyze_grown_sessions`'s targets from the
             # start).
             #
             # Just skipping past it (the old bug) would leave this baseline
@@ -661,17 +722,11 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
             )
             if superseded:
                 if cur_size > baseline:
-                    if not ledger.append({
-                        "repo": key, "harness": adapter_id, "session": sid,
-                        "event": "seen", "via": "scan",
-                        # fallback=previous baseline (review round 3 #3) —
-                        # even if not found, the baseline doesn't get pushed
-                        # backward (mid-record).
-                        "size": fsio.line_aligned_size(path, cur_size,
-                                                       fallback=baseline),
-                        "epoch": now, "path": path, "cwd": root,
-                    }, home=home):
-                        complete = False
+                    # fallback=previous baseline (review round 3 #3) — even
+                    # if not found, the baseline doesn't get pushed backward
+                    # (mid-record).
+                    superseded_grown.append(
+                        (sid, path, fsio.line_aligned_size(path, cur_size, fallback=baseline)))
                 else:
                     # Didn't grow — if this round turns out complete, absorb
                     # via one marker at the end of the round instead of an
@@ -703,44 +758,107 @@ def _reactivate_grown_sessions(harness: str, root: str, key: str, state: str,
                 ev.verb == "said" and ev.author == "human" for ev in since.events
             )
 
+            # Both branches below use `since.end_offset`, not `cur_size` — if
+            # the last line ended without a newline (may still be mid-write),
+            # that record hasn't been safely read in full, so putting it into
+            # the baseline would make the next read skip that whole line
+            # (review #2). If the cap (`max_bytes`) kept the whole tail from
+            # being read, `end_offset` reflects only what was actually read,
+            # so the next mark picks up the rest — using `cur_size` as-is
+            # would permanently skip over any human turn that might be in
+            # between.
             if found_human_turn:
-                # Review: uses `since.end_offset`, not `cur_size` — if the
-                # last line ended without a newline (may still be mid-write),
-                # that record hasn't been safely read in full, so putting it
-                # into the baseline would make the next read skip that whole
-                # line (review #2).
-                if not ledger.append({
-                    "repo": key, "harness": adapter_id, "session": sid,
-                    "event": "start", "via": "scan", "size": since.end_offset,
-                    "grew": 1, "epoch": now, "path": path, "cwd": root,
-                }, home=home):
-                    complete = False
-                try:
-                    if due.already_delivered(state, sid, harness):
-                        due.mark_reopened(state, sid, adapter_id, now)
-                except Exception:
-                    pass
-                continue
+                grown.append((sid, path, since.end_offset))
+            else:
+                # There was growth, but not a human turn (agent monologue,
+                # turn_aborted, task_complete, etc.).
+                seen_growth_no_human.append((sid, path, since.end_offset))
 
-            # There was growth, but not a human turn (agent monologue,
-            # turn_aborted, task_complete, etc.) — review: uses
-            # `since.end_offset` (not `cur_size`). If the cap (`max_bytes`)
-            # kept the whole tail from being read, `end_offset` reflects only
-            # what was actually read, so the next mark picks up the rest —
-            # using `cur_size` as-is would permanently skip over any human
-            # turn that might be in between.
+        verdicts[adapter_id] = {
+            "first_observation": first_observation,
+            "superseded_grown": superseded_grown,
+            "grown": grown,
+            "seen_growth_no_human": seen_growth_no_human,
+            "unchanged": unchanged,
+            "complete": complete,
+        }
+    return verdicts
+
+
+def _apply_grown_sessions(harness: str, root: str, key: str, state: str, home,
+                          now: float, verdicts: Dict[str, dict],
+                          fresh: Dict[str, set]) -> None:
+    """Turns `_analyze_grown_sessions`'s read-only verdicts into the actual
+    ledger rows (and #22 reopen lines) — split out (#54) so the expensive
+    read side can run, and get its own time budget, **before**
+    `_backfill_foreign_sessions` (whose `fresh` this needs) runs.
+
+    Skipped per adapter if `fresh.get(adapter_id)` (see
+    `_analyze_grown_sessions`'s docstring, condition b) — an adapter that
+    was just backfilled this round gets none of its analyzed rows written at
+    all, exactly like the old single-pass function's early `continue`: any
+    ambiguous pre-B growth stays unwritten and gets absorbed by
+    `_backfill_foreign_sessions`'s own `_rebaseline_after_fresh_start`
+    instead, same as before.
+
+    `complete` (whether the round's "unchanged" sessions fold into one
+    marker or get individual seen rows, #28) now has two sources that both
+    have to hold: `_analyze_grown_sessions`'s own read-side `complete` (a
+    deadline cutoff or a transient `os.stat` failure), ANDed here with
+    whether every write attempted for this adapter actually succeeded —
+    together, identical to the single flag the old function accumulated in
+    one pass.
+
+    Never raises (hook path) — the caller (collect_foreign_state) wraps it
+    entirely.
+    """
+    for adapter_id, verdict in verdicts.items():
+        if fresh.get(adapter_id):
+            continue
+        complete = verdict["complete"]
+
+        for sid, path, size in verdict["first_observation"]:
             if not ledger.append({
                 "repo": key, "harness": adapter_id, "session": sid,
-                "event": "seen", "via": "scan", "size": since.end_offset,
+                "event": "seen", "via": "scan",
+                "size": size, "epoch": now, "path": path, "cwd": root,
+            }, home=home):
+                complete = False
+
+        for sid, path, size in verdict["superseded_grown"]:
+            if not ledger.append({
+                "repo": key, "harness": adapter_id, "session": sid,
+                "event": "seen", "via": "scan",
+                "size": size, "epoch": now, "path": path, "cwd": root,
+            }, home=home):
+                complete = False
+
+        for sid, path, end_offset in verdict["grown"]:
+            if not ledger.append({
+                "repo": key, "harness": adapter_id, "session": sid,
+                "event": "start", "via": "scan", "size": end_offset,
+                "grew": 1, "epoch": now, "path": path, "cwd": root,
+            }, home=home):
+                complete = False
+            try:
+                if due.already_delivered(state, sid, harness):
+                    due.mark_reopened(state, sid, adapter_id, now)
+            except Exception:
+                pass
+
+        for sid, path, end_offset in verdict["seen_growth_no_human"]:
+            if not ledger.append({
+                "repo": key, "harness": adapter_id, "session": sid,
+                "event": "seen", "via": "scan", "size": end_offset,
                 "epoch": now, "path": path, "cwd": root,
             }, home=home):
                 complete = False
 
-        if unchanged:
+        if verdict["unchanged"]:
             if complete:
                 _append_rebase_marker(adapter_id, key, home, now)
             else:
-                for sid, path, size in unchanged:
+                for sid, path, size in verdict["unchanged"]:
                     ledger.append({
                         "repo": key, "harness": adapter_id, "session": sid,
                         "event": "seen", "via": "scan", "size": size,
@@ -814,12 +932,46 @@ def _bounce_check(harness: str, key: str, state: str, home, now: float,
 
 def collect_foreign_state(harness: str, root: str, key: str, state: str, home,
                           now: float, *, session: Optional[str] = None,
-                          deadline: Optional[float] = None,
                           reactivate: bool = True) -> None:
     """The one entry point both `cmd_mark` and `brief.compute` call to bring
     the ledger's view of *foreign* sessions up to date before `due()` runs
-    (#50) — the #51 bounce check, then the two backfill phases (new-session
-    scan, resume detection), sharing one hook time budget.
+    (#50) — the #51 bounce check, then reactivation (growth/resume
+    detection), then new-session backfill, each against its own time budget
+    (`REACTIVATE_TIME_BUDGET`, `BACKFILL_TIME_BUDGET` — #54).
+
+    #54: reactivation runs **before** backfill, not after. It only stats
+    already-known sessions from the ledger (`REACTIVATE_SCAN_CAP`) and reads
+    a bounded tail for ones that grew — no `discover()` scan, normally cheap
+    — and it's the more time-sensitive signal (someone still typing in an
+    already-delivered session). Measured on a real sandbox state (~75 Codex
+    rollouts): with the old shared-budget, backfill-first order, `discover()`
+    alone took 55ms of the single 80ms budget, and reactivation (needing
+    ~56ms) got starved to nothing — a grown session went undetected for two
+    full session starts. Splitting the budgets and reordering fixes this:
+    each phase gets its own deadline, computed fresh right here (both
+    callers invoke this immediately after their own `try_lock` attempt
+    resolves, so neither deadline is ever shortened by a lock wait).
+
+    Ordering dependency (checked before making this change): the old
+    `_reactivate_grown_sessions` took backfill's `fresh` result (this round's
+    newly-backfilled sessions) to skip a harness entirely, so a resume row
+    for an older session A was never stacked in the ledger *after* a
+    genuinely newer session B backfilled in the same call (append order is
+    what due() uses to judge "most recent" — invariant 6). Since reactivation
+    now runs before backfill even knows about B, `_analyze_grown_sessions`
+    (read-only) and `_apply_grown_sessions` (the actual ledger writes) are
+    now two separate steps: analysis always runs (backfill's `fresh` doesn't
+    exist yet), but the writes are applied only *after* backfill returns
+    `fresh`, and are skipped per-adapter exactly as before when that harness
+    was just backfilled this round. This reproduces the original behavior
+    exactly (nothing about A ever reaches the ledger when B also arrives
+    this round; A's ambiguous pre-B growth is still absorbed by
+    `_backfill_foreign_sessions`'s own `_rebaseline_after_fresh_start`, not
+    surfaced as a resume) while letting the expensive part of reactivation
+    (the reads) run first, protected by its own budget. `_rebaseline_after_fresh_start`
+    and the #49/#51 logic don't depend on reactivation's *output* at all
+    (only on the ledger's pre-existing rows and each session's file), so
+    reordering doesn't touch them.
 
     Never raises (hook path, invariant 2) — every step here was already
     wrapped individually in `cmd_mark`; consolidated into one try/except
@@ -832,29 +984,33 @@ def collect_foreign_state(harness: str, root: str, key: str, state: str, home,
     either of these twice concurrently is redundant (repeats the same
     `discover()` scan) but harmless.
 
-    `reactivate=False` (review finding 1) skips `_reactivate_grown_sessions`
-    entirely — **this one is not safe to run concurrently with itself**: two
-    processes racing past the same baseline can each independently decide
-    "this session grew, no one else has recorded that yet" and each append
-    their own `grew` start row (plus a `reopen` line) for the same session,
-    landing two adjacent rows the #49 walk then stops at the older of —
-    reproducing the exact bug #49 fixed. `cmd_mark` passes `reactivate=False`
-    whenever it didn't get `try_lock` (the lock holder — `brief`, or another
-    `mark` — is the one actually running it); `brief.compute` only calls
-    this at all when it *did* get the lock, so it always leaves this at the
-    default `True`."""
-    if deadline is None:
-        deadline = time.time() + BACKFILL_TIME_BUDGET
+    `reactivate=False` (review finding 1, #50) skips reactivation (both
+    analysis and apply) entirely — **this one is not safe to run
+    concurrently with itself**: two processes racing past the same baseline
+    can each independently decide "this session grew, no one else has
+    recorded that yet" and each append their own `grew` start row (plus a
+    `reopen` line) for the same session, landing two adjacent rows the #49
+    walk then stops at the older of — reproducing the exact bug #49 fixed.
+    `cmd_mark` passes `reactivate=False` whenever it didn't get `try_lock`
+    (the lock holder — `brief`, or another `mark` — is the one actually
+    running it); `brief.compute` only calls this at all when it *did* get
+    the lock, so it always leaves this at the default `True`."""
     try:
         _bounce_check(harness, key, state, home, now, session)
     except Exception:
         pass
     try:
         if not due.is_off(state):
-            fresh = _backfill_foreign_sessions(harness, root, key, state, home,
-                                               now, deadline=deadline)
+            verdicts: Dict[str, dict] = {}
             if reactivate:
-                _reactivate_grown_sessions(harness, root, key, state, home,
-                                           now, deadline, fresh)
+                reactivate_deadline = time.time() + REACTIVATE_TIME_BUDGET
+                verdicts = _analyze_grown_sessions(harness, root, key, home,
+                                                   now, reactivate_deadline)
+            backfill_deadline = time.time() + BACKFILL_TIME_BUDGET
+            fresh = _backfill_foreign_sessions(harness, root, key, state, home,
+                                               now, deadline=backfill_deadline)
+            if reactivate:
+                _apply_grown_sessions(harness, root, key, state, home, now,
+                                      verdicts, fresh)
     except Exception:
         pass

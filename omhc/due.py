@@ -433,7 +433,7 @@ def due(
 
     **Each session id appears at most once.** The ledger can hold several
     `start` rows for the same session (`cmd_mark` appends one on
-    `source:"resume"`, `_reactivate_grown_sessions` appends one when a
+    `source:"resume"`, `collect._apply_grown_sessions` appends one when a
     session grows, and a late compact can too) — without deduping, the same
     session would be built into two different Watermarks (one per row) and
     walk straight into the list twice: once as the head and again as its own

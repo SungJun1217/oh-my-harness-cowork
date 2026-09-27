@@ -71,8 +71,9 @@ class SessionSince(NamedTuple):
     also carries `end_offset` — the byte offset right after the **last fully
     read line** this call actually consumed.
 
-    The caller (collect._reactivate_grown_sessions) must use this as the next
-    baseline instead of `os.stat`'s size — if stat lands mid-record (the
+    The caller (collect._analyze_grown_sessions, which reads it into the
+    verdict that collect._apply_grown_sessions later writes) must use this as
+    the next baseline instead of `os.stat`'s size — if stat lands mid-record (the
     harness may still be writing), taking that size as the baseline and later
     reading from there once the record finishes being written makes the
     skip-to-newline logic skip that entire record. `end_offset` only reflects

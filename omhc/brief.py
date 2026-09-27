@@ -222,10 +222,9 @@ def compute(
         try:
             with collect.try_lock(state) as got_lock:
                 if got_lock:
-                    deadline = time.time() + collect.BACKFILL_TIME_BUDGET
                     collect.collect_foreign_state(
                         my_harness, repo_root, key, state, home, stamp,
-                        session=my_session_id, deadline=deadline)
+                        session=my_session_id)
         except Exception:
             pass
 

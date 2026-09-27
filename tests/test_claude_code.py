@@ -776,8 +776,8 @@ class TestReadSessionSince(unittest.TestCase):
     def test_fork_copied_records_never_produce_a_human_turn_in_a_tail_read(self):
         """#34/#42: a forked transcript's copied section is never new work —
         if a growth check's baseline ever landed inside it (the one race
-        this guards; the common case never sees it, see cli.py's
-        `_reactivate_grown_sessions`), `stop_at_human_turn` must not mistake
+        this guards; the common case never sees it, see collect.py's
+        `_analyze_grown_sessions`), `stop_at_human_turn` must not mistake
         the copy for a fresh human turn."""
         rows = [
             {"type": "history-suppression", "cause": "fork_inherit"},

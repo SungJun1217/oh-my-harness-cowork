@@ -15,8 +15,17 @@ import unittest
 from unittest import mock
 
 from omhc import adapters, brief, cli, collect, due, ledger, locate
+from omhc.adapters import codex_cli
 
 from . import _repo
+
+# #54: captured at import time, before any test's setUp patches these to an
+# unconstrained 60.0 — the one test that specifically wants the *real*
+# (small) defaults back (proving a slow discover() can't starve reactivation
+# now that it runs first) has no other reliable way to recover them once a
+# class-level patcher is already active.
+_REAL_BACKFILL_TIME_BUDGET = collect.BACKFILL_TIME_BUDGET
+_REAL_REACTIVATE_TIME_BUDGET = collect.REACTIVATE_TIME_BUDGET
 
 
 def _iso(epoch: float) -> str:
@@ -451,13 +460,17 @@ class TestReactivateGrownSessions(unittest.TestCase):
     def setUp(self):
         self.h = Harness()
         self.addCleanup(self.h.close)
-        # The growth check runs inside the hook budget (80ms). Timed with
-        # the real clock, it tripped the budget only under the full suite on
-        # a loaded machine and no grew row was produced (same cause as
+        # The growth check runs inside the hook budget. Timed with the real
+        # clock, it tripped the budget only under the full suite on a loaded
+        # machine and no grew row was produced (same cause as
         # TestRebaseMarker). The budget-exceeded path is checked separately.
-        patcher = mock.patch.object(collect, "BACKFILL_TIME_BUDGET", 60.0)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # #54: reactivation's own deadline is REACTIVATE_TIME_BUDGET now
+        # (analysis runs before backfill), not the shared BACKFILL_TIME_BUDGET
+        # — both patched here since this class also backfills B in some tests.
+        for name in ("BACKFILL_TIME_BUDGET", "REACTIVATE_TIME_BUDGET"):
+            patcher = mock.patch.object(collect, name, 60.0)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _append_human_turn(self, path, text, ordinal=90):
         with open(path, "a", encoding="utf-8") as fh:
@@ -665,7 +678,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         and doesn't fill it in again (`fresh` is empty), so the
         backfill-time rebaseline (`_rebaseline_after_fresh_start`) never
         runs at all. Even so, the next Claude mark's lazy rebaseline
-        (ledger's `_reactivate_grown_sessions`) must still rescue A —
+        (ledger's `_analyze_grown_sessions`/`_apply_grown_sessions`) must still rescue A —
         moving the stale baseline past B regardless of whether it grew."""
         now = time.time()
         path_a = self._deliver(now, "A 세션 첫 턴")
@@ -761,10 +774,13 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self.assertEqual(len(self._grew_rows()), 1)
 
     def test_deadline_exceeded_writes_no_rows(self):
+        """#54: reactivation's deadline is `REACTIVATE_TIME_BUDGET` now, not
+        the shared `BACKFILL_TIME_BUDGET` — patching the latter alone would
+        no longer trip this path since `_analyze_grown_sessions` runs first."""
         now = time.time()
         path = self._deliver(now, "필드 경로부터 다시 확인해줘")
         self._append_human_turn(path, "이제 두 번째 턴도 반영해줘")
-        with mock.patch.object(collect, "BACKFILL_TIME_BUDGET", -1000.0):
+        with mock.patch.object(collect, "REACTIVATE_TIME_BUDGET", -1000.0):
             self.h.mark()
         self.assertEqual(self._grew_rows(), [])
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
@@ -773,6 +789,37 @@ class TestReactivateGrownSessions(unittest.TestCase):
         self.assertEqual(seen, [])
         self.assertIsNone(
             due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home))
+
+    def test_slow_discover_does_not_starve_reactivation(self):
+        """#54 repro: measured on a real sandbox state (~75 Codex rollouts),
+        discover() alone took 55ms of the old single 80ms budget shared with
+        reactivation, leaving reactivation almost nothing — a session
+        someone kept typing in reached the other harness two SessionStarts
+        late. Reactivation now runs *before* `_backfill_foreign_sessions`
+        with its own budget, so an artificially slow discover() (patched to
+        sleep well past both real budgets) must no longer prevent this
+        round's grow row + reopen line. Restores the real (small) defaults
+        for this one test — the class setUp patches both to an unconstrained
+        60.0 for every other test in this class."""
+        now = time.time()
+        path = self._deliver(now, "필드 경로부터 다시 확인해줘")  # already marked delivered
+        self._append_human_turn(path, "이제 두 번째 턴도 반영해줘")
+
+        orig_discover = codex_cli.CodexCliAdapter.discover
+
+        def slow_discover(self, repo_root, deadline=None):
+            time.sleep(0.2)  # well past both real budgets (0.06s each)
+            return orig_discover(self, repo_root, deadline=deadline)
+
+        with mock.patch.object(collect, "BACKFILL_TIME_BUDGET", _REAL_BACKFILL_TIME_BUDGET), \
+             mock.patch.object(collect, "REACTIVATE_TIME_BUDGET", _REAL_REACTIVATE_TIME_BUDGET), \
+             mock.patch.object(codex_cli.CodexCliAdapter, "discover", slow_discover):
+            self.h.mark()
+
+        self.assertEqual(len(self._grew_rows()), 1)
+        with open(os.path.join(self.h.state, due.DELIVERED_NAME), encoding="utf-8") as fh:
+            reopen_lines = [ln for ln in fh if "\treopen\t" in ln]
+        self.assertEqual(len(reopen_lines), 1, "the resumed session must be reopened too")
 
     def test_a_garbage_size_field_does_not_break_mark(self):
         now = time.time()
@@ -829,9 +876,11 @@ class TestClaudeReactivateGrownSessions(unittest.TestCase):
     def setUp(self):
         self.h = Harness()
         self.addCleanup(self.h.close)
-        patcher = mock.patch.object(collect, "BACKFILL_TIME_BUDGET", 60.0)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # #54: see TestReactivateGrownSessions.setUp.
+        for name in ("BACKFILL_TIME_BUDGET", "REACTIVATE_TIME_BUDGET"):
+            patcher = mock.patch.object(collect, name, 60.0)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _seed(self, now, human):
         """A ledger row with `size` already set to the planted content — the
@@ -961,14 +1010,18 @@ class TestRebaseMarker(unittest.TestCase):
         self.h = Harness()
         self.addCleanup(self.h.close)
         # The marker count is only meaningful once a verdict has run to
-        # completion. Timed with the real clock, the hook budget (80ms) got
-        # tripped judging 60 sessions on a loaded machine (load 7), no
-        # marker got written, and the test failed 2 out of 3 runs. The
-        # budget-exceeded case is checked separately, with
-        # _deadline_trips_after_first_stat skipping the clock ahead.
-        patcher = mock.patch.object(collect, "BACKFILL_TIME_BUDGET", 60.0)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # completion. Timed with the real clock, the hook budget got tripped
+        # judging 60 sessions on a loaded machine (load 7), no marker got
+        # written, and the test failed 2 out of 3 runs. The budget-exceeded
+        # case is checked separately, with _deadline_trips_after_first_stat
+        # skipping the clock ahead. #54: this class exercises both the
+        # backfill-side marker (_rebaseline_after_fresh_start) and the
+        # reactivate-side one (_analyze_grown_sessions/_apply_grown_sessions),
+        # so both budgets are patched.
+        for name in ("BACKFILL_TIME_BUDGET", "REACTIVATE_TIME_BUDGET"):
+            patcher = mock.patch.object(collect, name, 60.0)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _seed_known_unchanged(self, n, base):
         """Directly plants n already-known sessions that won't grow in this
@@ -1036,7 +1089,7 @@ class TestRebaseMarker(unittest.TestCase):
 
     def test_lazy_path_writes_one_marker_under_a_trusted_hook_b(self):
         """If B arrives via its own trusted hook (not a backfill), the lazy
-        rebaseline (`_reactivate_grown_sessions`) runs — it absorbs several
+        rebaseline (`_analyze_grown_sessions`/`_apply_grown_sessions`) runs — it absorbs several
         non-growing A's into one marker, and A's later human turn is still reactivated."""
         now = time.time()
         sids = self._seed_known_unchanged(5, now)
@@ -1258,7 +1311,7 @@ class TestRebaseMarker(unittest.TestCase):
         self._seed_two_known(now, grown_sid_human_turn=True)
         self.h.mark(harness="codex-cli", session_id="new-b")  # B's own trusted hook
 
-        with _deadline_trips_after_first_stat("_reactivate_grown_sessions"):
+        with _deadline_trips_after_first_stat("_analyze_grown_sessions"):
             self.h.mark()  # Claude mark — lazy rebaseline, cut off after only checking a-unch
 
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)

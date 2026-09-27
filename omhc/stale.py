@@ -43,7 +43,7 @@ STATE_SUBDIR = "turn"
 # v2-concurrency.md: "cap 3" foreign sessions considered per turn.
 FOREIGN_CANDIDATES = 3
 
-# 1 MiB — same cap collect._reactivate_grown_sessions uses for the same reason
+# 1 MiB — same cap collect._analyze_grown_sessions uses for the same reason
 # (measured: cost scales with tail size, 396.6ms for 17.7MB, which blows any
 # per-turn budget).
 READ_CAP_BYTES = 1_000_000
@@ -360,7 +360,7 @@ def _first_baseline(rows: List[dict], my_pos: Optional[int], sid: str,
     isn't the same as when that session actually started: `cmd_mark` appends
     this session's own row first, and only *afterward* does
     `_backfill_foreign_sessions` append rows for already-existing older
-    foreign sessions (marked `via:"scan"`), and `_reactivate_grown_sessions`
+    foreign sessions (marked `via:"scan"`), and `_apply_grown_sessions`
     appends a `grew:1` row (also `via:"scan"`) whenever an old, already-known
     session grows. Both land *after* this session's own row in append order
     despite describing a session that's actually old — round 2 mistook that
@@ -771,7 +771,7 @@ def check(*, harness: str, stdin_text: str = "", home: Optional[str] = None,
             since = None
         if since is None:
             # Can't judge this round — leave the baseline untouched and
-            # retry next turn (same rule as collect._reactivate_grown_sessions).
+            # retry next turn (same rule as collect._analyze_grown_sessions).
             continue
         modified = []
         for ev in since.events:

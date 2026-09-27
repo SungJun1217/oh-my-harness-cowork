@@ -166,9 +166,9 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     # tell "freshly started, ~0 bytes" apart from "resumed, already long" for
     # a foreign session without ever looking at timestamps. Named
     # `start_size`, not `size` — `size` already means something different on
-    # a `via:"scan"` row (_backfill_foreign_sessions/_reactivate_grown_sessions's
-    # own baseline-position bookkeeping, cli.py's `_rebaseline_after_fresh_start`/
-    # `_reactivate_grown_sessions` read `row["size"]` off *any* row for a
+    # a `via:"scan"` row (_backfill_foreign_sessions/_analyze_grown_sessions's
+    # own baseline-position bookkeeping, collect.py's `_rebaseline_after_fresh_start`/
+    # `_analyze_grown_sessions` read `row["size"]` off *any* row for a
     # session with that key present) — reusing that key here would feed this
     # session's own transcript size into a *different* harness's backfill
     # math the next time this row is scanned as one of that harness's own rows.
@@ -248,16 +248,14 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     # (invariant 2) — collect_foreign_state never raises on its own, but the
     # lock's own setup is wrapped too.
     try:
+        # collect_foreign_state computes its own (per-phase) deadlines from
+        # `time.time()` at the moment it's called — always right after the
+        # (possibly bounded-wait) lock attempt resolves, so a lock wait alone
+        # can never eat into either phase's budget.
         with collect.try_lock(state) as got_lock:
-            # Computed **after** the (possibly bounded-wait) lock attempt —
-            # this budget is for the collection work itself, not the wait
-            # for the lock; starting the clock before try_lock returned
-            # would let a lock wait alone burn through the whole deadline
-            # and make collect_foreign_state stop before it even begins.
-            deadline = time.time() + collect.BACKFILL_TIME_BUDGET
             collect.collect_foreign_state(args.harness, root, key, state, home,
                                           row["epoch"], session=session,
-                                          deadline=deadline, reactivate=got_lock)
+                                          reactivate=got_lock)
     except Exception:
         pass
     # Collapses a stale AGENTS.md block on any omhc call.
