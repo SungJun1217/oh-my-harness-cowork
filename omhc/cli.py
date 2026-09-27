@@ -7,7 +7,7 @@ import re
 import select
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import (
     adapters, agents_md, brief, deliver, due, fsio, gate, hookconf, index, ledger,
@@ -1418,15 +1418,21 @@ def _status_json_empty() -> dict:
     }
 
 
-def _last_read_detail(summary: Optional[dict]) -> str:
-    """One line for status's `last read` row (#37)."""
+def _last_read_detail(summary: Optional[dict], known_ids: Sequence[str] = ()) -> str:
+    """One line for status's `last read` row (#37).
+
+    The session id uses the same unique-prefix rule as log and the handoff
+    (#52): two Codex sessions started seconds apart share their first 8 chars.
+    """
     if not summary:
         return "nothing read yet — brief records each session it reads"
     try:
         events = int(summary.get("events", 0))
         skipped = int(summary.get("skipped", 0))
+        session = str(summary.get("session", "?"))
+        n = _unique_prefix_len([session] + [i for i in known_ids if i])
         detail = "{} {}: {} events, {} unparsed lines, {} records of {} types skipped ({})".format(
-            summary.get("harness", "?"), str(summary.get("session", "?"))[:8], events,
+            summary.get("harness", "?"), session[:n], events,
             int(summary.get("unparsed", 0)), skipped, int(summary.get("skipped_types", 0)),
             time.strftime("%Y-%m-%d %H:%M", time.localtime(float(summary.get("epoch", 0)))))
     except (TypeError, ValueError):
@@ -1694,7 +1700,8 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
     # a session started and closed with no turn legitimately yields 0 events,
     # so this can't gate; it makes a thinning handoff visible instead.
     last_read = brief.read_last_read(state)
-    checks.append(("last read", None, _last_read_detail(last_read)))
+    known = [str(r.get("session") or "") for r in rows] + _all_session_ids(state)
+    checks.append(("last read", None, _last_read_detail(last_read, known)))
 
     off_reason = due.off_reason(state)
     checks.append(("off switch", None,

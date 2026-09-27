@@ -101,6 +101,19 @@ class TestStatusRows(unittest.TestCase):
         _word, detail = _find_row(text, "last read")
         self.assertIn("format may have changed", detail)
 
+    def test_last_read_id_is_told_apart_from_a_colliding_session(self):
+        """#52: two Codex ids started seconds apart share 8 chars."""
+        from omhc import ledger
+
+        for sid in ("01a0e0ad-91e7", "01a0e0ad-9a95"):
+            ledger.append({"repo": self.t.key, "harness": "codex-cli", "session": sid,
+                           "event": "start", "epoch": 1758500000, "path": ""},
+                          home=self.t.home)
+        self._write_last_read(session="01a0e0ad-9a95")
+        _code, text = self.run_status()
+        _word, detail = _find_row(text, "last read")
+        self.assertIn("codex-cli 01a0e0ad-9a:", detail)
+
     def test_last_read_says_whether_the_read_ended_in_a_handoff(self):
         """#48: a read that was gated looked like a delivery."""
         for delivered, phrase in ((True, "handed off"), (False, "read only")):
