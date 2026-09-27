@@ -224,6 +224,81 @@ class TestDue(unittest.TestCase):
         got = due.due(REPO_KEY, "claude-code", "sX", 100.0, home=self.home)
         self.assertEqual([m.session_id for m in got], ["S", "T"])
 
+    def test_a_reopened_session_does_not_hide_newer_sessions_appended_before_it(self):
+        """#49 exact repro: R(never delivered), S2(delivered), then S3/S4/S5
+        start (never delivered, genuinely newer than S2's delivery), then S2
+        is resumed — its resume start row lands as the **newest row in the
+        whole ledger**, even though S3/S4/S5 are real, newer, undelivered
+        work. Walking newest-first must not stop the instant it sees S2's
+        resume row (the pre-#49 rule did, hiding S3/S4/S5 and never
+        reaching them) — it must include S2 and keep walking, only stopping
+        once it reaches S2's own **older** start row (never revives R)."""
+        self.start("codex-cli", "R", 10.0)
+        self.start("codex-cli", "S2", 20.0)
+        wm_s2 = due.due(REPO_KEY, "claude-code", "sX", 25.0, home=self.home)[0]
+        due.mark_delivered(self.state, wm_s2, to_harness="claude-code", epoch=25.0)
+        self.start("codex-cli", "S3", 30.0)
+        self.start("codex-cli", "S4", 40.0)
+        self.start("codex-cli", "S5", 50.0)
+        due.mark_reopened(self.state, "S2", "codex-cli", 60.0)
+        self.start("codex-cli", "S2", 70.0)  # the resume's own new start row
+
+        got = due.due(REPO_KEY, "claude-code", "me1", 100.0, home=self.home)
+        # Newest-first by append order: S2's resume row is literally the
+        # newest row in the ledger, so it leads. S2 doesn't consume a
+        # `limit` slot (#49 review finding 2) — it's included because it's
+        # due for its own reopen check, not because there was cap room — so
+        # S3/S4/S5 (the fresh, never-delivered sessions `limit` is actually
+        # meant to bound) all fit within the default cap of 3.
+        self.assertEqual([m.session_id for m in got], ["S2", "S5", "S4", "S3"])
+
+        got_one = due.due_one(REPO_KEY, "claude-code", "me1", 100.0, home=self.home)
+        # due_one() can't tell a phantom reopen from a real one (that needs
+        # the actual events, which only brief.py's #27 guard reads) — it
+        # stays the newest row, same as due()'s head. It must still never
+        # fall back to R.
+        self.assertEqual(got_one.session_id, "S2")
+
+    def test_a_reopened_session_with_no_older_row_still_ends_the_list_immediately(self):
+        """The single-row case (#41's original rule) is unchanged: if a
+        reopened session has no distinct older start row to walk to, ending
+        the list right at it is the only safe choice."""
+        self.start("codex-cli", "R", 10.0)
+        self.start("codex-cli", "S", 20.0)
+        wm_s = due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id="S",
+                             path="/p/S", event="start", epoch=20.0)
+        due.mark_delivered(self.state, wm_s, to_harness="claude-code", epoch=25.0)
+        due.mark_reopened(self.state, "S", "codex-cli", 30.0)
+        # No second start row for S — it's reopened in delivered.tsv only.
+        got = due.due(REPO_KEY, "claude-code", "me1", 100.0, home=self.home)
+        self.assertEqual([m.session_id for m in got], ["S"])
+
+    def test_several_reopened_sessions_each_get_their_own_boundary(self):
+        """Two independent reopened, multi-row sessions in the same walk.
+        Append order (oldest to newest): R, S2, S4, S5, S4-resume, S2-resume.
+        Walking newest-first hits S2-resume, then S4-resume (both included
+        and deferred), then S5 (a plain new session, included), then S4's
+        own **older** row — that's the first deferred boundary reached, so
+        the walk stops there, never even considering S2's older row or R."""
+        self.start("codex-cli", "R", 10.0)
+        self.start("codex-cli", "S2", 20.0)
+        wm_s2 = due.due(REPO_KEY, "claude-code", "sX", 25.0, home=self.home)[0]
+        due.mark_delivered(self.state, wm_s2, to_harness="claude-code", epoch=25.0)
+        self.start("codex-cli", "S4", 40.0)
+        wm_s4 = due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id="S4",
+                              path="/p/S4", event="start", epoch=40.0)
+        due.mark_delivered(self.state, wm_s4, to_harness="claude-code", epoch=45.0)
+        self.start("codex-cli", "S5", 50.0)
+        due.mark_reopened(self.state, "S4", "codex-cli", 55.0)
+        self.start("codex-cli", "S4", 56.0)  # S4's resume
+        due.mark_reopened(self.state, "S2", "codex-cli", 60.0)
+        self.start("codex-cli", "S2", 70.0)  # S2's resume (newest overall)
+
+        got = due.due(REPO_KEY, "claude-code", "me1", 100.0, home=self.home,
+                      limit=10)
+        self.assertEqual([m.session_id for m in got], ["S2", "S4", "S5"])
+        self.assertNotIn("R", [m.session_id for m in got])
+
     def test_ever_delivered_ignores_reopen(self):
         wm = due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id="cx1",
                            path="/p", event="start", epoch=10.0)

@@ -11,6 +11,14 @@ from . import fsio, ledger, locate
 # without bound. Proposed value from docs/v2-concurrency.md's open question 1.
 MAX_SESSIONS = 3
 
+# #49 review finding 2: brief.py asks for more candidates than MAX_SESSIONS so
+# it can see genuine overflow (a phantom reopen surviving the guard, or plain
+# 4+ fresh sessions) and disclose it via MORE, instead of due() silently
+# truncating it where nothing downstream could ever notice. Still a finite
+# ceiling, not "unbounded" — bounded further by ledger.read()'s own row limit
+# and MAX_AGE_SECONDS, so a pathological repo can't make this walk unbounded.
+SCAN_LIMIT = 20
+
 # This namedtuple and the index TSV's paths column together form the concurrency seam.
 Watermark = collections.namedtuple(
     "Watermark", "repo_key harness session_id path event epoch"
@@ -279,10 +287,7 @@ def due(
     my_harness — continuing past it would inject yesterday's session as
     "just happened" once today's is gone (a stale marker is worse than no
     marker). A session that was delivered and later reopened (#22) can still
-    be *included* — already_delivered() reports False for it again — but it
-    always **ends** the list: letting the walk continue past a reopened
-    session would revive whatever came before it, which v1 deliberately
-    never sent.
+    be *included* — already_delivered() reports False for it again.
 
     **Each session id appears at most once.** The ledger can hold several
     `start` rows for the same session (`cmd_mark` appends one on
@@ -293,28 +298,78 @@ def due(
     ALSO line, with its own failures double-tagged and delivered.tsv gaining
     two rows for one delivery (#41 review finding 1). Only the **first**
     (newest) occurrence is considered; every older row for the same session
-    is skipped outright, regardless of what that first occurrence decided.
+    is skipped, or ends the walk — see the next paragraph.
+
+    **Where a reopened session ends the walk (#49).** A resumed session gets
+    a *new* `start` row appended, so its resume can land as the newest row
+    in the whole ledger while genuinely new, never-delivered sessions (S3,
+    S4, S5, say) sit *between* its original delivery and that resume —
+    stopping the instant the resume row is seen (the pre-#49 rule) hid all of
+    them. So: if this session has no older `start` row at all, the resume-or-
+    not distinction doesn't apply — it *is* the one and only row, so ending
+    the walk right here is correct and safe, exactly like the single-row
+    case #41 already handled. If it **does** have an older row still ahead in
+    the walk, that older row is deferred as this session's own boundary
+    (`stop_after`) and the walk **continues** — every session encountered in
+    between is genuinely newer (append order mirrors real write order, so
+    anything appended between the two rows for this session was written
+    while the session was away, invariant 6's byte-offset/append-order rule,
+    not epochs). Once the walk reaches that deferred older row, it stops
+    there — continuing past it would revive whatever came before it, which
+    v1 deliberately never sent. This also correctly handles several
+    reopened sessions in the same walk: each gets its own deferred boundary,
+    and the walk stops at whichever is reached first.
+
+    **`limit` only counts fresh sessions (#49 review finding 2).** A
+    reopened session is included for its own sake (there's a pending resume
+    to check), not because there was room left under `limit` — counting it
+    would silently push a genuinely new session out of the list with
+    nothing downstream able to tell. So the cap applies only to sessions
+    that were never delivered at all; the walk is still bounded overall by
+    the deferred-stop rule above and by `ledger.read()`'s own row limit.
+    Callers that want to see genuine overflow beyond `MAX_SESSIONS` in order
+    to disclose it (brief.py, via `SCAN_LIMIT`) pass a bigger `limit`.
     """
     state = locate.state_dir(repo_key, home=home)
     if is_off(state):
         return []
 
-    delivered_lines = _delivered_lines(state)
-    results: List[Watermark] = []
-    seen_sessions = set()
-    for row in reversed(ledger.read(repo_key=repo_key, home=home)):
+    all_rows = ledger.read(repo_key=repo_key, home=home)
+
+    def _is_candidate_start_row(row: dict) -> bool:
         if row.get("event") != "start":
-            continue
+            return False
         harness = row.get("harness")
         session = row.get("session")
         if not harness or not session:
+            return False
+        return harness != my_harness and session != my_session_id
+
+    # A session with more than one `start` row can be safely included at its
+    # newest row and walked past (see docstring) — a session with only one
+    # can't, so ending the walk there and then is the only sound choice.
+    row_counts: dict = {}
+    for row in all_rows:
+        if _is_candidate_start_row(row):
+            row_counts[str(row.get("session"))] = row_counts.get(str(row.get("session")), 0) + 1
+    multi_row_sessions = {sid for sid, count in row_counts.items() if count > 1}
+
+    delivered_lines = _delivered_lines(state)
+    results: List[Watermark] = []
+    seen_sessions = set()
+    stop_after = set()
+    fresh_count = 0
+    for row in reversed(all_rows):
+        if not _is_candidate_start_row(row):
             continue
-        if harness == my_harness:
-            continue
-        if session == my_session_id:
-            continue
+        harness = row.get("harness")
+        session = row.get("session")
         session_id = str(session)
         if session_id in seen_sessions:
+            if session_id in stop_after:
+                # This is the deferred older row of a reopened session
+                # already included above — stop, don't walk past it (#49).
+                break
             continue
         seen_sessions.add(session_id)
         if _already_delivered(delivered_lines, session_id, my_harness):
@@ -344,7 +399,24 @@ def due(
         if eligible is not None and not eligible(mark):
             continue
         results.append(mark)
-        if _ever_delivered(delivered_lines, session_id, my_harness) or len(results) >= limit:
+        if _ever_delivered(delivered_lines, session_id, my_harness):
+            if session_id in multi_row_sessions:
+                # Defer the stop to this session's own older row (#49) —
+                # everything encountered before reaching it is genuinely
+                # newer (see docstring). A reopened session doesn't consume
+                # a `limit` slot either (#49 review finding 2) — it's
+                # included because it's due for a reopen check, not because
+                # there was room for another fresh session; counting it here
+                # would silently push a genuinely new session out of the
+                # list with no way for anything downstream to notice.
+                stop_after.add(session_id)
+                continue
+            else:
+                # No older row exists for this session at all — this row
+                # *is* the boundary, so stop right here (#41 behavior).
+                break
+        fresh_count += 1
+        if fresh_count >= limit:
             break
     return results
 
@@ -360,7 +432,18 @@ def due_one(
 ) -> Optional[Watermark]:
     """v1 semantics: the single newest due session, or None. Exactly `due()`'s
     old return shape — kept for callers that only care about the one, most
-    recent handoff."""
+    recent handoff.
+
+    Does **not** skip past a phantom reopen (a reopen with no real new human
+    turn, #27) even though it may be the returned Watermark. due() only reads
+    ledger metadata — it has no way to tell a phantom reopen from a real one,
+    since that requires reading the session's actual events (the #27 guard
+    in brief.py does that, after calling due()/due_one()). A caller of
+    due_one() that skipped the guard would just get nothing useful back, the
+    same as today; it must not silently walk further back and revive an
+    older session instead — that's exactly the v1 rule this function exists
+    to preserve.
+    """
     marks = due(repo_key, my_harness, my_session_id, now, home=home,
                 eligible=eligible, limit=1)
     return marks[0] if marks else None

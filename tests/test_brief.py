@@ -856,6 +856,197 @@ class TestMultiSessionHandoff(unittest.TestCase):
         self.assertFalse(os.path.exists(guard_log))
 
 
+class TestReopenWalk(unittest.TestCase):
+    """#49: a resumed session's new `start` row can be the newest row in the
+    whole ledger even though real, never-delivered sessions started between
+    its original delivery and the resume — due()'s pre-#49 rule stopped the
+    instant it saw the resume, hiding all of them."""
+
+    def setUp(self):
+        self.h = Harness()
+
+    def tearDown(self):
+        self.h.close()
+
+    def _plant(self, session_id, human, when, **kw):
+        return self.h.t.plant_codex(session_id=session_id, human=human,
+                                    ledger_home=self.h.home, when=when, **kw)
+
+    def _deliver_s2_alone(self):
+        """Delivers only cx-s2 for real (through brief.compute(), so its
+        delivery offset is recorded properly — the #27 guard below depends
+        on that offset to tell a phantom resume from a real one). Keeps this
+        test focused on the walk-past-a-resume behavior rather than
+        re-proving R-exclusion, which the due()-level tests already cover
+        directly."""
+        path_s2 = self._plant("cx-s2", "S2 세션의 사람 말", NOW - 900)
+        body = brief.compute(my_harness="claude-code", my_session_id="me0",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW - 900)
+        self.assertIn("S2 세션의 사람 말", body)
+        return path_s2
+
+    def test_a_phantom_resume_does_not_hide_newer_sessions_behind_it(self):
+        from tests._repo import append_codex_user_turn
+
+        path_s2 = self._deliver_s2_alone()
+        self._plant("cx-s3", "S3 세션의 사람 말", NOW - 300)
+        self._plant("cx-s4", "S4 세션의 사람 말", NOW - 200)
+        self._plant("cx-s5", "S5 세션의 사람 말", NOW - 100)
+
+        due.mark_reopened(self.h.state, "cx-s2", "codex-cli", NOW - 50)
+        append_codex_user_turn(path_s2, "", ordinal=90)  # phantom: empty-prompt resume
+        ledger.append({"repo": self.h.key, "harness": "codex-cli", "session": "cx-s2",
+                       "event": "start", "epoch": NOW - 50, "path": path_s2,
+                       "cwd": self.h.repo_root}, home=self.h.home)  # the resume's own start row
+
+        # due() itself: newest-first leads with the resume row, which does
+        # NOT consume a `limit` slot (#49 review finding 2) — so all three
+        # fresh sessions (S5, S4, S3) fit the default cap of 3.
+        got = due.due(self.h.key, "claude-code", "me1", NOW, home=self.h.home)
+        self.assertEqual([m.session_id for m in got], ["cx-s2", "cx-s5", "cx-s4", "cx-s3"])
+
+        body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        # cx-s2's own #27 guard drops it (phantom, no new human turn) — the
+        # next mark in due()'s list becomes head, and the rest still show up.
+        # With cx-s2 dropped, exactly 3 non-phantom sessions (S5 head, S4/S3
+        # ALSO) remain — they fit MAX_SESSIONS, so nothing is trimmed either.
+        self.assertIn("S5 세션의 사람 말", body)
+        self.assertIn("S4 세션의 사람 말", body)
+        self.assertIn("S3 세션의 사람 말", body)
+        self.assertNotIn("S2 세션의 사람 말", body)
+        self.assertNotIn("MORE", body)
+
+        self.assertTrue(due.already_delivered(self.h.state, "cx-s5", "claude-code"))
+        self.assertTrue(due.already_delivered(self.h.state, "cx-s4", "claude-code"))
+        self.assertTrue(due.already_delivered(self.h.state, "cx-s3", "claude-code"))
+        # cx-s2 was dropped by the guard, not delivered — a real resume can
+        # still reach it later.
+        self.assertFalse(due.already_delivered(self.h.state, "cx-s2", "claude-code"))
+
+    def test_a_resume_with_a_real_new_turn_is_still_delivered_as_head(self):
+        from tests._repo import append_codex_user_turn
+
+        path_s2 = self._deliver_s2_alone()
+        self._plant("cx-s4", "S4 세션의 사람 말", NOW - 200)
+        self._plant("cx-s5", "S5 세션의 사람 말", NOW - 100)
+
+        due.mark_reopened(self.h.state, "cx-s2", "codex-cli", NOW - 50)
+        append_codex_user_turn(path_s2, "S2 재개 후 새 턴", ordinal=90)
+        ledger.append({"repo": self.h.key, "harness": "codex-cli", "session": "cx-s2",
+                       "event": "start", "epoch": NOW - 50, "path": path_s2,
+                       "cwd": self.h.repo_root}, home=self.h.home)
+
+        body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("S2 재개 후 새 턴", body)  # the resumed session is head
+        self.assertIn("S5 세션의 사람 말", body)  # and the others still show as ALSO
+        self.assertIn("S4 세션의 사람 말", body)
+        self.assertTrue(due.already_delivered(self.h.state, "cx-s2", "claude-code"))
+
+    def test_a_slow_phantom_head_does_not_exhaust_the_real_heads_time_budget(self):
+        """Review finding 1: marks[0] (the phantom) used to be read in the
+        unbounded i==0 branch, then get dropped by the #27 guard — but the
+        *next* mark (the real head, S5) used to inherit whatever was left of
+        a time budget that had already started ticking before the phantom
+        was even read. With the budget forced impossibly low, the pre-fix
+        behavior broke out with nothing delivered, on every single call."""
+        from tests._repo import append_codex_user_turn
+
+        path_s2 = self._deliver_s2_alone()
+        self._plant("cx-s4", "S4 세션의 사람 말", NOW - 200)
+        self._plant("cx-s5", "S5 세션의 사람 말", NOW - 100)
+        due.mark_reopened(self.h.state, "cx-s2", "codex-cli", NOW - 50)
+        append_codex_user_turn(path_s2, "", ordinal=90)  # phantom
+        ledger.append({"repo": self.h.key, "harness": "codex-cli", "session": "cx-s2",
+                       "event": "start", "epoch": NOW - 50, "path": path_s2,
+                       "cwd": self.h.repo_root}, home=self.h.home)
+
+        with mock.patch.object(brief, "OLDER_SESSION_TIME_BUDGET", -1.0):
+            body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                                 repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("S5 세션의 사람 말", body)
+        self.assertTrue(due.already_delivered(self.h.state, "cx-s5", "claude-code"))
+
+
+class TestCapOverflowDisclosure(unittest.TestCase):
+    """#49 review finding 2: genuine overflow past MAX_SESSIONS — whether
+    caused by a phantom displacing a fresh session or by plain abundance —
+    must be disclosed via MORE, never silently dropped where due() alone
+    would have truncated it with nothing downstream able to tell."""
+
+    def setUp(self):
+        self.h = Harness()
+
+    def tearDown(self):
+        self.h.close()
+
+    def _plant(self, session_id, human, when, **kw):
+        return self.h.t.plant_codex(session_id=session_id, human=human,
+                                    ledger_home=self.h.home, when=when, **kw)
+
+    def test_five_fresh_sessions_deliver_three_and_disclose_two_unread(self):
+        for i in range(5):
+            self._plant("cx-{}".format(i), "세션 {} 의 사람 말".format(i), NOW - (500 - i * 100))
+        body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        # Newest 3 (cx-4, cx-3, cx-2) delivered; cx-1/cx-0 disclosed, not shown.
+        self.assertIn("세션 4 의 사람 말", body)
+        self.assertIn("세션 3 의 사람 말", body)
+        self.assertIn("세션 2 의 사람 말", body)
+        self.assertNotIn("세션 1 의 사람 말", body)
+        self.assertNotIn("세션 0 의 사람 말", body)
+        self.assertIn("2 sessions unread", body)
+
+        for sid in ("cx-4", "cx-3", "cx-2"):
+            self.assertTrue(due.already_delivered(self.h.state, sid, "claude-code"), sid)
+        for sid in ("cx-1", "cx-0"):
+            self.assertFalse(due.already_delivered(self.h.state, sid, "claude-code"), sid)
+
+    def test_twenty_fresh_sessions_only_read_exactly_max_sessions(self):
+        """Review finding 1: `due.SCAN_LIMIT` (20) lets brief.py see well
+        past MAX_SESSIONS, but it must stop **reading** the instant it has
+        MAX_SESSIONS sessions that will actually be sent in hand — not read
+        every candidate up to the time budget or SCAN_LIMIT and trim
+        afterwards, which used to cost 4+ real reads for 20 candidates."""
+        from omhc.adapters import codex_cli
+
+        for i in range(20):
+            self._plant("cx-{:02d}".format(i), "세션 {} 의 사람 말".format(i),
+                       NOW - (2000 - i * 10))
+        real_read = codex_cli.CodexCliAdapter.read_session
+        reads = []
+
+        def spy(self, ref):
+            reads.append(ref.session_id)
+            return real_read(self, ref)
+
+        with mock.patch.object(codex_cli.CodexCliAdapter, "read_session", spy):
+            body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                                 repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertEqual(len(reads), due.MAX_SESSIONS, reads)
+        self.assertIn("+17 sessions unread", body)
+
+    def test_no_human_sessions_do_not_burn_cap_slots(self):
+        """trim49 shape: oldest -> newest Z(human), Y(no human), X(no human),
+        H(human, head). Y/X must not take cap slots away from Z — H and Z
+        both get delivered, and Y/X are silently skipped, not disclosed as
+        unread (#49 review finding 2)."""
+        self._plant("cx-z", "Z 사람 말", NOW - 400)
+        self._plant("cx-y", "", NOW - 300, shell_turns=1)
+        self._plant("cx-x", "", NOW - 200, shell_turns=1)
+        self._plant("cx-h", "H 사람 말", NOW - 100)
+
+        body = brief.compute(my_harness="claude-code", my_session_id="me1",
+                             repo_root=self.h.repo_root, home=self.h.home, now=NOW)
+        self.assertIn("H 사람 말", body)
+        self.assertIn("Z 사람 말", body)
+        self.assertNotIn("MORE", body)
+        self.assertTrue(due.ever_delivered(self.h.state, "cx-z", "claude-code"))
+        self.assertFalse(due.ever_delivered(self.h.state, "cx-y", "claude-code"))
+        self.assertFalse(due.ever_delivered(self.h.state, "cx-x", "claude-code"))
+
+
 class TestDeliver(unittest.TestCase):
     def setUp(self):
         self.h = Harness()
