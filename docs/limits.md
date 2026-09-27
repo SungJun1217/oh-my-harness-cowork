@@ -172,6 +172,41 @@ unchanged — it is still the only signal that makes `due()` reconsider a
 delivered session; `brief` is what decides whether there is actually
 something new to send.
 
+### A delivered handoff that never reached the model is bounced back (#51)
+
+`mark` and `brief` both run at `SessionStart`, before the receiving
+harness's own model call — so a Claude session that then fails to
+authenticate (401, "Not logged in") or hits a rate limit still claims the
+handoff in `delivered.tsv` and marks its sources delivered, even though the
+model never saw it. Left alone, the next Claude session's `due()` walk
+would hit that already-delivered source and stop there — the handoff is
+silently lost, worse than never having been claimed at all.
+
+`brief.mark_delivered` now writes a 7th column: the receiving session's own
+id (`recipient`), the same one every line of that handoff (head and any
+ALSO lines) shares. The *next* time a session of that harness starts,
+`cmd_mark` looks at the trailing run of delivered lines for that harness —
+one handoff group, by file position, not epoch (invariant 6) — and, only if
+the new session isn't the same recipient (the hook fires several times per
+session; that must never bounce its own delivery) and the group hasn't
+already been bounced, asks the adapter's optional `delivery_reached_model`
+whether the recipient's transcript ever produced a real reply. Only Claude
+Code implements it, from the measured shapes above (a synthetic
+`isApiErrorMessage:true` assistant record and nothing else vs. at least one
+real assistant record, however it's followed) — Codex returns `None`
+(undecided) until an equivalent failure shape is measured there too.
+
+A confirmed `False` appends a `bounce` line (2nd column, like `reopen`) for
+every source session in that group. Unlike `reopen`, a bounce undoes not
+just `already_delivered` but `ever_delivered` too — the delivery never
+actually landed, so it must not act as `due()`'s #49 stop boundary either.
+It also makes `last_delivery_offset` skip past the bounced delivery and
+fall back to whatever baseline came before it (or `None`), so the #27 guard
+above doesn't mistake the lost delivery's own offset for "already sent up to
+here" and suppress the redelivery it's meant to enable. Old-format
+delivered lines (written before the recipient column existed) have no
+recipient to resolve, so they're never bounced.
+
 ## Codex 0.144 to 0.148 sessions carry no command facts
 
 The Codex mapping is measured against 194 real rollouts (codex-cli

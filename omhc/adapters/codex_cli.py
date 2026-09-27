@@ -880,6 +880,13 @@ class CodexCliAdapter:
         meta = session_meta(source_path)
         return meta is None or _is_interactive(meta)
 
+    def delivery_reached_model(self, source_path: str) -> Optional[bool]:
+        """#51 was only measured on Claude Code (isApiErrorMessage/<synthetic>
+        assistant records). No equivalent shape has been measured for Codex
+        rollouts yet, so this stays undecided (None) rather than guess at a
+        vendor-specific error marker without evidence."""
+        return None
+
     def ref_for_path(self, source_path: str, session_id: str,
                      cwd: Optional[str] = None) -> Optional[SessionRef]:
         meta = session_meta(source_path)

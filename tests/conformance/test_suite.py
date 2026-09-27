@@ -490,6 +490,33 @@ class AdapterContract(unittest.TestCase):
             self.assertEqual(fh.read(1), b"\n",
                              "end_offset {} is not right after a newline".format(end_offset))
 
+    def test_31_delivery_reached_model_is_a_bool_or_none_and_never_raises(self):
+        """delivery_reached_model is an optional method (#51, same pattern as
+        health/discover) — the default returns None, and any real
+        implementation must still degrade to None rather than raise on a
+        missing/garbage path (it runs from cmd_mark, the hook path)."""
+        for adapter_id in adapter_ids():
+            with self.subTest(adapter=adapter_id):
+                inst = adapters.get(adapter_id)
+                got = inst.delivery_reached_model("/nope/missing.jsonl")
+                self.assertTrue(got is None or isinstance(got, bool))
+
+    def test_32_delivery_reached_model_never_raises_on_garbage_content(self):
+        """#51 review finding 3: a record whose `message` field isn't a dict
+        (e.g. a plain string) must not crash a vendor-specific parser that
+        assumes it can call .get() on it — same fail-open rule as
+        test_26_classify_never_raises_on_garbage, applied to this method."""
+        for adapter_id in adapter_ids():
+            with self.subTest(adapter=adapter_id):
+                with tempfile.TemporaryDirectory() as d:
+                    path = os.path.join(d, "garbage.jsonl")
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write("not json at all\n")
+                        fh.write('{"type": "assistant", "message": "not a dict"}\n')
+                        fh.write('{"type": "assistant", "message": 42}\n')
+                    got = adapters.get(adapter_id).delivery_reached_model(path)
+                    self.assertTrue(got is None or isinstance(got, bool))
+
 
 if __name__ == "__main__":
     unittest.main()

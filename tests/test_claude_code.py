@@ -864,5 +864,102 @@ class TestWriteSide(unittest.TestCase):
         self.assertIn(A.Capability.WRITE, caps)
 
 
+class TestDeliveryReachedModel(unittest.TestCase):
+    """#51: measured shapes for a session whose model call never really ran."""
+
+    def test_not_logged_in_shape_is_false(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            _write_jsonl(path, [
+                {"type": "assistant", "timestamp": _TS, "isApiErrorMessage": True,
+                 "message": {"model": "<synthetic>", "content": [], "usage": {}}},
+            ])
+            self.assertFalse(CC.ClaudeCodeAdapter().delivery_reached_model(path))
+
+    def test_401_shape_is_false(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            _write_jsonl(path, [
+                {"type": "system", "subtype": "api_error", "timestamp": _TS},
+                {"type": "system", "subtype": "api_error", "timestamp": _TS},
+                {"type": "assistant", "timestamp": _TS, "isApiErrorMessage": True,
+                 "message": {"model": "<synthetic>", "content": [], "usage": {}}},
+            ])
+            self.assertFalse(CC.ClaudeCodeAdapter().delivery_reached_model(path))
+
+    def test_real_reply_is_true(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            _write_jsonl(path, [
+                {"type": "user", "cwd": REPO, "timestamp": _TS,
+                 "message": {"content": "hi"}},
+                {"type": "assistant", "timestamp": _TS,
+                 "message": {"model": "claude-x", "content": [{"type": "text", "text": "hello"}]}},
+            ])
+            self.assertTrue(CC.ClaudeCodeAdapter().delivery_reached_model(path))
+
+    def test_real_reply_then_synthetic_server_error_is_still_true(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            _write_jsonl(path, [
+                {"type": "assistant", "timestamp": _TS,
+                 "message": {"model": "claude-x", "content": [{"type": "text", "text": "hello"}]}},
+                {"type": "assistant", "timestamp": _TS, "isApiErrorMessage": True,
+                 "message": {"model": "<synthetic>", "content": [], "usage": {}}},
+            ])
+            self.assertTrue(CC.ClaudeCodeAdapter().delivery_reached_model(path))
+
+    def test_missing_file_is_none(self):
+        self.assertIsNone(CC.ClaudeCodeAdapter().delivery_reached_model("/no/such/file.jsonl"))
+
+    def test_empty_file_is_none(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            _write_jsonl(path, [])
+            self.assertIsNone(CC.ClaudeCodeAdapter().delivery_reached_model(path))
+
+    def test_corrupt_file_is_none(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("{not json\n")
+            self.assertIsNone(CC.ClaudeCodeAdapter().delivery_reached_model(path))
+
+    def test_non_dict_message_never_raises(self):
+        """#51 review finding 3: message.get("model") would raise
+        AttributeError if "message" isn't a dict — must degrade, not crash
+        (the hook path this feeds must never break). Without
+        isApiErrorMessage/isVirtual set, this record isn't recognized as the
+        synthetic error shape, so it's read like any other real assistant
+        record (True) — the point of this test is "doesn't raise", not this
+        particular value."""
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            _write_jsonl(path, [
+                {"type": "assistant", "timestamp": _TS, "message": "not a dict"},
+            ])
+            got = CC.ClaudeCodeAdapter().delivery_reached_model(path)
+            self.assertTrue(got is None or isinstance(got, bool))
+
+    def test_non_dict_message_with_the_error_flag_is_still_false(self):
+        """Same malformed message, but with isApiErrorMessage set (the flag
+        alone is enough to recognize the synthetic-error shape without ever
+        touching message.get)."""
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            _write_jsonl(path, [
+                {"type": "assistant", "timestamp": _TS, "isApiErrorMessage": True,
+                 "message": "not a dict"},
+            ])
+            self.assertFalse(CC.ClaudeCodeAdapter().delivery_reached_model(path))
+
+    def test_over_the_byte_cap_is_none(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            with open(path, "wb") as fh:
+                fh.write(b" " * (CC.ClaudeCodeAdapter._DELIVERY_REACHED_CAP + 1))
+            self.assertIsNone(CC.ClaudeCodeAdapter().delivery_reached_model(path))
+
+
 if __name__ == "__main__":
     unittest.main()

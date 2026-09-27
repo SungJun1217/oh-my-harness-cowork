@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import collections
 import os
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from . import fsio, ledger, locate
 
@@ -40,6 +40,15 @@ REOPEN_MARKER = "reopen"
 # ALSO line (v2 phase 1, #41) — lets `omhc status` skip it from
 # injections/pull-rate the same way it already skips REOPEN_MARKER rows.
 ALSO_MARKER = "also"
+
+# 2nd column, like REOPEN_MARKER, but for the opposite reason (#51): the
+# receiving session's model call never actually ran (401 / "Not logged in" /
+# rate limit) before this session's own SessionStart hook already claimed the
+# handoff in delivered.tsv. Written by cmd_mark once the *next* session of
+# that harness starts and the adapter confirms the previous one never reached
+# the model — 3rd column holds the harness the delivery was for (mirrors
+# REOPEN_MARKER's 3rd column, "from_harness").
+BOUNCE_MARKER = "bounce"
 
 # A foreign session older than this is not treated as ongoing work. Injecting
 # a week-old session as "just happened" would have the next agent redo
@@ -90,6 +99,12 @@ def _already_delivered(lines: List[List[str]], session_id: str, to_harness: str)
             continue
         if parts[1] == REOPEN_MARKER:
             delivered = False
+        elif parts[1] == BOUNCE_MARKER:
+            # #51: only undoes it for the harness the bounce was actually
+            # for — a session delivered to two harnesses and bounced for one
+            # must not lose the other's delivered status.
+            if len(parts) >= 3 and parts[2] == to_harness:
+                delivered = False
         elif parts[1] == to_harness:
             delivered = True
     return delivered
@@ -103,9 +118,34 @@ def _ever_delivered(lines: List[List[str]], session_id: str, to_harness: str) ->
     delivered and then reopened must still end the list (see due()'s
     docstring), even though _already_delivered() says "not delivered" for it
     right now.
-    """
-    return any(len(parts) >= 2 and parts[0] == session_id and parts[1] == to_harness
-               for parts in lines)
+
+    A bounce line cancels only the **one delivery line immediately before
+    it** (#51 review finding 1) — the same pairing last_delivery_offset
+    uses, not "every earlier delivery too". A session resumed after a real
+    delivery, then bounced on its *second* delivery, was still genuinely
+    delivered once — that first, un-bounced delivery must still stand as
+    due()'s #49 stop boundary, or the walk revives everything before it as
+    if it were newer work that just arrived. So this scans in file order,
+    reversed: the trailing bounce line pairs with (and cancels) the nearest
+    preceding delivery line for this harness; any earlier, unpaired delivery
+    line still counts."""
+    bounced = False
+    for parts in reversed(lines):
+        if len(parts) < 2 or parts[0] != session_id:
+            continue
+        if parts[1] == BOUNCE_MARKER:
+            if len(parts) >= 3 and parts[2] == to_harness:
+                bounced = True
+            continue
+        if parts[1] != to_harness:
+            continue
+        if bounced:
+            # This is the delivery the bounce line right after it cancels —
+            # skip it and keep looking further back for an earlier, real one.
+            bounced = False
+            continue
+        return True
+    return False
 
 
 def already_delivered(state_dir: str, session_id: str, to_harness: str) -> bool:
@@ -136,7 +176,7 @@ def last_delivered(state_dir: str) -> Optional[str]:
         return None
     for line in reversed(lines):
         parts = line.rstrip("\n").split("\t")
-        if len(parts) >= 2 and parts[1] == REOPEN_MARKER:
+        if len(parts) >= 2 and parts[1] in (REOPEN_MARKER, BOUNCE_MARKER):
             continue
         if parts and parts[0]:
             return parts[0]
@@ -164,7 +204,7 @@ def delivered_order(state_dir: str) -> List[str]:
     last = {}
     for pos, line in enumerate(lines):
         parts = line.rstrip("\n").split("\t")
-        if len(parts) >= 2 and parts[1] == REOPEN_MARKER:
+        if len(parts) >= 2 and parts[1] in (REOPEN_MARKER, BOUNCE_MARKER):
             continue
         if parts and parts[0]:
             last[parts[0]] = pos
@@ -179,6 +219,7 @@ def mark_delivered(
     epoch: float,
     offset: Optional[int] = None,
     role: Optional[str] = None,
+    recipient: Optional[str] = None,
 ) -> None:
     """Records that this session was delivered to this harness. Keeps the same thing from being pushed twice.
 
@@ -194,16 +235,25 @@ def mark_delivered(
     so `omhc status`'s injection/pull-rate counting can skip it the same way
     it already skips reopen lines (one handoff with 3 rows must count as one
     injection, not three). If offset is None, an empty 5th column is written
-    first so the 6th column lands in a fixed position regardless."""
+    first so the 6th column lands in a fixed position regardless.
+
+    `recipient` (#51) is the receiving session's own id — the one whose
+    SessionStart hook is about to claim this handoff. brief.py passes its
+    own `my_session_id` here for every line of a handoff (head and ALSO),
+    so a later `cmd_mark` can tell whether that same receiving session ever
+    actually reached the model, and bounce the whole group back to
+    "not delivered" if it didn't. Written as an optional 7th column — if
+    offset/role are both unset, empty placeholders are written first so the
+    recipient lands in a fixed position regardless."""
     if watermark is None:
         return
     fields = [watermark.session_id, to_harness, watermark.harness, "{:.0f}".format(epoch)]
-    if offset is not None:
-        fields.append(str(offset))
-    if role == ALSO_MARKER:
-        if offset is None:
-            fields.append("")
-        fields.append(role)
+    if offset is not None or role == ALSO_MARKER or recipient:
+        fields.append(str(offset) if offset is not None else "")
+    if role == ALSO_MARKER or recipient:
+        fields.append(role or "")
+    if recipient:
+        fields.append(recipient)
     fsio.append_line(_delivered_path(state_dir), "\t".join(fields))
 
 
@@ -214,15 +264,31 @@ def last_delivery_offset(state_dir: str, session_id: str, to_harness: str) -> Op
     human turn actually exists — this value is that baseline. If no matching
     line exists, or it does but is the old 4-column format, returns None —
     meaning "baseline unknown", and the caller must keep today's behavior
-    (send again unconditionally)."""
+    (send again unconditionally).
+
+    A bounce line (#51) invalidates the delivery line immediately before it
+    for this harness — that delivery never reached the model, so its offset
+    must not become a baseline the #27 guard uses to suppress redelivery.
+    The scan skips that one bounced delivery and keeps looking further back
+    for an earlier, real baseline (or None if there isn't one)."""
     try:
         with open(_delivered_path(state_dir), encoding="utf-8", errors="replace") as fh:
             lines = [line for line in fh if line.strip()]
     except OSError:
         return None
+    bounced = False
     for line in reversed(lines):
         parts = line.rstrip("\n").split("\t")
-        if len(parts) < 2 or parts[0] != session_id or parts[1] != to_harness:
+        if len(parts) < 2 or parts[0] != session_id:
+            continue
+        if parts[1] == BOUNCE_MARKER:
+            if len(parts) >= 3 and parts[2] == to_harness:
+                bounced = True
+            continue
+        if parts[1] != to_harness:
+            continue
+        if bounced:
+            bounced = False
             continue
         if len(parts) >= 5:
             try:
@@ -244,6 +310,82 @@ def mark_reopened(state_dir: str, session_id: str, from_harness: str, epoch: flo
         return
     line = "\t".join((session_id, REOPEN_MARKER, from_harness or "", "{:.0f}".format(epoch)))
     fsio.append_line(_delivered_path(state_dir), line)
+
+
+def mark_bounced(state_dir: str, session_id: str, to_harness: str, epoch: float) -> None:
+    """Records that a delivery of `session_id` to `to_harness` never actually
+    reached the model (#51: the receiving session's model call failed — 401,
+    "Not logged in", rate limit — before any real reply, but its SessionStart
+    hook still ran mark/brief first and claimed the handoff). Called from
+    cmd_mark once the *next* session of that harness starts, via
+    latest_delivered_group + the adapter's delivery_reached_model.
+
+    Undoes both _already_delivered (same as mark_reopened) and _ever_delivered
+    (unlike mark_reopened) — the delivery genuinely never landed, so it must
+    not act as due()'s #49 stop boundary either; the source session is
+    revived as if it had never been delivered."""
+    if not session_id:
+        return
+    line = "\t".join((session_id, BOUNCE_MARKER, to_harness or "", "{:.0f}".format(epoch)))
+    fsio.append_line(_delivered_path(state_dir), line)
+
+
+def latest_delivered_group(state_dir: str, to_harness: str) -> Optional[Tuple[str, List[str]]]:
+    """The most recent handoff delivered to `to_harness` — by file position,
+    not epoch (invariant 6). brief.py always appends a handoff's ALSO lines
+    immediately before its head line, all sharing one `recipient` column
+    (#51, mark_delivered's docstring) — so the trailing run of delivered
+    lines with parts[1]==to_harness and a matching recipient is exactly one
+    handoff group.
+
+    Returns (recipient, [session ids in file order, head last]), or None if
+    delivered.tsv has nothing for this harness yet, or the most recent line
+    predates the recipient column — an old-format line can never be
+    resolved to a recipient, so it can never be bounced (#51)."""
+    lines = _delivered_lines(state_dir)
+    matching = [parts for parts in lines if len(parts) >= 2 and parts[1] == to_harness]
+    if not matching:
+        return None
+    recipient = matching[-1][6] if len(matching[-1]) >= 7 else ""
+    if not recipient:
+        return None
+    sources: List[str] = []
+    for parts in reversed(matching):
+        r = parts[6] if len(parts) >= 7 else ""
+        if r != recipient:
+            break
+        if parts[0]:
+            sources.append(parts[0])
+    sources.reverse()
+    return recipient, sources
+
+
+def group_already_bounced(state_dir: str, to_harness: str, head_session_id: str) -> bool:
+    """Was the handoff group ending in `head_session_id`'s delivery to
+    `to_harness` already bounced (#51 review finding 2)?
+
+    Deliberately **not** `already_delivered(head_session_id, to_harness)` —
+    that also reads False after a plain reopen of the head with no bounce at
+    all (mark_reopened runs independently, e.g. the human resumed that
+    session in its own harness between the failed delivery and now), which
+    would wrongly suppress the bounce and lose the whole group's ALSO
+    sources, and then redeliver the head against the stale, failed
+    delivery's offset. Checked by file position instead: true only if a
+    `bounce` line for (head_session_id, to_harness) appears **after** that
+    head's own last delivery line to this harness — a reopen in between
+    doesn't change that."""
+    lines = _delivered_lines(state_dir)
+    last_delivery_pos = None
+    for pos, parts in enumerate(lines):
+        if len(parts) >= 2 and parts[0] == head_session_id and parts[1] == to_harness:
+            last_delivery_pos = pos
+    if last_delivery_pos is None:
+        return False
+    for parts in lines[last_delivery_pos + 1:]:
+        if (len(parts) >= 3 and parts[0] == head_session_id
+                and parts[1] == BOUNCE_MARKER and parts[2] == to_harness):
+            return True
+    return False
 
 
 def due(
