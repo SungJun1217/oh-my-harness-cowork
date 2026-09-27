@@ -111,7 +111,7 @@ class TestBriefRunsFirst(unittest.TestCase):
 
     def test_grown_delivered_session_is_reactivated(self):
         """(b) The ordinary "keep typing in a delivered session, then
-        switch" case (_reactivate_grown_sessions), triggered from brief's
+        switch" case (_analyze_grown_sessions/_apply_grown_sessions), triggered from brief's
         own collection instead of a prior mark call."""
         self.h.plant_codex("X1", ledger_home=self.h.home)
         # Establishes a real pre-growth baseline the same way a genuine
@@ -236,7 +236,7 @@ class TestLockTimeout(unittest.TestCase):
         self.assertEqual(got.session_id, "X1")
 
     def test_mark_skips_reactivation_but_still_backfills_when_lock_is_held(self):
-        """Review finding 1: two concurrent `_reactivate_grown_sessions`
+        """Review finding 1: two concurrent `_analyze_grown_sessions/_apply_grown_sessions`
         runs can each independently append their own `grew` start row for
         the same session, reproducing the #49 duplicate-row bug. When mark
         doesn't get the lock (the holder — brief, or another mark — is
@@ -333,7 +333,7 @@ class TestConcurrencySmoke(unittest.TestCase):
             if i:
                 # One new human turn per round, appended right before that
                 # round's race — incremental growth, not delivered until
-                # `_reactivate_grown_sessions` sees it this round.
+                # `_analyze_grown_sessions/_apply_grown_sessions` sees it this round.
                 _repo.append_codex_user_turn(path, "동시성 테스트용 {}".format(i), ordinal=90 + i)
             payload = json.dumps({"cwd": self.t.root, "session_id": "me{}".format(i)})
             procs = [
@@ -353,3 +353,15 @@ class TestConcurrencySmoke(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBudgetsFitTheLockWait(unittest.TestCase):
+    """#54 review: the lock holder's whole collection must finish before the
+    other process gives up waiting, or that process skips collecting and the
+    handoff arrives one session start late."""
+
+    def test_phase_budgets_plus_a_tail_read_fit_inside_the_lock_wait(self):
+        tail_read_overrun = 0.025  # REACTIVATE_TAIL_CAP (1 MB) read ≈ 22 ms
+        self.assertLess(
+            collect.REACTIVATE_TIME_BUDGET + collect.BACKFILL_TIME_BUDGET + tail_read_overrun,
+            collect.LOCK_WAIT_BUDGET)

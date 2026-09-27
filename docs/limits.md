@@ -217,14 +217,14 @@ instant — not just Codex (the older, Codex-only measurement above). The
 shipped fragments still list `mark` before `brief` for readability, but
 that order is not guaranteed at runtime, so `brief` cannot assume `mark`
 already wrote this start's rows for the *other* harness's sessions
-(backfill, `_reactivate_grown_sessions`'s resume detection, the #51 bounce
+(backfill, `collect._analyze_grown_sessions`/`_apply_grown_sessions`'s resume detection, the #51 bounce
 check) before `due()` runs.
 
 `due()` itself needs none of this session's *own* rows (it already skips
 `my_session_id`), only the foreign ones — so `brief.compute` now runs the
 same collection `cmd_mark` does (`collect.collect_foreign_state`, shared by
 both), right before calling `due()`. Both sides attempt a short, bounded
-lock (`collect.try_lock`, ~150ms, `fcntl.flock`) so the common case (both
+lock (`collect.try_lock`, ~200ms, `fcntl.flock`) so the common case (both
 starting in the same instant) doesn't duplicate the same ledger scan
 twice — but neither correctness nor `--dry-run` (which always skips
 collection; it must write nothing) depends on winning that lock. `mark`

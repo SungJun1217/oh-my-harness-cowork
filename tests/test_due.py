@@ -233,7 +233,7 @@ class TestDue(unittest.TestCase):
 
     def test_a_session_with_several_start_rows_appears_only_once(self):
         """The ledger can hold several `start` rows for the same session
-        (resume, _reactivate_grown_sessions, a late compact) — S(older),
+        (resume, collect._apply_grown_sessions, a late compact) — S(older),
         T(newer), then a resume row re-appends S's session id (review
         finding 1). Only the first (newest) occurrence must survive."""
         self.start("codex-cli", "S", 10.0)

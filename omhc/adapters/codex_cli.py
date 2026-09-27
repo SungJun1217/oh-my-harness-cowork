@@ -557,7 +557,7 @@ class CodexCliAdapter:
             except OSError:
                 continue
             # Snap to a line boundary (review) — this value directly becomes
-            # `_reactivate_grown_sessions`'s first baseline, so if stat lands
+            # `_analyze_grown_sessions`'s first baseline, so if stat lands
             # mid-record, that record becomes permanently unreadable once it
             # finishes being written. This is the first observation, so
             # there's no prior baseline to fall back to — if no newline is
@@ -600,7 +600,7 @@ class CodexCliAdapter:
         `stop_at_human_turn` (a caller that only needs to know whether a
         human turn exists stops at the first match instead of reading the
         rest) are optional arguments used only by
-        `collect._reactivate_grown_sessions` — the defaults match today's
+        `collect._analyze_grown_sessions` — the defaults match today's
         (unlimited) behavior, so the conformance contract "same events as
         read_session past offset" still holds."""
         try:
