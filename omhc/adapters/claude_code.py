@@ -186,6 +186,23 @@ def _text_of(content) -> Optional[str]:
     return None
 
 
+def _is_live_turn_note_attachment(att) -> bool:
+    """Is this attachment record `omhc turn`'s own LIVE note (#57, measured
+    shape: sandbox transcripts under ~/omhc-sandbox/.claude/projects)? Only
+    ever used as a boolean signal — the record itself is never parsed into
+    an Event (invariant 4)."""
+    if not isinstance(att, dict):
+        return False
+    if att.get("type") != "hook_additional_context" or att.get("hookEvent") != "UserPromptSubmit":
+        return False
+    content = att.get("content")
+    if isinstance(content, str):
+        content = [content]
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(t, str) and guard.is_live_turn_note(t) for t in content)
+
+
 def _one_line_limit(text: str, limit: int = 600) -> str:
     """Body pulled from an envelope can be very long. Fold to one line and cap it."""
     flat = " ".join(text.split())
@@ -447,6 +464,25 @@ class ClaudeCodeAdapter:
         pending: Dict[str, int] = {}  # tool_use_id → index into events
         seq = 0
         offset = start
+        # #57: structural guard against a paraphrased turn note being
+        # laundered into an agent `said` event. Reset to False the moment a
+        # genuine human `said` is produced, set True when an injected LIVE
+        # turn note (attachment.type=="hook_additional_context",
+        # hookEvent=="UserPromptSubmit") is seen — both scoped to *this*
+        # call's own local state, always starting False, even for a tail read
+        # (start > 0) that can't see what came before it. This keeps the
+        # `read_session_since(ref, start)` restricted-to-`start` contract
+        # exactly matching `read_session` (conformance test 30) for the
+        # common case (no note straddles the cut). The one narrow gap this
+        # accepts: a tail read whose `start` lands strictly between a live
+        # note and the human turn that follows it won't see the note and so
+        # won't drop an agent `said` in that gap — accepted because the
+        # production path that actually builds a cross-harness handoff
+        # (mint(), via brief) always calls `read_session` from offset 0, never
+        # `read_session_since`; the latter is only used for this session's
+        # own incremental bookkeeping (turn.check, collect), where the same
+        # paraphrase is still caught the next time this session is read in full.
+        after_live_note = False
 
         def bump(key: str) -> None:
             dropped[key] = dropped.get(key, 0) + 1
@@ -492,6 +528,8 @@ class ClaudeCodeAdapter:
 
                 kind = str(row.get("type"))
                 if kind not in _PARSED_TYPES:
+                    if kind == "attachment" and _is_live_turn_note_attachment(row.get("attachment")):
+                        after_live_note = True
                     bump(kind)
                     continue
                 # Sidechain records are someone else's agent speech. This
@@ -555,6 +593,7 @@ class ClaudeCodeAdapter:
                     if stop_at_human_turn and not raw.endswith(b"\n"):
                         continue
                     text = guard.redact_b64(_one_line_limit(text))
+                    after_live_note = False  # #57: a genuine human turn closes the note's window
                     seq += 1
                     events.append(Event(
                         seq=seq, epoch=epoch, author="human", verb="said", ok=True,
@@ -580,6 +619,13 @@ class ClaudeCodeAdapter:
                         text = str(block.get("text") or "").strip()
                         if not text or not guard.safe(text, "agent"):
                             bump("guarded_agent")
+                            continue
+                        if after_live_note:
+                            # #57: a paraphrase of the injected note (guard's
+                            # content match only catches a verbatim echo)
+                            # is still another session's human text laundered
+                            # through an agent claim — drop structurally.
+                            bump("after_turn_note")
                             continue
                         text = guard.redact_b64(_one_line_limit(text))
                         seq += 1
