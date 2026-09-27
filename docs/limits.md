@@ -3,6 +3,7 @@
 # Known limits
 
 - [An untrusted Codex hook turns off Claude to Codex](#an-untrusted-codex-hook-turns-off-claude-to-codex)
+- [`brief` doesn't wait for `mark` (#50)](#brief-doesnt-wait-for-mark-50)
 - [Codex 0.144 to 0.148 sessions carry no command facts](#codex-0144-to-0148-sessions-carry-no-command-facts)
 - [A Claude Code fork needs a turn of its own](#a-claude-code-fork-needs-a-turn-of-its-own)
 - [The on-disk formats are not an official contract](#the-on-disk-formats-are-not-an-official-contract)
@@ -154,8 +155,9 @@ as before.
 
 `codex exec resume <id> ""`
 fires `source:"resume"` and leaves a `reopen` line, but the rollout only
-gains a user record with `"text": ""` — no human turn. Concurrently, Codex
-fires its SessionStart hooks in parallel, so `mark` and `brief` can race:
+gains a user record with `"text": ""` — no human turn. Concurrently, both
+harnesses fire their SessionStart hooks in parallel (measured on Codex
+here; confirmed on both harnesses, see #50 below), so `mark` and `brief` can race:
 `brief` can deliver a session in the same second `mark`'s growth check
 reactivates it from a turn `brief` had already read, appending `reopen`
 *after* the delivery. Either way, `due()` would hand the session back
@@ -171,6 +173,67 @@ to send" path. `--dry-run` runs the same check. `mark`'s `reopen` write is
 unchanged — it is still the only signal that makes `due()` reconsider a
 delivered session; `brief` is what decides whether there is actually
 something new to send.
+
+### A delivered handoff that never reached the model is bounced back (#51)
+
+`mark` and `brief` both run at `SessionStart`, before the receiving
+harness's own model call — so a Claude session that then fails to
+authenticate (401, "Not logged in") or hits a rate limit still claims the
+handoff in `delivered.tsv` and marks its sources delivered, even though the
+model never saw it. Left alone, the next Claude session's `due()` walk
+would hit that already-delivered source and stop there — the handoff is
+silently lost, worse than never having been claimed at all.
+
+`brief.mark_delivered` now writes a 7th column: the receiving session's own
+id (`recipient`), the same one every line of that handoff (head and any
+ALSO lines) shares. The *next* time a session of that harness starts,
+`cmd_mark` looks at the trailing run of delivered lines for that harness —
+one handoff group, by file position, not epoch (invariant 6) — and, only if
+the new session isn't the same recipient (the hook fires several times per
+session; that must never bounce its own delivery) and the group hasn't
+already been bounced, asks the adapter's optional `delivery_reached_model`
+whether the recipient's transcript ever produced a real reply. Only Claude
+Code implements it, from the measured shapes above (a synthetic
+`isApiErrorMessage:true` assistant record and nothing else vs. at least one
+real assistant record, however it's followed) — Codex returns `None`
+(undecided) until an equivalent failure shape is measured there too.
+
+A confirmed `False` appends a `bounce` line (2nd column, like `reopen`) for
+every source session in that group. Unlike `reopen`, a bounce undoes not
+just `already_delivered` but `ever_delivered` too — the delivery never
+actually landed, so it must not act as `due()`'s #49 stop boundary either.
+It also makes `last_delivery_offset` skip past the bounced delivery and
+fall back to whatever baseline came before it (or `None`), so the #27 guard
+above doesn't mistake the lost delivery's own offset for "already sent up to
+here" and suppress the redelivery it's meant to enable. Old-format
+delivered lines (written before the recipient column existed) have no
+recipient to resolve, so they're never bounced.
+
+### `brief` doesn't wait for `mark` (#50)
+
+Measured (codex-cli 0.156.1 and Claude Code 2.1.283, sandbox): both harnesses
+start every `SessionStart` hook in a group at (effectively) the same
+instant — not just Codex (the older, Codex-only measurement above). The
+shipped fragments still list `mark` before `brief` for readability, but
+that order is not guaranteed at runtime, so `brief` cannot assume `mark`
+already wrote this start's rows for the *other* harness's sessions
+(backfill, `_reactivate_grown_sessions`'s resume detection, the #51 bounce
+check) before `due()` runs.
+
+`due()` itself needs none of this session's *own* rows (it already skips
+`my_session_id`), only the foreign ones — so `brief.compute` now runs the
+same collection `cmd_mark` does (`collect.collect_foreign_state`, shared by
+both), right before calling `due()`. Both sides attempt a short, bounded
+lock (`collect.try_lock`, ~150ms, `fcntl.flock`) so the common case (both
+starting in the same instant) doesn't duplicate the same ledger scan
+twice — but neither correctness nor `--dry-run` (which always skips
+collection; it must write nothing) depends on winning that lock. `mark`
+collects even on a lock timeout (a session's own hook is the only place
+backfill/bounce detection for an untrusted foreign harness ever runs), while
+`brief` simply skips collecting this round on a timeout and fails open —
+the handoff arrives one session start late, never lost, and never
+duplicated (the existing gate/`O_EXCL`, append-only ledger, and #27 guard
+are unaffected by which of the two collected first).
 
 ## Codex 0.144 to 0.148 sessions carry no command facts
 

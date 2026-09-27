@@ -385,7 +385,7 @@ class ClaudeCodeAdapter:
         not be a record boundary.
 
         `max_bytes`/`stop_at_human_turn` are used only by
-        `cli._reactivate_grown_sessions` — defaults match today's (unlimited)
+        `collect._reactivate_grown_sessions` — defaults match today's (unlimited)
         behavior, so `read_session_since(ref, 0)` returns exactly the same
         events as `read_session(ref)` (proven in code below, and pinned by
         the conformance suite)."""
@@ -431,12 +431,12 @@ class ClaudeCodeAdapter:
         `read_session`'s full pass legitimately uses it as inherited GOAL
         context (see docs/limits.md, "A Claude Code fork needs a turn of its
         own"), `stop_at_human_turn` is only ever used to answer "did NEW
-        content appear since this offset" (cli._reactivate_grown_sessions),
+        content appear since this offset" (collect._reactivate_grown_sessions),
         so it must never let a copied record count as that new turn — the
         one race this guards is the baseline being captured mid-copy (the
         common case never sees this, since the very first observation
         snapshots the whole copied section as its baseline before any growth
-        check ever reads past it, see cli.py's `_reactivate_grown_sessions`).
+        check ever reads past it, see collect.py's `_reactivate_grown_sessions`).
         Gated on `stop_at_human_turn` only, so plain reads (including
         read_session and read_session_since(ref, 0)) are unaffected — parity
         with read_session holds.
@@ -693,6 +693,57 @@ class ClaudeCodeAdapter:
             epoch=stat.st_mtime,
             size=stat.st_size,
         )
+
+    # #51: only needs to see the first real (or synthetic-error) assistant
+    # record, which lands early — bounded so a large transcript can't blow
+    # the hook budget cmd_mark runs under.
+    _DELIVERY_REACHED_CAP = 2 * 1024 * 1024
+
+    def delivery_reached_model(self, source_path: str) -> Optional[bool]:
+        """#51: measured shapes (sandbox) — "Not logged in" leaves one
+        `assistant` record with isApiErrorMessage:true, message.model
+        "<synthetic>", usage 0, and no real assistant record. A 401 leaves
+        two `system` records (subtype:"api_error") then that same synthetic
+        assistant. Either way, the session never produced a real reply.
+        Reuses the same isApiErrorMessage/isVirtual/<synthetic> check
+        read_session already applies to drop these records (~511-519) — a
+        bounce decision needs the identical "was this real" judgment.
+
+        Stops at the first real assistant record (True) — a real reply
+        followed later by a synthetic `server_error` (observed with
+        sidechains) still means the session DID reach the model."""
+        try:
+            size = os.path.getsize(source_path)
+        except OSError:
+            return None
+        if size > self._DELIVERY_REACHED_CAP:
+            return None
+        saw_error = False
+        try:
+            with open(source_path, "rb") as fh:
+                for raw in fh:
+                    try:
+                        row = json.loads(raw.decode("utf-8", "replace"))
+                    except ValueError:
+                        continue
+                    if not isinstance(row, dict) or row.get("type") != "assistant":
+                        continue
+                    if row.get("isSidechain") or row.get("agentId"):
+                        continue
+                    message = row.get("message")
+                    if not isinstance(message, dict):
+                        message = {}
+                    if (row.get("isApiErrorMessage") is True
+                            or row.get("isVirtual") is True
+                            or message.get("model") == _SYNTHETIC_MODEL):
+                        saw_error = True
+                        continue
+                    return True
+        except OSError:
+            return None
+        # Empty/missing-signal transcripts are undecidable, not "bounced" —
+        # only a confirmed synthetic error with no real reply is False.
+        return False if saw_error else None
 
     def discover(self, repo_root: Optional[str],
                 deadline: Optional[float] = None) -> Tuple[SessionRef, ...]:

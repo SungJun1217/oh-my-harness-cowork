@@ -600,7 +600,7 @@ class CodexCliAdapter:
         `stop_at_human_turn` (a caller that only needs to know whether a
         human turn exists stops at the first match instead of reading the
         rest) are optional arguments used only by
-        `cli._reactivate_grown_sessions` — the defaults match today's
+        `collect._reactivate_grown_sessions` — the defaults match today's
         (unlimited) behavior, so the conformance contract "same events as
         read_session past offset" still holds."""
         try:
@@ -879,6 +879,13 @@ class CodexCliAdapter:
         """
         meta = session_meta(source_path)
         return meta is None or _is_interactive(meta)
+
+    def delivery_reached_model(self, source_path: str) -> Optional[bool]:
+        """#51 was only measured on Claude Code (isApiErrorMessage/<synthetic>
+        assistant records). No equivalent shape has been measured for Codex
+        rollouts yet, so this stays undecided (None) rather than guess at a
+        vendor-specific error marker without evidence."""
+        return None
 
     def ref_for_path(self, source_path: str, session_id: str,
                      cwd: Optional[str] = None) -> Optional[SessionRef]:
@@ -1614,7 +1621,7 @@ class CodexCliAdapter:
                     # is mtime, which isn't the "ordering basis" invariant 6
                     # forbids, since this is a one-off diagnostic (this
                     # comparison never orders events). Different from the
-                    # comparison cli._backfill_foreign_sessions does — that
+                    # comparison collect._backfill_foreign_sessions does — that
                     # compares two session-start epochs (both
                     # session_meta.timestamp-style, not mtime) to decide
                     # ledger append order, the exception invariant 6 permits.

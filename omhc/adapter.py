@@ -71,7 +71,7 @@ class SessionSince(NamedTuple):
     also carries `end_offset` — the byte offset right after the **last fully
     read line** this call actually consumed.
 
-    The caller (cli._reactivate_grown_sessions) must use this as the next
+    The caller (collect._reactivate_grown_sessions) must use this as the next
     baseline instead of `os.stat`'s size — if stat lands mid-record (the
     harness may still be writing), taking that size as the baseline and later
     reading from there once the record finishes being written makes the
@@ -304,6 +304,31 @@ class HarnessAdapter:
         warning; empty string if none). `omhc status`'s `<adapter-id> hooks`
         row and `omhc hooks install` treat both harnesses identically off
         this one record — no vendor name enters the core.
+        """
+        return None
+
+    def delivery_reached_model(self, source_path: str) -> Optional[bool]:
+        """Did the receiving session's model call actually run, or did the
+        session fail (401 / "Not logged in" / rate limit) before any real
+        reply — after mark/brief had already claimed the handoff in
+        delivered.tsv (#51)? Optional method, same pattern as `discover`/
+        `health` — default None means "this adapter can't tell", and
+        cmd_mark then leaves delivered.tsv untouched rather than guess.
+
+        True: at least one real (non-error-placeholder) assistant record
+        exists — the model replied at least once, whatever happened after.
+        False: only ever saw the harness's own synthetic error placeholder
+        for a failed model call, never a real reply — cmd_mark bounces the
+        handoff back to "not delivered" so the next session that does reach
+        the model gets it.
+        None: undecidable (missing/empty/unparseable file, over an
+        adapter-chosen byte cap) — the caller must not bounce on this.
+
+        `source_path` is a transcript path, not a SessionRef — the caller
+        only has the path (from the ledger's start row), and building a full
+        SessionRef isn't needed for a single early-record scan. Must never
+        raise (same rule as classify/discover): the caller runs this from
+        the hook path (invariant 2).
         """
         return None
 

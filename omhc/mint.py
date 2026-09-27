@@ -299,9 +299,13 @@ def mint(
     `also` (v2 phase 1, #41) is older undelivered sessions, newest first —
     `read` keeps the full slot layout, and each of `also` that has a human
     turn (has_human_turn) becomes one lowest-priority ALSO line in the same
-    budget (see docs/handoff.md). `unread` is the count of still-older
-    sessions the caller (brief.py) chose not to even read (time budget or a
-    read failure) — disclosed in MORE, never silently retried.
+    budget (see docs/handoff.md). `unread` is an **upper bound** on how many
+    still-older sessions the caller (brief.py) never even opened — past the
+    time budget, past the MAX_SESSIONS cap once enough sessions that will
+    actually be sent were already in hand, or after a read that raised — so
+    it may include some that would have turned out to be phantom reopens or
+    no-human sessions had they been read; brief.py never reads far enough to
+    tell. Disclosed in MORE, never silently retried (#49 review finding 3).
     """
     if budget < MIN_BUDGET:
         raise ValueError(
@@ -469,8 +473,11 @@ def mint(
                 hidden_events, "" if hidden_events == 1 else "s"))
         if unread > 0:
             # Distinct from an ALSO line dropped for budget — these were
-            # never even read (brief.py's time budget or a read failure) and
-            # are not retried later (#41 review finding 2), so say so plainly.
+            # never even opened by brief.py at all (time budget, past the
+            # MAX_SESSIONS cap, or a read that raised), so this is an upper
+            # bound: some might have turned out to be phantom reopens or
+            # no-human sessions had they been read. Not retried later either
+            # way (#41 review finding 2, #49 review finding 3) — say so plainly.
             bits.append("+{} session{} unread".format(
                 unread, "" if unread == 1 else "s"))
         return ", ".join(bits)

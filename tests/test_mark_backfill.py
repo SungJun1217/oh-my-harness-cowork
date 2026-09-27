@@ -14,7 +14,7 @@ import time
 import unittest
 from unittest import mock
 
-from omhc import adapters, brief, cli, due, ledger, locate
+from omhc import adapters, brief, cli, collect, due, ledger, locate
 
 from . import _repo
 
@@ -65,7 +65,7 @@ class Harness:
     def marker_rows(self, harness="codex-cli"):
         rows = ledger.read(repo_key=self.key, home=self.home)
         return [r for r in rows if r.get("harness") == harness
-               and r.get("event") == cli.REBASE_EVENT]
+               and r.get("event") == collect.REBASE_EVENT]
 
 
 class TestEndToEnd(unittest.TestCase):
@@ -197,10 +197,10 @@ class TestEndToEnd(unittest.TestCase):
 
     def test_the_per_mark_cap_holds(self):
         now = time.time()
-        for i in range(cli.BACKFILL_CAP + 3):
+        for i in range(collect.BACKFILL_CAP + 3):
             self.h.plant("cx{}".format(i), now - 1000 + i)
         self.h.mark()
-        self.assertEqual(len(self.h.scan_rows()), cli.BACKFILL_CAP)
+        self.assertEqual(len(self.h.scan_rows()), collect.BACKFILL_CAP)
 
     def test_cap_exceeded_still_delivers_the_newest_session(self):
         """Review defect: walking in ascending order and cutting off at the
@@ -208,7 +208,7 @@ class TestEndToEnd(unittest.TestCase):
         ledger, so when only 5 of 8 fit, cx4 must not come out instead of
         cx7 (the newest)."""
         now = time.time()
-        total = cli.BACKFILL_CAP + 3
+        total = collect.BACKFILL_CAP + 3
         for i in range(total):
             self.h.plant("cx{}".format(i), now - 1000 + i)
         self.h.mark()
@@ -455,7 +455,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         # the real clock, it tripped the budget only under the full suite on
         # a loaded machine and no grew row was produced (same cause as
         # TestRebaseMarker). The budget-exceeded path is checked separately.
-        patcher = mock.patch.object(cli, "BACKFILL_TIME_BUDGET", 60.0)
+        patcher = mock.patch.object(collect, "BACKFILL_TIME_BUDGET", 60.0)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -764,7 +764,7 @@ class TestReactivateGrownSessions(unittest.TestCase):
         now = time.time()
         path = self._deliver(now, "필드 경로부터 다시 확인해줘")
         self._append_human_turn(path, "이제 두 번째 턴도 반영해줘")
-        with mock.patch.object(cli, "BACKFILL_TIME_BUDGET", -1000.0):
+        with mock.patch.object(collect, "BACKFILL_TIME_BUDGET", -1000.0):
             self.h.mark()
         self.assertEqual(self._grew_rows(), [])
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
@@ -829,7 +829,7 @@ class TestClaudeReactivateGrownSessions(unittest.TestCase):
     def setUp(self):
         self.h = Harness()
         self.addCleanup(self.h.close)
-        patcher = mock.patch.object(cli, "BACKFILL_TIME_BUDGET", 60.0)
+        patcher = mock.patch.object(collect, "BACKFILL_TIME_BUDGET", 60.0)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -925,11 +925,12 @@ class TestClaudeReactivateGrownSessions(unittest.TestCase):
 def _deadline_trips_after_first_stat(target_name):
     """#28 review repro: makes `time.time()` return a value well past the
     deadline **starting right after** the first `os.stat` call inside
-    `cli.<target_name>` — only while that function is running (armed is
-    never turned on before entering that function). The first session's
-    stat finishes normally, and it's the deadline check right before
-    processing the next session that trips and causes a `break`."""
-    orig_fn = getattr(cli, target_name)
+    `collect.<target_name>` (moved from `cli` by #50) — only while that
+    function is running (armed is never turned on before entering that
+    function). The first session's stat finishes normally, and it's the
+    deadline check right before processing the next session that trips and
+    causes a `break`."""
+    orig_fn = getattr(collect, target_name)
     orig_stat = os.stat
     orig_time = time.time
     state = {"armed": False}
@@ -947,7 +948,7 @@ def _deadline_trips_after_first_stat(target_name):
              mock.patch.object(time, "time", side_effect=fake_time):
             return orig_fn(*args, **kwargs)
 
-    with mock.patch.object(cli, target_name, side_effect=wrapped):
+    with mock.patch.object(collect, target_name, side_effect=wrapped):
         yield
 
 
@@ -965,7 +966,7 @@ class TestRebaseMarker(unittest.TestCase):
         # marker got written, and the test failed 2 out of 3 runs. The
         # budget-exceeded case is checked separately, with
         # _deadline_trips_after_first_stat skipping the clock ahead.
-        patcher = mock.patch.object(cli, "BACKFILL_TIME_BUDGET", 60.0)
+        patcher = mock.patch.object(collect, "BACKFILL_TIME_BUDGET", 60.0)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -999,7 +1000,7 @@ class TestRebaseMarker(unittest.TestCase):
 
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
-        markers = [r for r in codex_rows if r.get("event") == cli.REBASE_EVENT]
+        markers = [r for r in codex_rows if r.get("event") == collect.REBASE_EVENT]
         old_seen = [r for r in codex_rows if r.get("event") == "seen"
                    and str(r.get("session", "")).startswith("old")]
         self.assertLessEqual(len(markers), 4, codex_rows)
@@ -1030,7 +1031,7 @@ class TestRebaseMarker(unittest.TestCase):
         grown_seen = [r for r in codex_rows if r.get("session") == grown_sid
                      and r.get("event") == "seen"]
         self.assertEqual(len(grown_seen), 1, codex_rows)
-        markers = [r for r in codex_rows if r.get("event") == cli.REBASE_EVENT]
+        markers = [r for r in codex_rows if r.get("event") == collect.REBASE_EVENT]
         self.assertEqual(len(markers), 1, codex_rows)
 
     def test_lazy_path_writes_one_marker_under_a_trusted_hook_b(self):
@@ -1045,7 +1046,7 @@ class TestRebaseMarker(unittest.TestCase):
         self.h.mark()  # Claude mark — lazy rebaseline absorbs the 5 A's into one marker
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
-        markers = [r for r in codex_rows if r.get("event") == cli.REBASE_EVENT]
+        markers = [r for r in codex_rows if r.get("event") == collect.REBASE_EVENT]
         old_seen = [r for r in codex_rows if r.get("event") == "seen"
                    and str(r.get("session", "")).startswith("old")]
         self.assertEqual(len(markers), 1, codex_rows)
@@ -1079,7 +1080,7 @@ class TestRebaseMarker(unittest.TestCase):
         for checked sessions. Reverting the round-1 mistake of tying the cap
         to `complete` reproduces the same row explosion as HEAD at n=25/60
         (measured: 84 rows/80 seen)."""
-        for n in (cli.REACTIVATE_SCAN_CAP + 5, cli.REACTIVATE_SCAN_CAP + 40):
+        for n in (collect.REACTIVATE_SCAN_CAP + 5, collect.REACTIVATE_SCAN_CAP + 40):
             with self.subTest(n=n):
                 h = Harness()
                 self.addCleanup(h.close)
@@ -1099,7 +1100,7 @@ class TestRebaseMarker(unittest.TestCase):
 
                 rows = ledger.read(repo_key=h.key, home=h.home)
                 codex_rows = [row for row in rows if row.get("harness") == "codex-cli"]
-                markers = [row for row in codex_rows if row.get("event") == cli.REBASE_EVENT]
+                markers = [row for row in codex_rows if row.get("event") == collect.REBASE_EVENT]
                 old_seen = [row for row in codex_rows if row.get("event") == "seen"
                            and str(row.get("session", "")).startswith("old")]
                 self.assertEqual(len(markers), 4, codex_rows)
@@ -1107,7 +1108,7 @@ class TestRebaseMarker(unittest.TestCase):
 
     def test_beyond_the_cap_lazy_path_still_yields_one_marker_per_round(self):
         """Same as above, but B arrives each time via its own trusted hook rather than backfill (the lazy rebaseline path)."""
-        for n in (cli.REACTIVATE_SCAN_CAP + 5, cli.REACTIVATE_SCAN_CAP + 40):
+        for n in (collect.REACTIVATE_SCAN_CAP + 5, collect.REACTIVATE_SCAN_CAP + 40):
             with self.subTest(n=n):
                 h = Harness()
                 self.addCleanup(h.close)
@@ -1127,7 +1128,7 @@ class TestRebaseMarker(unittest.TestCase):
 
                 rows = ledger.read(repo_key=h.key, home=h.home)
                 codex_rows = [row for row in rows if row.get("harness") == "codex-cli"]
-                markers = [row for row in codex_rows if row.get("event") == cli.REBASE_EVENT]
+                markers = [row for row in codex_rows if row.get("event") == collect.REBASE_EVENT]
                 old_seen = [row for row in codex_rows if row.get("event") == "seen"
                            and str(row.get("session", "")).startswith("old")]
                 self.assertEqual(len(markers), 4, codex_rows)
@@ -1142,7 +1143,7 @@ class TestRebaseMarker(unittest.TestCase):
         resume — `marker_covers` must remember only the top-N **at the time
         the marker was written** (reconstructed by slicing to the segment before the marker)."""
         now = time.time()
-        n = cli.REACTIVATE_SCAN_CAP + 5
+        n = collect.REACTIVATE_SCAN_CAP + 5
         xfar_sid = "old0"  # planted first, so the oldest — pushed outside the top-N (cap)
         xfar_path = None
         for i in range(n):
@@ -1168,7 +1169,7 @@ class TestRebaseMarker(unittest.TestCase):
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
         self.assertEqual(
-            len([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT]), 1,
+            len([r for r in codex_rows if r.get("event") == collect.REBASE_EVENT]), 1,
             codex_rows)
         # x-far was not checked this round — no row of any kind is left.
         self.assertEqual(
@@ -1242,7 +1243,7 @@ class TestRebaseMarker(unittest.TestCase):
 
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
-        self.assertEqual([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT],
+        self.assertEqual([r for r in codex_rows if r.get("event") == collect.REBASE_EVENT],
                          [], "must not write a marker without an exhaustive check")
 
         self.h.mark()  # a normal round — a-stale's pre-growth should be absorbed, not treated as a resume
@@ -1262,7 +1263,7 @@ class TestRebaseMarker(unittest.TestCase):
 
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
-        self.assertEqual([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT],
+        self.assertEqual([r for r in codex_rows if r.get("event") == collect.REBASE_EVENT],
                          [], "must not write a marker without an exhaustive check")
 
         got = due.due_one(self.h.key, "claude-code", "me2", now, home=self.h.home)
@@ -1290,7 +1291,7 @@ class TestRebaseMarker(unittest.TestCase):
 
         rows = ledger.read(repo_key=self.h.key, home=self.h.home)
         codex_rows = [r for r in rows if r.get("harness") == "codex-cli"]
-        self.assertEqual([r for r in codex_rows if r.get("event") == cli.REBASE_EVENT],
+        self.assertEqual([r for r in codex_rows if r.get("event") == collect.REBASE_EVENT],
                          [], "must not write a marker when a-stale could not be checked")
 
         self.h.mark()  # stat is back to normal — a-stale's pre-growth is absorbed
