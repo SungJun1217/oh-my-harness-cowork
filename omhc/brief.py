@@ -8,7 +8,7 @@ import time
 import traceback
 from typing import Optional
 
-from . import adapters, deliver, due, fsio, gate, index, locate, mint, pin
+from . import adapters, collect, deliver, due, fsio, gate, index, locate, mint, pin
 from .adapter import HandoffBundle
 
 GUARD_LOG = "guard.log"
@@ -202,6 +202,32 @@ def compute(
     stamp = time.time() if now is None else now
     key = locate.repo_key(repo_root)
     state = locate.state_dir(key, home=home)
+
+    # #50: both harnesses start every SessionStart hook at (measured) the
+    # same instant, so `mark` isn't guaranteed to have already written this
+    # start's backfill/resume/#51-bounce rows for the *other* harness's
+    # sessions by the time due() runs here — the omhc hook fragments' "mark,
+    # then brief" ordering assumption is false for both harnesses. due()
+    # itself doesn't need this session's own start row or reopen line (due()
+    # skips my_session_id), but it does need those foreign rows, so brief
+    # collects them itself too, sharing collect.collect_foreign_state with
+    # `cmd_mark`. Skipped entirely under `dry_run` — that path must write
+    # nothing (invariant: a manual check must never consume anything real) —
+    # so a dry-run preview may lag by the same one session start a lock
+    # timeout below already tolerates. Never allowed to raise or to block
+    # past the lock's own bounded wait (invariant 2): on a lock timeout, this
+    # is simply skipped and the handoff still goes out (a mark that already
+    # ran, or the next one, catches up) — one start late, never lost.
+    if not dry_run:
+        try:
+            with collect.try_lock(state) as got_lock:
+                if got_lock:
+                    deadline = time.time() + collect.BACKFILL_TIME_BUDGET
+                    collect.collect_foreign_state(
+                        my_harness, repo_root, key, state, home, stamp,
+                        session=my_session_id, deadline=deadline)
+        except Exception:
+            pass
 
     # Eligibility is judged by the adapter at brief time (#21). The judgment
     # that picks a session is the same judgment that opens it, so the result

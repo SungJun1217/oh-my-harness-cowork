@@ -43,7 +43,7 @@ STATE_SUBDIR = "turn"
 # v2-concurrency.md: "cap 3" foreign sessions considered per turn.
 FOREIGN_CANDIDATES = 3
 
-# 1 MiB — same cap cli._reactivate_grown_sessions uses for the same reason
+# 1 MiB — same cap collect._reactivate_grown_sessions uses for the same reason
 # (measured: cost scales with tail size, 396.6ms for 17.7MB, which blows any
 # per-turn budget).
 READ_CAP_BYTES = 1_000_000
@@ -771,7 +771,7 @@ def check(*, harness: str, stdin_text: str = "", home: Optional[str] = None,
             since = None
         if since is None:
             # Can't judge this round — leave the baseline untouched and
-            # retry next turn (same rule as cli._reactivate_grown_sessions).
+            # retry next turn (same rule as collect._reactivate_grown_sessions).
             continue
         modified = []
         for ev in since.events:

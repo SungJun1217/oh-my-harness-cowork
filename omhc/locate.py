@@ -71,7 +71,7 @@ def owning_repo_key(cwd: Optional[str]) -> Optional[str]:
     **different** repo beneath it (a child with its own `.git`, e.g. a nested
     worktree/submodule). This function must recompute the candidate's actual
     owning repo key and filter on it — the same interpretation
-    cli._backfill_foreign_sessions uses.
+    collect._backfill_foreign_sessions uses.
     """
     if not cwd:
         return None

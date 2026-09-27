@@ -415,7 +415,7 @@ def due(
     byte offset within the source file. This machine's largest transcript
     has 254 instances of timestamps going backward.
 
-    cli._backfill_foreign_sessions uses the same key — when discover() finds
+    collect._backfill_foreign_sessions uses the same key — when discover() finds
     and backfills a harness's sessions missing from the ledger (because an
     untrusted hook never ran), it compares that session's start epoch (the
     adapter reads it from session_meta etc.) against that harness's latest

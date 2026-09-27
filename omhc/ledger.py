@@ -64,7 +64,7 @@ def _note_rejection(record: dict, size: int, home: Optional[str]) -> None:
     see later.
 
     #22 review: a row that never made it into the ledger also isn't caught by
-    `known_sessions` (cli._backfill_foreign_sessions), so mark keeps retrying
+    `known_sessions` (collect._backfill_foreign_sessions), so mark keeps retrying
     it forever — if session is present, first check whether the same
     (repo, harness, session) was already recorded, and skip re-recording if
     so. That keeps one session from inflating into "dropped 3 times" and the

@@ -385,7 +385,7 @@ class ClaudeCodeAdapter:
         not be a record boundary.
 
         `max_bytes`/`stop_at_human_turn` are used only by
-        `cli._reactivate_grown_sessions` — defaults match today's (unlimited)
+        `collect._reactivate_grown_sessions` — defaults match today's (unlimited)
         behavior, so `read_session_since(ref, 0)` returns exactly the same
         events as `read_session(ref)` (proven in code below, and pinned by
         the conformance suite)."""
@@ -431,12 +431,12 @@ class ClaudeCodeAdapter:
         `read_session`'s full pass legitimately uses it as inherited GOAL
         context (see docs/limits.md, "A Claude Code fork needs a turn of its
         own"), `stop_at_human_turn` is only ever used to answer "did NEW
-        content appear since this offset" (cli._reactivate_grown_sessions),
+        content appear since this offset" (collect._reactivate_grown_sessions),
         so it must never let a copied record count as that new turn — the
         one race this guards is the baseline being captured mid-copy (the
         common case never sees this, since the very first observation
         snapshots the whole copied section as its baseline before any growth
-        check ever reads past it, see cli.py's `_reactivate_grown_sessions`).
+        check ever reads past it, see collect.py's `_reactivate_grown_sessions`).
         Gated on `stop_at_human_turn` only, so plain reads (including
         read_session and read_session_since(ref, 0)) are unaffected — parity
         with read_session holds.
