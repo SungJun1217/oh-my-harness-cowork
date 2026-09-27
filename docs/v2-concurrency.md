@@ -277,7 +277,10 @@ Other risks:
   today's `codex hook`.
 - **Concurrent writers.** Two harnesses run hooks at the same time; per-session
   state files, atomic writes, and per-process tmp names (as `last_read.json`
-  does) keep them apart.
+  does) keep them apart. This also applies within *one* harness's own
+  `SessionStart` group: `mark` and `brief` start at the same instant too
+  (measured, both harnesses, #50) — `brief` no longer assumes `mark` already
+  ran first (see [limits.md](limits.md#brief-doesnt-wait-for-mark-50)).
 
 ## Rejected alternatives
 

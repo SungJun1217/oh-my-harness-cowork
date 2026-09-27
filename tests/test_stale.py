@@ -661,7 +661,7 @@ class TestBaselineByAppendOrder(unittest.TestCase):
         own_path = os.path.join(self.t.home, "own.jsonl")
         _write_claude(own_path, "고쳐줘", [])
         self._own_row(path=own_path)
-        # Backfilled *after* my own row, via cli._backfill_foreign_sessions'
+        # Backfilled *after* my own row, via collect._backfill_foreign_sessions'
         # shape: via:"scan", carrying the size it observed at scan time.
         ledger.append({"repo": self.t.key, "harness": "codex-cli",
                        "session": "cxold", "event": "start",
