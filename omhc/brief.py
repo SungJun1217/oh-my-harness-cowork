@@ -44,7 +44,8 @@ def log_failure(home: Optional[str], detail: str) -> None:
         pass
 
 
-def record_read(state_dir: str, read, now: float, home: Optional[str] = None) -> None:
+def record_read(state_dir: str, read, now: float, home: Optional[str] = None,
+                delivered: bool = False) -> None:
     """Records how the last session read went, for `omhc status` (#37). Never raises.
 
     Invariant 7 asks for degradation to be reported in status, but the
@@ -64,6 +65,9 @@ def record_read(state_dir: str, read, now: float, home: Optional[str] = None) ->
             "skipped": sum(int(v) for v in read.dropped.values()),
             "skipped_types": len(read.dropped),
             "epoch": round(now),
+            # #48: the read happens before the gate and the #27 guard, so a
+            # read that ended in no handoff looked like a delivery in status.
+            "delivered": bool(delivered),
         }
         fsio.write_atomic(os.path.join(state_dir, LAST_READ_NAME),
                           json.dumps(summary, sort_keys=True) + "\n",
@@ -396,6 +400,7 @@ def compute(
     end_offset = max((e.offset + e.length for e in head_read.events), default=0)
     due.mark_delivered(state, head_mark, to_harness=my_harness, epoch=stamp,
                        offset=end_offset)
+    record_read(state, head_read, stamp, home=home, delivered=True)
     return body
 
 

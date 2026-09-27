@@ -139,6 +139,18 @@ class TestTrace(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn("#3", lines[0])
 
+    def test_last_n_larger_than_the_match_count_shows_every_match(self):
+        """#46: same negative-slice bug as log."""
+        _write_idx(self.t.state, "aaaaaaaa1111", [
+            (i, "modified", ("omhc/cli.py",), "") for i in range(1, 4)])
+        self._mark("aaaaaaaa1111", "codex-cli")
+        self._mark_delivered_helper("aaaaaaaa1111")
+        for n in (4, 5, 30):
+            with self.subTest(last=n):
+                code, out = self._trace("omhc/cli.py", ["--last", str(n)])
+                self.assertEqual(code, 0)
+                self.assertEqual(len(out.strip().splitlines()), 3)
+
     def test_json_output_is_a_list_of_dicts(self):
         _write_idx(self.t.state, "aaaaaaaa1111",
                   [(1, "modified", ("omhc/cli.py",), "")])

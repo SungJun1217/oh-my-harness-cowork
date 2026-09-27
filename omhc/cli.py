@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 from . import (
     adapters, agents_md, brief, deliver, due, fsio, gate, hookconf, index, ledger,
-    locate, managed_block, pin, turn, watch,
+    locate, managed_block, mint, pin, turn, watch,
 )
 from .adapter import AdapterUnavailable, SessionRef
 
@@ -998,20 +998,8 @@ def _all_session_ids(state: str) -> List[str]:
 
 
 def _unique_prefix_len(ids: List[str], minlen: int = 8) -> int:
-    """The shortest prefix length (>=minlen) that tells these ids apart.
-    Codex's UUIDv7 only changes its first 8 chars every ~65 seconds, so a
-    fixed 8-char cut collides often for sessions started in quick succession
-    in the same repo (#15c). Around 13 chars is a nice-looking cap, but
-    that's purely a display preference — it keeps growing past that until
-    unique if it still hasn't split them. Otherwise `show` would reject a
-    ref `log` just printed as "ambiguous", while the candidate list itself
-    shows the same string twice (a review defect)."""
-    uniq = list(dict.fromkeys(ids))
-    n = minlen
-    longest = max((len(i) for i in uniq), default=minlen)
-    while n < longest and len({i[:n] for i in uniq}) < len(uniq):
-        n += 1
-    return n
+    """See mint.unique_prefix_len — one rule for log, status, handoff and notes."""
+    return mint.unique_prefix_len(ids, minlen)
 
 
 def _session_log_rank(key: str, state: str, home):
@@ -1078,7 +1066,9 @@ def cmd_log(args, *, home=None, out=sys.stdout) -> int:
     # unbounded output F7 exists to prevent. A negative value would also
     # produce a nonsensical cut from the front.
     if args.last is not None and args.last >= 0:
-        rows = rows[len(rows) - args.last :] if args.last else []
+        # max(0, ...): with fewer rows than --last, len - N goes negative and
+        # slices from the end instead (9 rows, --last 10 gave 1 line, #46).
+        rows = rows[max(0, len(rows) - args.last):] if args.last else []
 
     # Made unique across the whole state directory, not just this batch —
     # otherwise a prefix shortened by filtering could collide with another
@@ -1223,7 +1213,7 @@ def cmd_trace(args, *, home=None, out=sys.stdout) -> int:
     matches.sort(key=lambda pair: (_session_rank(pair[0]), pair[1].seq))
 
     if args.last is not None and args.last >= 0:
-        matches = matches[len(matches) - args.last :] if args.last else []
+        matches = matches[max(0, len(matches) - args.last):] if args.last else []  # #46
 
     if not matches:
         if args.json:
@@ -1441,6 +1431,12 @@ def _last_read_detail(summary: Optional[dict]) -> str:
             time.strftime("%Y-%m-%d %H:%M", time.localtime(float(summary.get("epoch", 0)))))
     except (TypeError, ValueError):
         return "unreadable summary"
+    # #48: say whether that read ended in a handoff. Older summaries have no
+    # "delivered" key and keep the old wording.
+    if summary.get("delivered") is True:
+        detail += ", handed off"
+    elif summary.get("delivered") is False:
+        detail += ", read only (not handed off: already delivered to this session or nothing new)"
     if events == 0 and skipped:
         detail += (" — no events from a non-empty session; if it had turns, the session"
                    " format may have changed (use the 'Harness format change' issue form)")
