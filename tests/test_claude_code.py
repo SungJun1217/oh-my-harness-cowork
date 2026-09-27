@@ -909,8 +909,12 @@ class TestDeliveryReachedModel(unittest.TestCase):
             ])
             self.assertTrue(CC.ClaudeCodeAdapter().delivery_reached_model(path))
 
-    def test_missing_file_is_none(self):
-        self.assertIsNone(CC.ClaudeCodeAdapter().delivery_reached_model("/no/such/file.jsonl"))
+    def test_missing_file_is_false(self):
+        """#55: no transcript means the session never reached its first prompt."""
+        self.assertIs(CC.ClaudeCodeAdapter().delivery_reached_model("/no/such/file.jsonl"), False)
+
+    def test_empty_path_is_none(self):
+        self.assertIsNone(CC.ClaudeCodeAdapter().delivery_reached_model(""))
 
     def test_empty_file_is_none(self):
         with tempfile.TemporaryDirectory() as home:

@@ -112,6 +112,20 @@ class TestBounceIntegration(unittest.TestCase):
         self.assertEqual(bounce_lines[0][0], "X1")
         self.assertEqual(bounce_lines[0][2], "claude-code")
 
+    def test_a_recipient_that_never_wrote_a_transcript_is_bounced(self):
+        """#55: `claude -p` exited before the model call and wrote no file,
+        but its SessionStart hooks had already claimed the handoff."""
+        self.h.plant_codex("X1")
+        c1 = self.h.claude_path("C1")  # recorded, but never created
+        self.h.mark("claude-code", "C1", transcript_path=c1)
+        self.assertIn("필드 경로", self._deliver_to("C1"))
+        self.assertFalse(os.path.exists(c1))
+
+        self.h.mark("claude-code", "C2", transcript_path=self.h.claude_path("C2"))
+        got = due.due_one(self.h.key, "claude-code", "C2", NOW, home=self.h.home)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.session_id, "X1")
+
     def test_successful_recipient_is_not_bounced(self):
         self.h.plant_codex("X1")
         c1 = self.h.claude_path("C1")
