@@ -711,9 +711,20 @@ class ClaudeCodeAdapter:
 
         Stops at the first real assistant record (True) — a real reply
         followed later by a synthetic `server_error` (observed with
-        sidechains) still means the session DID reach the model."""
+        sidechains) still means the session DID reach the model.
+
+        #55: a recorded transcript path with no file is False. Claude writes
+        the transcript at the first prompt, so a `claude -p` that exited
+        before the model call (measured: bad CLI args) leaves none while its
+        SessionStart hooks already claimed the handoff. The cost: a window
+        still sitting at its first prompt also has no file yet and gets its
+        handoff redelivered once — duplication, not loss."""
+        if not source_path:
+            return None
         try:
             size = os.path.getsize(source_path)
+        except FileNotFoundError:
+            return False
         except OSError:
             return None
         if size > self._DELIVERY_REACHED_CAP:
