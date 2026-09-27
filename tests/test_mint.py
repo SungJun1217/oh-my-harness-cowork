@@ -396,6 +396,27 @@ class TestAlsoLines(unittest.TestCase):
         self.assertIn("codex-cli 01a0c9f4-9 ·", also_line)
         self.assertLessEqual(len(out.encode("utf-8")), mint.BUDGET)
 
+    def test_a_reopened_also_session_shows_its_new_human_turn(self):
+        """#56: the reason it came back is the new turn, not the old GOAL."""
+        events = [ev(1, text="처음 목표", epoch=100), ev(5, text="notes.txt 는 다섯 줄 이하로", epoch=200)]
+        ref = A.SessionRef(adapter_id="codex-cli", session_id="cx-reopened",
+                           source_path="/x.jsonl", cwd="/repo", epoch=1700000000.0, size=100)
+        also = A.SessionRead(ref=ref, events=tuple(events), unparsed=0, dropped={})
+        out = mint.mint(read_of([ev(1, text="목표")]), to_adapter_id="claude-code", now=NOW,
+                        also=[also], also_since={"cx-reopened": 40})
+        line = slots_of(out)["ALSO"][0]
+        self.assertIn("· NEXT notes.txt 는 다섯 줄 이하로", line)
+        self.assertNotIn("처음 목표", line)
+
+    def test_a_reopened_also_session_with_only_an_approval_keeps_goal(self):
+        events = [ev(1, text="처음 목표", epoch=100), ev(5, text="계속 진행해", epoch=200)]
+        ref = A.SessionRef(adapter_id="codex-cli", session_id="cx-reopened",
+                           source_path="/x.jsonl", cwd="/repo", epoch=1700000000.0, size=100)
+        also = A.SessionRead(ref=ref, events=tuple(events), unparsed=0, dropped={})
+        out = mint.mint(read_of([ev(1, text="목표")]), to_adapter_id="claude-code", now=NOW,
+                        also=[also], also_since={"cx-reopened": 40})
+        self.assertIn("· GOAL 처음 목표", slots_of(out)["ALSO"][0])
+
     def test_a_single_session_keeps_the_8_char_id(self):
         out = mint.mint(read_of([ev(1, text="목표")]), to_adapter_id="claude-code", now=NOW)
         self.assertIn("codex-cli 01a0c9f4 ·", out.splitlines()[0])
