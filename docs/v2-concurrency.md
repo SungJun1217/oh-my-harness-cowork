@@ -92,7 +92,7 @@ was already delivered**, so v1's rule that old sessions are never revived as
 "just happened" holds: only sessions newer than the last handoff come back.
 The list is capped at `due.MAX_SESSIONS` (3). Each session id is only ever
 listed once, even though the ledger can hold several `start` rows for the
-same session (a resume, `_reactivate_grown_sessions`, a late compact) — only
+same session (a resume, `collect._apply_grown_sessions`, a late compact) — only
 the first (newest) row for a given session is considered, or it would be
 built into two Watermarks and walk into the list twice (#41 review).
 

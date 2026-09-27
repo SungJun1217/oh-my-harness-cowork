@@ -186,6 +186,23 @@ def _text_of(content) -> Optional[str]:
     return None
 
 
+def _is_live_turn_note_attachment(att) -> bool:
+    """Is this attachment record `omhc turn`'s own LIVE note (#57, measured
+    shape: sandbox transcripts under ~/omhc-sandbox/.claude/projects)? Only
+    ever used as a boolean signal — the record itself is never parsed into
+    an Event (invariant 4)."""
+    if not isinstance(att, dict):
+        return False
+    if att.get("type") != "hook_additional_context" or att.get("hookEvent") != "UserPromptSubmit":
+        return False
+    content = att.get("content")
+    if isinstance(content, str):
+        content = [content]
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(t, str) and guard.is_live_turn_note(t) for t in content)
+
+
 def _one_line_limit(text: str, limit: int = 600) -> str:
     """Body pulled from an envelope can be very long. Fold to one line and cap it."""
     flat = " ".join(text.split())
@@ -385,7 +402,7 @@ class ClaudeCodeAdapter:
         not be a record boundary.
 
         `max_bytes`/`stop_at_human_turn` are used only by
-        `collect._reactivate_grown_sessions` — defaults match today's (unlimited)
+        `collect._analyze_grown_sessions` — defaults match today's (unlimited)
         behavior, so `read_session_since(ref, 0)` returns exactly the same
         events as `read_session(ref)` (proven in code below, and pinned by
         the conformance suite)."""
@@ -431,12 +448,12 @@ class ClaudeCodeAdapter:
         `read_session`'s full pass legitimately uses it as inherited GOAL
         context (see docs/limits.md, "A Claude Code fork needs a turn of its
         own"), `stop_at_human_turn` is only ever used to answer "did NEW
-        content appear since this offset" (collect._reactivate_grown_sessions),
+        content appear since this offset" (collect._analyze_grown_sessions),
         so it must never let a copied record count as that new turn — the
         one race this guards is the baseline being captured mid-copy (the
         common case never sees this, since the very first observation
         snapshots the whole copied section as its baseline before any growth
-        check ever reads past it, see collect.py's `_reactivate_grown_sessions`).
+        check ever reads past it, see collect.py's `_analyze_grown_sessions`).
         Gated on `stop_at_human_turn` only, so plain reads (including
         read_session and read_session_since(ref, 0)) are unaffected — parity
         with read_session holds.
@@ -447,6 +464,25 @@ class ClaudeCodeAdapter:
         pending: Dict[str, int] = {}  # tool_use_id → index into events
         seq = 0
         offset = start
+        # #57: structural guard against a paraphrased turn note being
+        # laundered into an agent `said` event. Reset to False the moment a
+        # genuine human `said` is produced, set True when an injected LIVE
+        # turn note (attachment.type=="hook_additional_context",
+        # hookEvent=="UserPromptSubmit") is seen — both scoped to *this*
+        # call's own local state, always starting False, even for a tail read
+        # (start > 0) that can't see what came before it. This keeps the
+        # `read_session_since(ref, start)` restricted-to-`start` contract
+        # exactly matching `read_session` (conformance test 30) for the
+        # common case (no note straddles the cut). The one narrow gap this
+        # accepts: a tail read whose `start` lands strictly between a live
+        # note and the human turn that follows it won't see the note and so
+        # won't drop an agent `said` in that gap — accepted because the
+        # production path that actually builds a cross-harness handoff
+        # (mint(), via brief) always calls `read_session` from offset 0, never
+        # `read_session_since`; the latter is only used for this session's
+        # own incremental bookkeeping (turn.check, collect), where the same
+        # paraphrase is still caught the next time this session is read in full.
+        after_live_note = False
 
         def bump(key: str) -> None:
             dropped[key] = dropped.get(key, 0) + 1
@@ -492,6 +528,8 @@ class ClaudeCodeAdapter:
 
                 kind = str(row.get("type"))
                 if kind not in _PARSED_TYPES:
+                    if kind == "attachment" and _is_live_turn_note_attachment(row.get("attachment")):
+                        after_live_note = True
                     bump(kind)
                     continue
                 # Sidechain records are someone else's agent speech. This
@@ -555,6 +593,7 @@ class ClaudeCodeAdapter:
                     if stop_at_human_turn and not raw.endswith(b"\n"):
                         continue
                     text = guard.redact_b64(_one_line_limit(text))
+                    after_live_note = False  # #57: a genuine human turn closes the note's window
                     seq += 1
                     events.append(Event(
                         seq=seq, epoch=epoch, author="human", verb="said", ok=True,
@@ -580,6 +619,13 @@ class ClaudeCodeAdapter:
                         text = str(block.get("text") or "").strip()
                         if not text or not guard.safe(text, "agent"):
                             bump("guarded_agent")
+                            continue
+                        if after_live_note:
+                            # #57: a paraphrase of the injected note (guard's
+                            # content match only catches a verbatim echo)
+                            # is still another session's human text laundered
+                            # through an agent claim — drop structurally.
+                            bump("after_turn_note")
                             continue
                         text = guard.redact_b64(_one_line_limit(text))
                         seq += 1
@@ -711,9 +757,20 @@ class ClaudeCodeAdapter:
 
         Stops at the first real assistant record (True) — a real reply
         followed later by a synthetic `server_error` (observed with
-        sidechains) still means the session DID reach the model."""
+        sidechains) still means the session DID reach the model.
+
+        #55: a recorded transcript path with no file is False. Claude writes
+        the transcript at the first prompt, so a `claude -p` that exited
+        before the model call (measured: bad CLI args) leaves none while its
+        SessionStart hooks already claimed the handoff. The cost: a window
+        still sitting at its first prompt also has no file yet and gets its
+        handoff redelivered once — duplication, not loss."""
+        if not source_path:
+            return None
         try:
             size = os.path.getsize(source_path)
+        except FileNotFoundError:
+            return False
         except OSError:
             return None
         if size > self._DELIVERY_REACHED_CAP:

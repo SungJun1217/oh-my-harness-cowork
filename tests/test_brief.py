@@ -740,7 +740,7 @@ class TestMultiSessionHandoff(unittest.TestCase):
 
     def test_a_session_with_multiple_start_rows_is_not_listed_twice(self):
         """Review finding 1: a resumed session leaves a second `start` row in
-        the ledger (cmd_mark on source:"resume", _reactivate_grown_sessions,
+        the ledger (cmd_mark on source:"resume", collect._apply_grown_sessions,
         or a late compact) — it must not appear as both the head and its own
         ALSO line, double-tagged and double-delivered."""
         path_s = self._plant("cx-s", "S 세션의 사람 말", NOW - 300,

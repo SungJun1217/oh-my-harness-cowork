@@ -222,10 +222,9 @@ def compute(
         try:
             with collect.try_lock(state) as got_lock:
                 if got_lock:
-                    deadline = time.time() + collect.BACKFILL_TIME_BUDGET
                     collect.collect_foreign_state(
                         my_harness, repo_root, key, state, home, stamp,
-                        session=my_session_id, deadline=deadline)
+                        session=my_session_id)
         except Exception:
             pass
 
@@ -397,8 +396,16 @@ def compute(
     kept = processed
 
     also_reads = [r for (_m, _ref, r) in older]
+    # #56: where a reopened older session was last delivered, so its ALSO
+    # line can show the new human turn that brought it back.
+    also_since = {}
+    for mark_i, _ref_i, _read_i in older:
+        prior = due.last_delivery_offset(state, mark_i.session_id, my_harness)
+        if prior is not None:
+            also_since[mark_i.session_id] = prior
     body = mint.mint(head_read, to_adapter_id=my_harness, budget=budget, now=stamp,
-                     notes=_notes(state, now=stamp), also=also_reads, unread=unread)
+                     notes=_notes(state, now=stamp), also=also_reads, unread=unread,
+                     also_since=also_since)
     if not body:
         # Don't consume the gate if there's nothing to send. If a first fire
         # burns the slot empty-handed, data that arrives milliseconds later

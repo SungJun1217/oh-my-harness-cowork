@@ -75,6 +75,26 @@ _HEADER_ECHO = re.compile(
     + r"|" + re.escape(TURN_HEADER_OVERLAP) + r")"
 )
 
+
+def is_live_turn_note(text: str) -> bool:
+    """Is `text` the exact injected LIVE turn note (#57), rather than an echo
+    of it somewhere inside a longer reply (that's `_HEADER_ECHO`'s job)?
+
+    An adapter calls this only on the raw text of its own harness's
+    machinery record (Claude Code's `hook_additional_context` attachment,
+    Codex's role=developer `hooks.additional_context` message) — a boolean
+    structural signal, never turned into an Event (invariant 4: that record
+    is machinery, not human or agent speech). #45's content match
+    (_HEADER_ECHO) can't catch a *paraphrase* of the note's content in a
+    later agent reply; this function backs the structural rule instead
+    (turn.check's live SAID/FAIL lines are foreign human text, so an agent
+    `said` right after seeing this note is dropped until the next human
+    turn — see claude_code.py/codex_cli.py's `after_live_note` tracking).
+    Overlap-only notes (TURN_HEADER_OVERLAP, FILE lines only) don't match
+    here — they carry no foreign human text, so there's nothing to launder.
+    """
+    return text.startswith("[omhc] ") and TURN_HEADER_LIVE in text
+
 # Length cap for machine/agent-derived text.
 #
 # Marker-based detection alone was confirmed insufficient in the wild: this
