@@ -251,7 +251,7 @@ def all_tags(read, also: Sequence = ()) -> List[List[Tuple[str, object, object]]
 
 
 def _also_value(also_read, tags, now: float, limit: int,
-                id_len: int = 8) -> Optional[str]:
+                id_len: int = 8, since_offset: Optional[int] = None) -> Optional[str]:
     """The ALSO line's value (everything after 'ALSO  '), or None if this
     older session has nothing verbatim-human worth saying.
 
@@ -269,15 +269,24 @@ def _also_value(also_read, tags, now: float, limit: int,
         return None
     ref = also_read.ref
     unresolved, _fixed = _unresolved_failures(events)
-    prefix = "{} {} · {} · GOAL ".format(
-        ref.adapter_id, (ref.session_id or "-")[:id_len], _age(now, events))
+    # #56: a session handed off before and reopened comes back because of a
+    # new human turn; its first GOAL was already delivered and says nothing
+    # about why it's back. Show the newest non-approval human turn past the
+    # previous delivery instead, labelled NEXT (still verbatim, invariant 3).
+    label, text = "GOAL", humans[0].text
+    if since_offset is not None:
+        new = [h for h in humans if h.offset >= since_offset and not _is_ack(h.text)]
+        if new:
+            label, text = "NEXT", new[-1].text
+    prefix = "{} {} · {} · {} ".format(
+        ref.adapter_id, (ref.session_id or "-")[:id_len], _age(now, events), label)
     suffix = ""
     if unresolved and tags:
         suffix = " · {} FAIL [{}]".format(len(unresolved), tags[0][0])
     room = limit - len(prefix.encode("utf-8")) - len(suffix.encode("utf-8"))
     if room < 8:
         return None
-    return prefix + _clip(humans[0].text, room) + suffix
+    return prefix + _clip(text, room) + suffix
 
 
 def mint(
@@ -289,6 +298,7 @@ def mint(
     notes: Sequence[str] = (),
     also: Sequence = (),
     unread: int = 0,
+    also_since: Optional[Dict[str, int]] = None,
 ) -> str:
     """Turns Events into a ≤budget-byte marker. The single generation point
     for injected text.
@@ -374,7 +384,8 @@ def mint(
     # --- ALSO lines (v2 phase 1, #41): one per older undelivered session ----
     also_values = []
     for also_read, also_tags in zip(also, tag_sessions[1:]):
-        value = _also_value(also_read, also_tags, now, _LIMIT["ALSO"], id_len)
+        value = _also_value(also_read, also_tags, now, _LIMIT["ALSO"], id_len,
+                            (also_since or {}).get(also_read.ref.session_id))
         if value:
             also_values.append(value)
 
