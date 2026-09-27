@@ -2480,3 +2480,10 @@ class TestHookProvesPathA(unittest.TestCase):
         receipt, wrote_agents_md = self._deliver(from_hook=False)
         self.assertEqual(receipt.channel, "agents-md")
         self.assertTrue(wrote_agents_md)
+
+
+class TestDeliveryReachedModel(unittest.TestCase):
+    """#51 was only measured on Claude Code — Codex stays undecided (None)."""
+
+    def test_always_none(self):
+        self.assertIsNone(CX.CodexCliAdapter().delivery_reached_model("/no/such/path"))

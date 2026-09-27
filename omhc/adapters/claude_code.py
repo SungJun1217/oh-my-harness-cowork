@@ -694,6 +694,57 @@ class ClaudeCodeAdapter:
             size=stat.st_size,
         )
 
+    # #51: only needs to see the first real (or synthetic-error) assistant
+    # record, which lands early — bounded so a large transcript can't blow
+    # the hook budget cmd_mark runs under.
+    _DELIVERY_REACHED_CAP = 2 * 1024 * 1024
+
+    def delivery_reached_model(self, source_path: str) -> Optional[bool]:
+        """#51: measured shapes (sandbox) — "Not logged in" leaves one
+        `assistant` record with isApiErrorMessage:true, message.model
+        "<synthetic>", usage 0, and no real assistant record. A 401 leaves
+        two `system` records (subtype:"api_error") then that same synthetic
+        assistant. Either way, the session never produced a real reply.
+        Reuses the same isApiErrorMessage/isVirtual/<synthetic> check
+        read_session already applies to drop these records (~511-519) — a
+        bounce decision needs the identical "was this real" judgment.
+
+        Stops at the first real assistant record (True) — a real reply
+        followed later by a synthetic `server_error` (observed with
+        sidechains) still means the session DID reach the model."""
+        try:
+            size = os.path.getsize(source_path)
+        except OSError:
+            return None
+        if size > self._DELIVERY_REACHED_CAP:
+            return None
+        saw_error = False
+        try:
+            with open(source_path, "rb") as fh:
+                for raw in fh:
+                    try:
+                        row = json.loads(raw.decode("utf-8", "replace"))
+                    except ValueError:
+                        continue
+                    if not isinstance(row, dict) or row.get("type") != "assistant":
+                        continue
+                    if row.get("isSidechain") or row.get("agentId"):
+                        continue
+                    message = row.get("message")
+                    if not isinstance(message, dict):
+                        message = {}
+                    if (row.get("isApiErrorMessage") is True
+                            or row.get("isVirtual") is True
+                            or message.get("model") == _SYNTHETIC_MODEL):
+                        saw_error = True
+                        continue
+                    return True
+        except OSError:
+            return None
+        # Empty/missing-signal transcripts are undecidable, not "bounced" —
+        # only a confirmed synthetic error with no real reply is False.
+        return False if saw_error else None
+
     def discover(self, repo_root: Optional[str],
                 deadline: Optional[float] = None) -> Tuple[SessionRef, ...]:
         """Explicitly returns an empty tuple. list_sessions measured 249ms on

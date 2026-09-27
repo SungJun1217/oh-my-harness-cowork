@@ -213,6 +213,24 @@ class TestDue(unittest.TestCase):
         got = due.due(REPO_KEY, "claude-code", "sX", 100.0, home=self.home)
         self.assertEqual([m.session_id for m in got], ["S"])
 
+    def test_a_bounce_of_the_second_delivery_still_stops_at_the_first(self):
+        """#51 review finding 1 repro: P(never delivered), S(delivered to A1,
+        OK), S resumed, S delivered again to A2 which then bounces. The
+        bounce must only cancel A2's delivery — S's genuine first delivery
+        still stands, so the walk must still stop at S and never revive P."""
+        self.start("codex-cli", "P", 10.0)
+        self.start("codex-cli", "S", 20.0)
+        wm_s = due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id="S",
+                             path="/p/S", event="start", epoch=20.0)
+        due.mark_delivered(self.state, wm_s, to_harness="claude-code", epoch=25.0)  # A1: OK
+        due.mark_reopened(self.state, "S", "codex-cli", 30.0)
+        self.start("codex-cli", "S", 35.0)  # S's own resume start row
+        due.mark_delivered(self.state, wm_s, to_harness="claude-code", epoch=40.0)  # A2: fails
+        due.mark_bounced(self.state, "S", "claude-code", 45.0)
+
+        got = due.due(REPO_KEY, "claude-code", "B2", 100.0, home=self.home)
+        self.assertEqual([m.session_id for m in got], ["S"])
+
     def test_a_session_with_several_start_rows_appears_only_once(self):
         """The ledger can hold several `start` rows for the same session
         (resume, _reactivate_grown_sessions, a late compact) — S(older),
@@ -481,6 +499,134 @@ class TestLastDeliveryOffset(unittest.TestCase):
         due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code",
                            epoch=20.0, offset=100)
         self.assertIsNone(due.last_delivery_offset(self.state, "cx1", "gajae-code"))
+
+
+class TestBounce(unittest.TestCase):
+    """#51: a delivery whose receiving session never reached the model must
+    not count as delivered — the source's next delivery must go out again."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = self.tmp.name
+        self.state = os.path.join(self.home, ".omhc", REPO_KEY)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def wm(self, session_id):
+        return due.Watermark(repo_key=REPO_KEY, harness="codex-cli", session_id=session_id,
+                             path="/p", event="start", epoch=10.0)
+
+    def test_bounce_undoes_already_delivered(self):
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code", epoch=20.0)
+        self.assertTrue(due.already_delivered(self.state, "cx1", "claude-code"))
+        due.mark_bounced(self.state, "cx1", "claude-code", 30.0)
+        self.assertFalse(due.already_delivered(self.state, "cx1", "claude-code"))
+
+    def test_bounce_undoes_ever_delivered_unlike_reopen(self):
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code", epoch=20.0)
+        self.assertTrue(due.ever_delivered(self.state, "cx1", "claude-code"))
+        due.mark_bounced(self.state, "cx1", "claude-code", 30.0)
+        self.assertFalse(due.ever_delivered(self.state, "cx1", "claude-code"))
+
+    def test_ever_delivered_stays_true_when_an_earlier_delivery_stands(self):
+        """#51 review finding 1: a bounce cancels only the delivery line
+        immediately before it, not every earlier delivery too."""
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code", epoch=10.0)
+        due.mark_reopened(self.state, "cx1", "codex-cli", 15.0)
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code", epoch=20.0)
+        due.mark_bounced(self.state, "cx1", "claude-code", 30.0)
+        self.assertTrue(due.ever_delivered(self.state, "cx1", "claude-code"))
+
+    def test_bounce_does_not_gate_a_different_target_harness(self):
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code", epoch=20.0)
+        due.mark_bounced(self.state, "cx1", "claude-code", 30.0)
+        self.assertFalse(due.already_delivered(self.state, "cx1", "gajae-code"))
+
+    def test_bounce_is_skipped_by_last_delivered_and_delivered_order(self):
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code", epoch=20.0)
+        due.mark_bounced(self.state, "cx1", "claude-code", 30.0)
+        self.assertEqual(due.last_delivered(self.state), "cx1")
+        self.assertEqual(due.delivered_order(self.state), ["cx1"])
+
+    def test_last_delivery_offset_skips_the_bounced_delivery(self):
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code",
+                           epoch=20.0, offset=100)
+        due.mark_bounced(self.state, "cx1", "claude-code", 30.0)
+        # The only delivery was the one that bounced — no earlier baseline.
+        self.assertIsNone(due.last_delivery_offset(self.state, "cx1", "claude-code"))
+
+    def test_last_delivery_offset_falls_back_to_the_delivery_before_the_bounce(self):
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code",
+                           epoch=10.0, offset=50)
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code",
+                           epoch=20.0, offset=100)
+        due.mark_bounced(self.state, "cx1", "claude-code", 30.0)
+        self.assertEqual(due.last_delivery_offset(self.state, "cx1", "claude-code"), 50)
+
+    def test_a_fresh_delivery_after_bounce_wins_again(self):
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code", epoch=20.0)
+        due.mark_bounced(self.state, "cx1", "claude-code", 30.0)
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code", epoch=40.0)
+        self.assertTrue(due.already_delivered(self.state, "cx1", "claude-code"))
+
+    def test_latest_delivered_group_none_without_a_delivery(self):
+        self.assertIsNone(due.latest_delivered_group(self.state, "claude-code"))
+
+    def test_latest_delivered_group_none_for_old_format_lines(self):
+        due.mark_delivered(self.state, self.wm("cx1"), to_harness="claude-code", epoch=20.0)
+        self.assertIsNone(due.latest_delivered_group(self.state, "claude-code"))
+
+    def test_latest_delivered_group_returns_recipient_and_sources(self):
+        due.mark_delivered(self.state, self.wm("also1"), to_harness="claude-code", epoch=19.0,
+                           offset=10, role=due.ALSO_MARKER, recipient="c2")
+        due.mark_delivered(self.state, self.wm("head1"), to_harness="claude-code", epoch=20.0,
+                           recipient="c2")
+        recipient, sources = due.latest_delivered_group(self.state, "claude-code")
+        self.assertEqual(recipient, "c2")
+        self.assertEqual(sources, ["also1", "head1"])
+
+    def test_latest_delivered_group_ignores_an_older_group(self):
+        due.mark_delivered(self.state, self.wm("old1"), to_harness="claude-code", epoch=10.0,
+                           recipient="c1")
+        due.mark_delivered(self.state, self.wm("head1"), to_harness="claude-code", epoch=20.0,
+                           recipient="c2")
+        recipient, sources = due.latest_delivered_group(self.state, "claude-code")
+        self.assertEqual(recipient, "c2")
+        self.assertEqual(sources, ["head1"])
+
+    def test_group_already_bounced_is_false_before_any_bounce(self):
+        due.mark_delivered(self.state, self.wm("head1"), to_harness="claude-code", epoch=20.0,
+                           recipient="c1")
+        self.assertFalse(due.group_already_bounced(self.state, "claude-code", "head1"))
+
+    def test_group_already_bounced_is_true_right_after_a_bounce(self):
+        due.mark_delivered(self.state, self.wm("head1"), to_harness="claude-code", epoch=20.0,
+                           recipient="c1")
+        due.mark_bounced(self.state, "head1", "claude-code", 30.0)
+        self.assertTrue(due.group_already_bounced(self.state, "claude-code", "head1"))
+
+    def test_group_already_bounced_is_false_with_no_delivery_at_all(self):
+        self.assertFalse(due.group_already_bounced(self.state, "claude-code", "head1"))
+
+    def test_group_already_bounced_survives_a_reopen_with_no_bounce_yet(self):
+        """#51 review finding 2: a plain reopen of the head between the
+        failed delivery and now must not look like "already bounced" —
+        already_delivered would say False here too, but this must stay False
+        since no bounce line actually exists yet."""
+        due.mark_delivered(self.state, self.wm("head1"), to_harness="claude-code", epoch=20.0,
+                           recipient="c1")
+        due.mark_reopened(self.state, "head1", "codex-cli", 25.0)
+        self.assertFalse(due.already_delivered(self.state, "head1", "claude-code"))
+        self.assertFalse(due.group_already_bounced(self.state, "claude-code", "head1"))
+
+    def test_group_already_bounced_is_false_again_after_a_fresh_delivery(self):
+        due.mark_delivered(self.state, self.wm("head1"), to_harness="claude-code", epoch=20.0,
+                           recipient="c1")
+        due.mark_bounced(self.state, "head1", "claude-code", 30.0)
+        due.mark_delivered(self.state, self.wm("head1"), to_harness="claude-code", epoch=40.0,
+                           recipient="c2")
+        self.assertFalse(due.group_already_bounced(self.state, "claude-code", "head1"))
 
 
 if __name__ == "__main__":

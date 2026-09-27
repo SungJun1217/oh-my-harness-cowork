@@ -438,10 +438,11 @@ def compute(
     for mark_i, _ref_i, read_i in older:
         offset_i = max((e.offset + e.length for e in read_i.events), default=0)
         due.mark_delivered(state, mark_i, to_harness=my_harness, epoch=stamp,
-                           offset=offset_i, role=due.ALSO_MARKER)
+                           offset=offset_i, role=due.ALSO_MARKER,
+                           recipient=my_session_id)
     end_offset = max((e.offset + e.length for e in head_read.events), default=0)
     due.mark_delivered(state, head_mark, to_harness=my_harness, epoch=stamp,
-                       offset=end_offset)
+                       offset=end_offset, recipient=my_session_id)
     record_read(state, head_read, stamp, home=home, delivered=True)
     return body
 

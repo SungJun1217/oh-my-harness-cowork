@@ -771,6 +771,25 @@ def _recent_hook_start(key: str, harness: str, session: str, home,
     return False
 
 
+def _session_transcript_path(key: str, harness: str, session_id: str, home) -> Optional[str]:
+    """The transcript path from this session's own `start` row(s) in the
+    ledger (#51) — cheaper than a full list_sessions scan (Claude's measured
+    at 249ms, 34MB) when the only thing needed is one path to hand the
+    adapter's delivery_reached_model. Last non-empty path wins, in case of
+    multiple start rows (resume/backfill) — always the same file in practice."""
+    path = None
+    try:
+        for row in ledger.read(repo_key=key, home=home):
+            if (row.get("event") == "start" and row.get("harness") == harness
+                    and row.get("session") == session_id):
+                p = row.get("path")
+                if p:
+                    path = str(p)
+    except Exception:
+        return None
+    return path
+
+
 def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     """Records a session start in the ledger. Called by the hook. About one
     220-byte line."""
@@ -874,6 +893,42 @@ def cmd_mark(args, *, home=None, out=sys.stdout) -> int:
     if session and str(payload.get("source") or "") == "resume":
         try:
             due.mark_reopened(state, session, args.harness, row["epoch"])
+        except Exception:
+            pass
+    # #51: mark/brief always run before this harness's model call, so a
+    # session whose model call then fails (401 / "Not logged in" / rate
+    # limit) still claims the handoff in delivered.tsv, and the next
+    # session's due() walk hits that already-delivered source and stops —
+    # the handoff is silently lost. Checked here, at the *next* session of
+    # this harness starting, because only then is there a "next" transcript
+    # to compare the failed one against, and it's cheap (one small tsv scan,
+    # one small transcript read capped by the adapter). Same
+    # try/except-pass style as the reopen block above (invariant 2).
+    if session:
+        try:
+            group = due.latest_delivered_group(state, args.harness)
+            if group is not None:
+                recipient, sources = group
+                # recipient == session: this harness's own SessionStart hook
+                # fires several times per session (measured: 6x) — the
+                # session that just received a handoff must never bounce
+                # its own delivery just because mark ran again.
+                if recipient and recipient != session and sources:
+                    head = sources[-1]
+                    # Checked by file position (group_already_bounced), not
+                    # already_delivered — a plain reopen of the head between
+                    # the failed delivery and now also makes
+                    # already_delivered False with no bounce at all, which
+                    # would wrongly suppress the bounce and lose the ALSO
+                    # sources (#51 review finding 2).
+                    if not due.group_already_bounced(state, args.harness, head):
+                        path = _session_transcript_path(key, args.harness, recipient, home)
+                        reached = None
+                        if path:
+                            reached = adapters.get(args.harness, home=home).delivery_reached_model(path)
+                        if reached is False:
+                            for src in sources:
+                                due.mark_bounced(state, src, args.harness, row["epoch"])
         except Exception:
             pass
     # Backfills the other harness's sessions into the ledger (see comment
@@ -1545,8 +1600,10 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
                 parts = line.rstrip("\n").split("\t")
                 # A reopen line isn't a delivery — counting it would let a
                 # session that merely resumed and hasn't been redelivered yet
-                # sneak into the injections/pull-rate denominator (#22).
-                if len(parts) >= 2 and parts[1] == due.REOPEN_MARKER:
+                # sneak into the injections/pull-rate denominator (#22). A
+                # bounce line (#51) isn't one either — the delivery it marks
+                # never actually reached the model.
+                if len(parts) >= 2 and parts[1] in (due.REOPEN_MARKER, due.BOUNCE_MARKER):
                     continue
                 # An ALSO row (v2 phase 1, #41) is one row of a handoff that's
                 # already counted via its main (head) row — without this, one
