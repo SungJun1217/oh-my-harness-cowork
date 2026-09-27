@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 import unittest.mock
 
@@ -840,6 +841,131 @@ class TestTurnHookInjectionNeverParsed(unittest.TestCase):
             read = CC.ClaudeCodeAdapter().read_session(ref_for(path))
             self.assertEqual(len([e for e in read.events if e.author == "human"]), 1)
             self.assertIn("attachment", read.dropped)
+
+
+def _live_note_attachment(text: str) -> dict:
+    return {"type": "attachment", "cwd": REPO, "timestamp": _TS,
+            "attachment": {"type": "hook_additional_context", "hookEvent": "UserPromptSubmit",
+                          "content": [text]}}
+
+
+def _assistant_said(text: str) -> dict:
+    return {"type": "assistant", "cwd": REPO, "timestamp": _TS,
+            "message": {"model": "claude-x", "content": [{"type": "text", "text": text}]}}
+
+
+def _user_said(text: str) -> dict:
+    return {"type": "user", "cwd": REPO, "timestamp": _TS, "message": {"content": text}}
+
+
+class TestLiveTurnNoteDropsAgentParaphrase(unittest.TestCase):
+    """#57: a paraphrase of a LIVE turn note (SAID/FAIL — another session's
+    human text) is still laundered human text once it lands in an agent
+    `said` event, and #45's verbatim-echo guard can't catch a paraphrase.
+    The structural rule: any agent `said` after the note record and before
+    the next human turn is dropped."""
+
+    def _live_note(self) -> str:
+        from omhc import stale
+
+        return stale._render(
+            [("codex-cli", "01a0dec6e021", [], "Please keep notes.txt under five lines.",
+              "python3 -m lintcheck notes.txt")])
+
+    def _overlap_note(self) -> str:
+        from omhc import stale
+
+        return stale._render([("codex-cli", "01a0dec6e021", ["notes.txt"])])
+
+    def test_paraphrase_after_a_live_note_is_dropped(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            note = self._live_note()
+            self.assertTrue(guard.is_live_turn_note(note))
+            _write_jsonl(path, [
+                _user_said("do something"),
+                _live_note_attachment(note),
+                _assistant_said("Another Codex session asked to keep notes.txt "
+                                "under five lines and reported a failing lint check."),
+            ])
+            read = CC.ClaudeCodeAdapter().read_session(ref_for(path))
+            said = [e for e in read.events if e.verb == "said"]
+            self.assertEqual([e.author for e in said], ["human"])
+            self.assertEqual(read.dropped.get("after_turn_note"), 1)
+
+    def test_a_sessionstart_attachment_never_triggers_even_with_the_live_header(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            attachment = _live_note_attachment(self._live_note())
+            attachment["attachment"]["hookEvent"] = "SessionStart"
+            _write_jsonl(path, [
+                attachment,
+                _user_said("do something"),
+                _assistant_said("Working on it now."),
+            ])
+            read = CC.ClaudeCodeAdapter().read_session(ref_for(path))
+            agent_said = [e for e in read.events if e.author == "agent" and e.verb == "said"]
+            self.assertEqual(len(agent_said), 1)
+            self.assertNotIn("after_turn_note", read.dropped)
+
+    def test_overlap_only_note_does_not_drop_the_reply(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            note = self._overlap_note()
+            self.assertFalse(guard.is_live_turn_note(note))
+            _write_jsonl(path, [
+                _user_said("do something"),
+                _live_note_attachment(note),
+                _assistant_said("Yes, notes.txt changed since my last turn."),
+            ])
+            read = CC.ClaudeCodeAdapter().read_session(ref_for(path))
+            agent_said = [e for e in read.events if e.author == "agent" and e.verb == "said"]
+            self.assertEqual(len(agent_said), 1)
+            self.assertNotIn("after_turn_note", read.dropped)
+
+    def test_flag_resets_at_the_next_human_turn(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            note = self._live_note()
+            _write_jsonl(path, [
+                _user_said("do something"),
+                _live_note_attachment(note),
+                _assistant_said("paraphrase of the note, dropped"),
+                _user_said("next turn"),
+                _assistant_said("a normal reply, kept"),
+            ])
+            read = CC.ClaudeCodeAdapter().read_session(ref_for(path))
+            agent_said = [e for e in read.events if e.author == "agent" and e.verb == "said"]
+            self.assertEqual([e.text for e in agent_said], ["a normal reply, kept"])
+            self.assertEqual(read.dropped.get("after_turn_note"), 1)
+
+    def test_the_note_record_itself_never_becomes_an_event(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            note = self._live_note()
+            _write_jsonl(path, [
+                _user_said("do something"),
+                _live_note_attachment(note),
+            ])
+            read = CC.ClaudeCodeAdapter().read_session(ref_for(path))
+            self.assertEqual(len(read.events), 1)  # only the human turn
+            self.assertIn("attachment", read.dropped)
+
+    def test_mint_never_builds_plan_from_the_paraphrase(self):
+        from omhc import mint
+
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, "s.jsonl")
+            note = self._live_note()
+            _write_jsonl(path, [
+                _user_said("do something"),
+                _live_note_attachment(note),
+                _assistant_said("Another Codex session asked to keep notes.txt "
+                                "under five lines and reported a failing lint check."),
+            ])
+            read = CC.ClaudeCodeAdapter().read_session(ref_for(path))
+            out = mint.mint(read, to_adapter_id="codex-cli", now=time.time())
+            self.assertNotIn("notes.txt under five lines", out)
 
 
 class TestWriteSide(unittest.TestCase):

@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 from omhc import adapter as A
-from omhc import cli
+from omhc import cli, guard, mint
 from omhc.adapters import codex_cli as CX
 
 from . import _repo
@@ -1227,6 +1227,127 @@ class TestMetadataKindDiscriminator(unittest.TestCase):
             "content_item_kinds": ["user.text"]}}
         self.assertEqual(CX.human_kinds(payload), ["user.text"])
         self.assertIsNone(CX.human_kinds({"content_item_kinds": ["user.text"]}))
+
+
+def _dev_note(text: str) -> dict:
+    """Codex's own injected note — a role=developer message tagged
+    content_item_kinds=["hooks.additional_context"] (#57 measured shape)."""
+    return {"type": "response_item", "payload": {
+        "type": "message", "role": "developer", "id": "m-dev",
+        "content": [{"type": "input_text", "text": text}],
+        "internal_chat_message_metadata_passthrough": {
+            "content_item_kinds": ["hooks.additional_context"]}}}
+
+
+def _agent_said(text: str) -> dict:
+    return {"type": "response_item", "payload": {
+        "type": "message", "role": "assistant", "id": "m-asst",
+        "content": [{"type": "output_text", "text": text}],
+        "internal_chat_message_metadata_passthrough": {"content_item_kinds": ["unknown"]}}}
+
+
+class TestLiveTurnNoteDropsAgentParaphrase(unittest.TestCase):
+    """#57: same structural rule as claude_code.py's — see its own test
+    module for the full reasoning. Codex's own injected note lands as a
+    role=developer message rather than an `attachment` record."""
+
+    META = {"type": "session_meta", "payload": {"session_id": "s", "cwd": REPO}}
+
+    def _read(self, rows) -> A.SessionRead:
+        path = write_rollout([self.META] + rows)
+        try:
+            return CX.CodexCliAdapter().read_session(ref_for(path))
+        finally:
+            os.unlink(path)
+
+    def _live_note(self) -> str:
+        from omhc import stale
+
+        return stale._render(
+            [("claude-code", "bae55487f267", [], "Please keep notes.txt under five lines.",
+              "python3 -m lintcheck notes.txt")])
+
+    def _overlap_note(self) -> str:
+        from omhc import stale
+
+        return stale._render([("claude-code", "bae55487f267", ["notes.txt"])])
+
+    def test_paraphrase_after_a_live_note_is_dropped(self):
+        note = self._live_note()
+        self.assertTrue(guard.is_live_turn_note(note))
+        read = self._read([
+            msg("user", "do something"),
+            _dev_note(note),
+            _agent_said("Another Claude session asked to keep notes.txt under "
+                        "five lines and reported a failing lint check."),
+        ])
+        said = [e for e in read.events if e.verb == "said"]
+        self.assertEqual([e.author for e in said], ["human"])
+        self.assertEqual(read.dropped.get("after_turn_note"), 1)
+
+    def test_the_sessionstart_handoff_does_not_trigger(self):
+        """The SessionStart handoff has the same developer/hooks.additional_context
+        shape; only the LIVE header may set the flag."""
+        from omhc import guard as G
+
+        handoff = G.HEADER_LINE1_FMT.format("claude-code", "bae55487", "5m", "1m ago") + "\n" + \
+            G.HEADER_LINE2 + "\nGOAL  something\n"
+        read = self._read([
+            _dev_note(handoff),
+            msg("user", "do something"),
+            _agent_said("Working on it now."),
+        ])
+        agent_said = [e for e in read.events if e.author == "agent" and e.verb == "said"]
+        self.assertEqual(len(agent_said), 1)
+        self.assertNotIn("after_turn_note", read.dropped)
+
+    def test_a_malformed_note_text_block_never_raises(self):
+        bad = _dev_note("x")
+        bad["payload"]["content"] = [{"type": "input_text", "text": None}]
+        read = self._read([msg("user", "do something"), bad, _agent_said("ok, done")])
+        self.assertEqual([e.author for e in read.events if e.verb == "said"], ["human", "agent"])
+
+    def test_overlap_only_note_does_not_drop_the_reply(self):
+        note = self._overlap_note()
+        self.assertFalse(guard.is_live_turn_note(note))
+        read = self._read([
+            msg("user", "do something"),
+            _dev_note(note),
+            _agent_said("Yes, notes.txt changed since my last turn."),
+        ])
+        agent_said = [e for e in read.events if e.author == "agent" and e.verb == "said"]
+        self.assertEqual(len(agent_said), 1)
+        self.assertNotIn("after_turn_note", read.dropped)
+
+    def test_flag_resets_at_the_next_human_turn(self):
+        note = self._live_note()
+        read = self._read([
+            msg("user", "do something"),
+            _dev_note(note),
+            _agent_said("paraphrase of the note, dropped"),
+            msg("user", "next turn"),
+            _agent_said("a normal reply, kept"),
+        ])
+        agent_said = [e for e in read.events if e.author == "agent" and e.verb == "said"]
+        self.assertEqual([e.text for e in agent_said], ["a normal reply, kept"])
+        self.assertEqual(read.dropped.get("after_turn_note"), 1)
+
+    def test_the_note_record_itself_never_becomes_an_event(self):
+        note = self._live_note()
+        read = self._read([msg("user", "do something"), _dev_note(note)])
+        self.assertEqual(len(read.events), 1)  # only the human turn
+        self.assertGreater(read.dropped.get("role:developer", 0), 0)
+
+    def test_mint_never_builds_plan_from_the_paraphrase(self):
+        note = self._live_note()
+        read = self._read([
+            msg("user", "do something"),
+            _dev_note(note),
+            _agent_said("Another Claude session asked to keep notes.txt under "
+                        "five lines and reported a failing lint check."),
+        ])
+        out = mint.mint(read, to_adapter_id="claude-code", now=time.time())
+        self.assertNotIn("notes.txt under five lines", out)
 
 
 class TestHealth(unittest.TestCase):

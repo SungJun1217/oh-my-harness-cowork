@@ -162,6 +162,24 @@ def human_kinds(payload: dict):
     return [str(k) for k in kinds]
 
 
+def _is_live_turn_note_message(payload: dict) -> bool:
+    """Is this role=developer message `omhc turn`'s own LIVE note (#57,
+    measured shape: sandbox rollouts under ~/omhc-sandbox/.codex/sessions)?
+    Only ever used as a boolean signal — the record itself is never parsed
+    into an Event (invariant 4): role=developer is already outside
+    _PARSED_ROLES regardless of this check."""
+    meta = payload.get("internal_chat_message_metadata_passthrough")
+    kinds = meta.get("content_item_kinds") if isinstance(meta, dict) else None
+    if not isinstance(kinds, list) or "hooks.additional_context" not in kinds:
+        return False
+    # A malformed text block (e.g. text: null) must not make read_session
+    # raise: this record used to be dropped by role without being touched.
+    try:
+        return guard.is_live_turn_note(_text_of(payload.get("content")))
+    except Exception:
+        return False
+
+
 def session_meta(path: str) -> Optional[dict]:
     """Reads only the first line. Parsing the rest would spike cost on the hook path."""
     try:
@@ -655,6 +673,15 @@ class CodexCliAdapter:
         pending_by_session: Dict[str, int] = {}
         seq = 0
         offset = start
+        # #57: same structural guard as claude_code.py's `_read` — see its
+        # comment for the full reasoning, including why this always starts
+        # False (even for a tail read) to preserve the read_session_since/
+        # read_session parity contract (conformance test 30). Codex's own
+        # injected LIVE note lands as a role=developer message tagged
+        # content_item_kinds=["hooks.additional_context"] — the same shape as
+        # the SessionStart handoff (measured), which doesn't trigger only
+        # because its header lacks guard.TURN_HEADER_LIVE.
+        after_live_note = False
 
         def bump(key: str) -> None:
             dropped[key] = dropped.get(key, 0) + 1
@@ -742,6 +769,8 @@ class CodexCliAdapter:
                 if kind == "message":
                     role = str(payload.get("role"))
                     if role not in _PARSED_ROLES:
+                        if role == "developer" and _is_live_turn_note_message(payload):
+                            after_live_note = True
                         bump("role:" + role)
                         continue
                     text = guard.redact_b64(_text_of(payload.get("content")).strip())
@@ -757,6 +786,15 @@ class CodexCliAdapter:
                             continue
                     if not guard.safe(text, author):
                         bump("guarded_" + author)
+                        continue
+                    if author == "human":
+                        after_live_note = False  # #57: a genuine human turn closes the note's window
+                    elif after_live_note:
+                        # #57: a paraphrase of the injected note (guard's
+                        # content match only catches a verbatim echo) is
+                        # still another session's human text laundered
+                        # through an agent claim — drop structurally.
+                        bump("after_turn_note")
                         continue
                     if stop_at_human_turn and author == "human" and not raw.endswith(b"\n"):
                         # 3rd review #2: it's a human turn but no newline has
