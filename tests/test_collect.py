@@ -126,8 +126,13 @@ class TestBriefRunsFirst(unittest.TestCase):
         _repo.append_codex_user_turn(rollout, "새로 추가된 지시사항")
 
         # No mark call for C2 at all — only brief's own collection may see the growth.
-        second = self.h.deliver("C2")
+        second = brief.compute(my_harness="claude-code", my_session_id="C2",
+                               repo_root=self.h.root, home=self.h.home, now=NOW + 0.7)
         self.assertIn("새로 추가된 지시사항", second)
+        # brief's raw clock must not leak a fractional epoch into the ledger.
+        grew = [r for r in ledger.read(home=self.h.home, limit=0) if r.get("grew")]
+        self.assertTrue(grew)
+        self.assertTrue(all(float(r["epoch"]).is_integer() for r in grew), grew)
 
     def test_bounced_group_is_redelivered(self):
         """(c) #51's bounce check, run from brief's own collection instead
