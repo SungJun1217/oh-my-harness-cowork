@@ -916,7 +916,16 @@ def cmd_status(args, *, home=None, out=sys.stdout) -> int:
                 # sneak into the injections/pull-rate denominator (#22). A
                 # bounce line (#51) isn't one either — the delivery it marks
                 # never actually reached the model.
-                if len(parts) >= 2 and parts[1] in (due.REOPEN_MARKER, due.BOUNCE_MARKER):
+                if len(parts) >= 2 and parts[1] == due.BOUNCE_MARKER:
+                    # The delivery right before this bounce never reached the
+                    # model, so it isn't an injection either (same pairing as
+                    # due.last_delivery_offset).
+                    for i in range(len(delivered_order) - 1, -1, -1):
+                        if delivered_order[i] == parts[0]:
+                            del delivered_order[i]
+                            break
+                    continue
+                if len(parts) >= 2 and parts[1] == due.REOPEN_MARKER:
                     continue
                 # An ALSO row (v2 phase 1, #41) is one row of a handoff that's
                 # already counted via its main (head) row — without this, one

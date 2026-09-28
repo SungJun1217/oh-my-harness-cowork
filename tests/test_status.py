@@ -331,6 +331,19 @@ class TestStatusRows(unittest.TestCase):
         self.assertEqual(payload["injections"], 2)
         self.assertEqual(payload["pulls"], 2)
 
+    def test_a_bounced_delivery_is_not_an_injection(self):
+        """A delivery whose recipient never reached the model (#51) was
+        bounced; counting it would lower the pull rate for nothing."""
+        os.makedirs(self.t.state, exist_ok=True)
+        with open(os.path.join(self.t.state, due.DELIVERED_NAME), "w",
+                  encoding="utf-8") as fh:
+            fh.write("x1\tclaude-code\tcodex-cli\t1700000000\t10\t\tc1\n")
+            fh.write("x1\tbounce\tclaude-code\t1700000100\n")
+            fh.write("x1\tclaude-code\tcodex-cli\t1700000100\t10\t\tc2\n")
+        _code, payload = self.run_status_json()
+        self.assertEqual(payload["injections"], 1)
+        self.assertEqual(payload["recent_injections"], 1)
+
     def test_pull_rate_windows_the_denominator_to_the_most_recent_injections(self):
         """#25: keeping the denominator as the whole of delivered.tsv means the
         longer a repo is used, the more old deliveries linger in the denominator

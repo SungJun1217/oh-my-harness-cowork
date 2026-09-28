@@ -995,6 +995,9 @@ def collect_foreign_state(harness: str, root: str, key: str, state: str, home,
     (the lock holder — `brief`, or another `mark` — is the one actually
     running it); `brief.compute` only calls this at all when it *did* get
     the lock, so it always leaves this at the default `True`."""
+    # mark passes its row's whole-second epoch, brief its raw clock; every
+    # other ledger row carries whole seconds, so keep these the same.
+    now = float(round(now))
     try:
         _bounce_check(harness, key, state, home, now, session)
     except Exception:
