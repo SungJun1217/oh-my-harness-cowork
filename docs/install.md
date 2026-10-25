@@ -92,6 +92,10 @@ on the `<adapter-id> hooks` row until you rerun `omhc hooks install`.
 > [Codex: trust the hook](#codex-trust-the-hook) below, just for the second
 > group in the same file).
 
+After installing, `omhc doctor --self-test` checks the local synthetic pipeline
+in disposable homes without launching either harness or a model. It does not
+verify hook trust or real model receipt; see [diagnostics](diagnostics.md).
+
 ### Merging the fragment files by hand
 
 They live under `~/.local/share/omhc/current/hooks/` (`curl | sh` install)

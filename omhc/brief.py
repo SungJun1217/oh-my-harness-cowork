@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 import time
 import traceback
 from typing import Optional
 
-from . import adapters, collect, deliver, due, fsio, gate, index, locate, mint, pin
+from . import adapters, collect, deliver, due, fsio, gate, index, locate, mint, notes, pin
 from .adapter import HandoffBundle
 
 GUARD_LOG = "guard.log"
@@ -86,35 +85,12 @@ def read_last_read(state_dir: str) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
-# Line format `omhc note` writes: "<epoch>\t<text>". Old lines (no timestamp) are also read.
-_NOTE_STAMP = re.compile(r"^(\d{9,11})\t(.*)$")
+# Kept as aliases for callers that used the original note reader.
+_NOTE_STAMP = notes.STAMP
 
 
 def _notes(state_dir: str, limit: int = 2, now: Optional[float] = None) -> list:
-    """Recent notes to attach to the handoff. Drops notes past the age limit
-    (due.MAX_AGE_SECONDS) (#36) — notes persist as a file and reattach to
-    every handoff, so last week's note must not read as "current fact" in
-    today's session. Matched to the handoff's own age limit. An old line with
-    no timestamp has no known write time, so it's treated as old."""
-    try:
-        with open(os.path.join(state_dir, NOTES_NAME), encoding="utf-8",
-                  errors="replace") as fh:
-            lines = [line.strip("\r\n") for line in fh if line.strip()]
-    except OSError:
-        return []
-    stamp = time.time() if now is None else now
-    kept = []
-    for line in lines:
-        m = _NOTE_STAMP.match(line)
-        if m:
-            if stamp - float(m.group(1)) > due.MAX_AGE_SECONDS:
-                continue
-            text = m.group(2).strip()
-        else:
-            text = line.strip()
-        if text:
-            kept.append(text)
-    return kept[-limit:]
+    return notes.recent(state_dir, limit, now=now)
 
 
 # Must never emit two of the three formats at once. Claude Code reads both
@@ -188,6 +164,7 @@ def compute(
     force: bool = False,
     dry_run: bool = False,
     from_hook: bool = False,
+    trace=None,
 ) -> str:
     """The marker body to deliver, or an empty string if there's nothing to send.
 
@@ -243,6 +220,7 @@ def compute(
     def eligible(mark) -> bool:
         nonlocal stopped
         if stopped:
+            due.report(trace, "source_boundary", mark)
             return False
         adapter = adapters.get(mark.harness, home=home)
         refs = _ref_for(adapter, mark, repo_root)
@@ -256,10 +234,12 @@ def compute(
         # continued in, and a full scan (249ms) would run for every such row.
         if not (mark.path and os.path.exists(mark.path)):
             stopped = True
+            due.report(trace, "missing_source", mark)
             return True
         verdict = adapter.classify(mark.path)
         if verdict:
             stopped = True
+            due.report(trace, "unavailable_source", mark)
         return verdict
 
     # Asks for more than MAX_SESSIONS candidates (#49 review finding 2) — a
@@ -268,7 +248,7 @@ def compute(
     # can be disclosed via `unread` instead of due() silently truncating
     # them where nothing downstream could ever notice.
     marks = due.due(key, my_harness, my_session_id, stamp, home=home,
-                    eligible=eligible, limit=due.SCAN_LIMIT)
+                    eligible=eligible, limit=due.SCAN_LIMIT, trace=trace)
     if not marks:
         return ""
 
@@ -340,6 +320,7 @@ def compute(
             # compute() itself can raise (see docstring); the hook wrapper
             # (emit) is what upholds invariant 2. Never disable the main
             # handoff to protect a read that already failed once.
+            due.report(trace, "reading", mark)
             read = adapter.read_session(ref)
             # Recorded right after the read, before the #27 guard below, so
             # `omhc status`'s last-read row still updates even when this
@@ -354,18 +335,23 @@ def compute(
             # time on sessions past the head while there's room, and never
             # let one of them break the main handoff (invariant 2).
             if (time.monotonic() - clock_start) > OLDER_SESSION_TIME_BUDGET:
+                due.report(trace, "read_time_limit", mark)
                 unread += len(marks) - i
                 break
             try:
+                due.report(trace, "reading", mark)
                 read = adapter.read_session(ref)
             except Exception as exc:
+                due.report(trace, "read_error", mark, detail=str(exc))
                 if not dry_run:
                     log_failure(home, "also-session {} read failed: {}".format(
                         mark.session_id, exc))
                 unread += len(marks) - i
                 break
 
+        due.report(trace, "read", mark, events=len(read.events), unparsed=read.unparsed)
         if not new_human_turn(mark.session_id, read.events):
+            due.report(trace, "no_new_human_turn", mark)
             continue
         if processed and not mint.has_human_turn(read):
             # An older session with nothing verbatim-human said has nothing
@@ -374,7 +360,9 @@ def compute(
             # review finding 2). Never applied to the head itself (`not
             # processed` above) — an empty GOAL there is an existing,
             # separate, out-of-scope edge case.
+            due.report(trace, "no_human_turn", mark)
             continue
+        due.report(trace, "included", mark, role="main" if not processed else "also")
         processed.append((mark, ref, read))
         if len(processed) == 1:
             # The head is now established — the time budget for everything
@@ -385,6 +373,8 @@ def compute(
             # Enough sessions that will actually be sent are already in
             # hand — stop reading further marks entirely; everything left
             # is only disclosed, never read (#49 review finding 1).
+            if len(marks) > i + 1:
+                due.report(trace, "session_limit", unread=len(marks) - i - 1)
             unread += len(marks) - i - 1
             break
 
@@ -410,9 +400,14 @@ def compute(
         # Don't consume the gate if there's nothing to send. If a first fire
         # burns the slot empty-handed, data that arrives milliseconds later
         # can never be received for that session.
+        due.report(trace, "empty_body")
         return ""
 
     if dry_run:
+        if gate.is_claimed(state, my_harness, my_session_id):
+            due.report(trace, "gate_claimed")
+        else:
+            due.report(trace, "preview_ready")
         return body
 
     if not force and not gate.claim(state, my_harness, my_session_id):
