@@ -168,6 +168,24 @@ class TestHookconf(unittest.TestCase):
         ok, detail = hookconf.inspect(self.config_path, self.fragment, self.home)
         self.assertTrue(ok, detail)
 
+    def test_home_expansion_needs_quotes_when_it_can_split_or_glob(self):
+        for suffix in ("Spaced Home", "Glob[Home]"):
+            home = os.path.join(self._tmp.name, suffix)
+            binary = os.path.join(home, ".local", "bin", "omhc")
+            os.makedirs(os.path.dirname(binary))
+            with open(binary, "w") as fh:
+                fh.write("#!/bin/sh\nexit 0\n")
+            os.chmod(binary, 0o755)
+            for expression in ("$HOME/.local/bin/omhc", "${HOME}/.local/bin/omhc"):
+                for quoted in (False, True):
+                    with self.subTest(home=suffix, expression=expression, quoted=quoted):
+                        command = '"' + expression + '"' if quoted else expression
+                        self._write(self._fragment_with(command))
+                        ok, detail = hookconf.inspect(self.config_path, self.fragment, home)
+                        self.assertEqual(ok, quoted, detail)
+                        if not quoted:
+                            self.assertIn("unquoted $HOME", detail)
+
     def test_quoted_command_passes(self):
         frag = self._fragment_with('"$HOME/.local/bin/omhc"')
         self._write(frag)

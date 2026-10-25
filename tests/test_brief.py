@@ -190,6 +190,24 @@ class TestCompute(unittest.TestCase):
         self.assertEqual(brief._notes(self.h.state,
                                       now=_time.time() + due.MAX_AGE_SECONDS + 60), [])
 
+    def test_multiline_note_is_one_stamped_record_and_expires_as_a_whole(self):
+        from omhc import cli, due
+        cwd = os.getcwd()
+        os.chdir(self.h.repo_root)
+        self.addCleanup(os.chdir, cwd)
+        args = cli.build_parser().parse_args([
+            "note", "First line\nSecond line\r\nThird\rFourth\tlast\u2028part"])
+        with mock.patch("omhc.cli.time.time", return_value=NOW):
+            code = cli.cmd_note(args, home=self.h.home, out=io.StringIO())
+        self.assertEqual(code, 0)
+        with open(os.path.join(self.h.state, "notes.txt"), encoding="utf-8") as fh:
+            records = fh.read().splitlines()
+        self.assertEqual(len(records), 1)
+        self.assertIsNotNone(brief._NOTE_STAMP.fullmatch(records[0]))
+        self.assertEqual(brief._notes(self.h.state, now=NOW),
+                         ["First line Second line Third Fourth last part"])
+        self.assertEqual(brief._notes(self.h.state, now=NOW + due.MAX_AGE_SECONDS + 1), [])
+
     def test_same_vendor_yields_empty(self):
         self.h.plant_codex_session()
         body = brief.compute(my_harness="codex-cli", my_session_id="me1",
@@ -1357,6 +1375,29 @@ class TestLastRead(unittest.TestCase):
         summary = brief.read_last_read(self._state())
         self.assertEqual(summary["epoch"], round(NOW + 2), "the phantom reopen was read")
         self.assertIs(summary["delivered"], False)
+
+    def test_malformed_claude_record_is_delivered_with_degradation_in_summary(self):
+        from omhc import ledger
+        path = os.path.join(self.h.home, "claude.jsonl")
+        rows = [
+            {"type": "user", "cwd": self.h.repo_root, "message": {"content": "Original goal"}},
+            {"type": "assistant", "message": ["unexpected schema"]},
+            {"type": "user", "message": {"content": "Latest real request"}},
+        ]
+        with open(path, "w") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+        ledger.append({"repo": self.h.key, "harness": "claude-code", "session": "cc1",
+                       "event": "start", "epoch": NOW - 60, "path": path}, home=self.h.home)
+        out = io.StringIO()
+        code = brief.emit(harness="codex-cli", home=self.h.home, now=NOW, out=out,
+                          stdin_text=json.dumps({"cwd": self.h.repo_root, "session_id": "me1", "source": "startup"}))
+        self.assertEqual(code, 0)
+        body = json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("NEXT  Latest real request", body)
+        summary = brief.read_last_read(self._state())
+        self.assertEqual(summary["unparsed"], 1)
+        self.assertTrue(summary["delivered"])
 
     def test_recording_never_raises_even_when_the_state_dir_is_unusable(self):
         blocker = os.path.join(self.h.home, "not-a-dir")

@@ -299,13 +299,14 @@ def cmd_note(args, *, home=None, out=sys.stdout, err=None) -> int:
         return 2
     os.makedirs(state, exist_ok=True)
     path = os.path.join(state, NOTES_NAME)
-    text = " ".join(args.text).strip()
+    # Keep one stamped record even when a single argument contains newlines.
+    text = " ".join(" ".join(args.text).split())
     if not text:
         out.write("nothing to note\n")
         return 0
     # Attaches the write time — a note older than 7 days doesn't ride along in the handoff (#36).
     with open(path, "a", encoding="utf-8") as fh:
-        fh.write("{:.0f}\t{}\n".format(time.time(), text.replace("\t", " ")))
+        fh.write("{:.0f}\t{}\n".format(time.time(), text))
     with open(path, encoding="utf-8", errors="replace") as fh:
         lines = [line for line in fh if line.strip()]
     out.write("noted ({} notes, {}B)\n".format(len(lines), os.path.getsize(path)))

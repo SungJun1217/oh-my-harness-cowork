@@ -181,6 +181,29 @@ class TestHookChainExecution(unittest.TestCase):
             self.assertEqual(got.returncode, 0, got.stderr)
 
 
+class TestShellExecutionWithSpacedHome(unittest.TestCase):
+    def test_shipped_commands_run_verbatim_through_a_shell(self):
+        t = _repo.TempRepo()
+        self.addCleanup(t.close)
+        home = os.path.join(t.home, "Test User")
+        binary = os.path.join(home, ".local", "bin", "omhc")
+        os.makedirs(os.path.dirname(binary))
+        os.symlink(OMHC, binary)
+        env = dict(t.env, HOME=home)
+        payload = json.dumps({"cwd": t.root, "session_id": "spaced-home", "source": "startup"})
+        for adapter_id, fragment in FRAGMENTS.items():
+            for command in shipped_commands(fragment) + shipped_turn_commands(fragment):
+                with self.subTest(adapter=adapter_id, command=command):
+                    got = subprocess.run(["/bin/sh", "-c", command], input=payload,
+                                         env=env, cwd=t.repo, capture_output=True,
+                                         text=True, timeout=30)
+                    self.assertEqual(got.returncode, 0, got.stderr)
+                    self.assertEqual(got.stdout, "")
+        with open(os.path.join(home, ".omhc", "ledger.jsonl")) as fh:
+            rows = [json.loads(line) for line in fh]
+        self.assertEqual({r["harness"] for r in rows}, set(FRAGMENTS))
+
+
 class TestF7ZeroCase(unittest.TestCase):
     """Spec section 16-7: a session start with no harness switch must inject zero times.
 

@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -57,6 +58,38 @@ class TestHooksInstallCli(unittest.TestCase):
         ok, detail = hookconf.inspect(hc.config_path, fragment, self.home)
         self.assertTrue(ok, detail)
 
+    def test_unquoted_legacy_hooks_in_a_spaced_home_are_detected_and_repaired(self):
+        home = os.path.join(self._tmp.name, "Test User")
+        os.makedirs(home)
+        _make_bin(home)
+        for adapter_id in ("claude-code", "codex-cli"):
+            with self.subTest(adapter=adapter_id):
+                hc = cli.adapters.get(adapter_id, home=home).hook_config()
+                fragment = hookconf.load_fragment(hc.fragment_name)
+                legacy = json.loads(json.dumps(fragment))
+                for groups in legacy.values():
+                    for group in groups:
+                        for hook in group["hooks"]:
+                            hook["command"] = hook["command"].replace('"$HOME/.local/bin/omhc"', '$HOME/.local/bin/omhc')
+                os.makedirs(os.path.dirname(hc.config_path), exist_ok=True)
+                with open(hc.config_path, "w") as fh:
+                    json.dump({"hooks": legacy}, fh)
+                ok, detail = hookconf.inspect(hc.config_path, fragment, home)
+                self.assertFalse(ok)
+                self.assertIn("unquoted $HOME", detail)
+                code, _text = _run(["hooks", "install", "--harness", adapter_id], home)
+                self.assertEqual(code, 0)
+                ok, detail = hookconf.inspect(hc.config_path, fragment, home)
+                self.assertTrue(ok, detail)
+                with open(hc.config_path, "rb") as fh:
+                    installed = fh.read()
+                stamp = os.stat(hc.config_path).st_mtime_ns
+                code, _text = _run(["hooks", "install", "--harness", adapter_id], home)
+                self.assertEqual(code, 0)
+                with open(hc.config_path, "rb") as fh:
+                    self.assertEqual(fh.read(), installed)
+                self.assertEqual(os.stat(hc.config_path).st_mtime_ns, stamp)
+
     def test_install_also_writes_the_turn_userpromptsubmit_group(self):
         # v2 phase 2 (#42): one `omhc hooks install` call covers both
         # managed events in the shared fragment file.
@@ -65,8 +98,8 @@ class TestHooksInstallCli(unittest.TestCase):
         with open(settings, encoding="utf-8") as fh:
             conf = json.load(fh)
         self.assertIn("UserPromptSubmit", conf["hooks"])
-        self.assertIn("omhc turn --harness claude-code",
-                      conf["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"])
+        self.assertEqual(shlex.split(conf["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"])[1:],
+                         ["turn", "--harness", "claude-code"])
 
     def test_an_old_install_with_only_sessionstart_is_flagged_fail(self):
         # An install from before #42 (only mark/brief, no turn hook) must not

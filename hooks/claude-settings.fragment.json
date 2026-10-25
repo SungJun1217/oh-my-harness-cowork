@@ -29,11 +29,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.local/bin/omhc mark --harness claude-code"
+            "command": "\"$HOME/.local/bin/omhc\" mark --harness claude-code"
           },
           {
             "type": "command",
-            "command": "$HOME/.local/bin/omhc brief --harness claude-code --wire claude"
+            "command": "\"$HOME/.local/bin/omhc\" brief --harness claude-code --wire claude"
           }
         ]
       }
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.local/bin/omhc turn --harness claude-code"
+            "command": "\"$HOME/.local/bin/omhc\" turn --harness claude-code"
           }
         ]
       }

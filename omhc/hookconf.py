@@ -399,6 +399,15 @@ def _judge(hooks_by_event, fragment: Dict[str, list], home: str,
         return False, "differs from shipped fragment ({}) — run `omhc hooks install`".format(
             _diff_reason(shipped, installed_omhc))
 
+    # Older fragments left HOME unquoted. shlex retains it as one argv
+    # token, but a shell splits/globs the expanded value before launching.
+    if any(c.isspace() or c in "*?[" for c in home):
+        for entry in installed_entries:
+            if (_runnable_at_startup(entry) and _parse_call(entry.command)
+                    and re.match(r"^\s*\$(?:HOME|\{HOME\})/", entry.command)):
+                return False, ("unquoted $HOME in executable path — "
+                               "run `omhc hooks install`")
+
     for call in installed_omhc:
         binpath = _resolve_binary(call.argv[0], home)
         if binpath is None:

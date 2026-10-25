@@ -71,6 +71,11 @@ commands; see `omhc/hookconf.py`'s module comment for the measured cases).
 Either command backs up the config to `<file>.omhc-bak` first whenever it's
 about to change an existing file.
 
+The executable path in shipped hooks is quoted so a HOME containing spaces
+works. If an older unquoted hook would split or glob that HOME, `omhc
+status` reports FAIL. Rerun `omhc hooks install` to replace an older JSON
+fragment; inline TOML hooks need their executable path quoted by hand.
+
 Each fragment file actually ships **two** hook groups now: `SessionStart`
 (`mark`/`brief`, the handoff) and `UserPromptSubmit` (`omhc turn`, the
 per-turn overlap warning — see [v2-concurrency.md's phase
