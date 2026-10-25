@@ -946,6 +946,22 @@ class CodexCliAdapter:
             size=stat.st_size,
         )
 
+    @staticmethod
+    def diagnostic_sample(repo_root):
+        """Synthetic input for the opt-in isolated self-test; never runs a harness."""
+        return {"goal": "omhc self-test human goal", "rows": [
+            {"type": "session_meta", "payload": {"session_id": "self-test-source",
+                "cwd": repo_root, "source": "cli"}},
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "omhc self-test human goal"}]}},
+            {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+                "type": "CommandExecution", "id": "self-test-run",
+                "command": ["/bin/sh", "-c", "omhc-self-test-command"],
+                "cwd": "file://" + repo_root,
+                "parsed_cmd": [{"type": "unknown", "cmd": "omhc-self-test-command"}],
+                "status": "failed", "exit_code": 1, "stdout": "synthetic failure", "stderr": ""}}},
+        ]}
+
     def native_resume_hint(self, ref: SessionRef) -> Optional[str]:
         if not ref.session_id:
             return None

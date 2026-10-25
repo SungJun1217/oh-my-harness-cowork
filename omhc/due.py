@@ -388,6 +388,19 @@ def group_already_bounced(state_dir: str, to_harness: str, head_session_id: str)
     return False
 
 
+def report(trace, reason, mark=None, **details):
+    """Optional read-only decision observation; absent on normal hook calls."""
+    if trace is None:
+        return
+    event = {"reason": reason}
+    if mark is not None:
+        row = mark if isinstance(mark, dict) else mark._asdict()
+        event.update(session=str(row.get("session_id", row.get("session", ""))),
+                     harness=str(row.get("harness", "")))
+    event.update(details)
+    trace(event)
+
+
 def due(
     repo_key: str,
     my_harness: str,
@@ -397,6 +410,7 @@ def due(
     home: Optional[str] = None,
     eligible: Optional[Callable[[Watermark], bool]] = None,
     limit: int = MAX_SESSIONS,
+    trace=None,
 ) -> List[Watermark]:
     """Every foreign session to tell this session about, newest first,
     capped at `limit`. **This is the concurrency seam.**
@@ -474,6 +488,7 @@ def due(
     """
     state = locate.state_dir(repo_key, home=home)
     if is_off(state):
+        report(trace, "off", detail=off_reason(state))
         return []
 
     all_rows = ledger.read(repo_key=repo_key, home=home)
@@ -503,6 +518,9 @@ def due(
     fresh_count = 0
     for row in reversed(all_rows):
         if not _is_candidate_start_row(row):
+            if row.get("event") == "start" and row.get("session") and row.get("harness"):
+                reason = "same_session" if str(row["session"]) == my_session_id else "same_harness"
+                report(trace, reason, row)
             continue
         harness = row.get("harness")
         session = row.get("session")
@@ -511,15 +529,18 @@ def due(
             if session_id in stop_after:
                 # This is the deferred older row of a reopened session
                 # already included above — stop, don't walk past it (#49).
+                report(trace, "reopened_boundary", row)
                 break
             continue
         seen_sessions.add(session_id)
         if _already_delivered(delivered_lines, session_id, my_harness):
+            report(trace, "already_delivered", row)
             break
 
         epoch = float(row.get("epoch") or 0.0)
         if epoch and now and (now - epoch) > MAX_AGE_SECONDS:
             # Too old to be work worth continuing, and everything before it is older still.
+            report(trace, "too_old", row)
             break
 
         mark = Watermark(
@@ -539,7 +560,9 @@ def due(
         # the "most recent foreign session" slot and block the real session
         # before it. If ineligible, don't stop — move to the row before it.
         if eligible is not None and not eligible(mark):
+            report(trace, "excluded_by_adapter", mark)
             continue
+        report(trace, "candidate", mark)
         results.append(mark)
         if _ever_delivered(delivered_lines, session_id, my_harness):
             if session_id in multi_row_sessions:
@@ -559,7 +582,10 @@ def due(
                 break
         fresh_count += 1
         if fresh_count >= limit:
+            report(trace, "selection_limit", mark)
             break
+    if not results:
+        report(trace, "no_candidates")
     return results
 
 

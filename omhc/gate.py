@@ -11,6 +11,12 @@ def _gate_dir(state_dir: str) -> str:
     return os.path.join(state_dir, "gate")
 
 
+def is_claimed(state_dir: str, adapter_id: str, session_id: str) -> bool:
+    """Observe a gate without creating it. Used by human-facing diagnostics."""
+    return bool(session_id) and os.path.exists(os.path.join(
+        _gate_dir(state_dir), "{}.{}".format(adapter_id, session_id)))
+
+
 def claim(state_dir: str, adapter_id: str, session_id: str) -> bool:
     """True exactly once per (adapter_id, session_id).
 

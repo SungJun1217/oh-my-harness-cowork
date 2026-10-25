@@ -814,6 +814,20 @@ class ClaudeCodeAdapter:
         adapter doesn't even need to implement a Codex→Claude backfill."""
         return ()
 
+    @staticmethod
+    def diagnostic_sample(repo_root):
+        """Synthetic input for the opt-in isolated self-test; never runs a harness."""
+        return {"goal": "omhc self-test human goal", "rows": [
+            {"type": "user", "cwd": repo_root, "sessionId": "self-test-source",
+             "entrypoint": "cli", "message": {"content": "omhc self-test human goal"}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "self-test-run", "name": "Bash",
+                 "input": {"command": "omhc-self-test-command"}}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "self-test-run",
+                 "is_error": True, "content": "synthetic failure"}]}},
+        ]}
+
     def native_resume_hint(self, ref: SessionRef) -> Optional[str]:
         """Between the same vendor, this is lossless and superior. Our summary is inferior."""
         return "claude --resume {}".format(ref.session_id)

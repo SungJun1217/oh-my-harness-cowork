@@ -128,16 +128,21 @@ For a project that isn't a git repo, run `touch .omhc-root` at its top once.
 | Command | Role |
 |---|---|
 | `omhc status [--json]` | The one human dashboard, including archive lag and [pull rate](docs/status.md#pull-rate) |
+| `omhc explain --harness ID [--session ID] [--json]` | Read-only handoff preview with selection/omission reasons |
+| `omhc sessions --harness ID [--last N] [--json]` | Recorded sessions, human goals, delivery state and reasons |
+| `omhc doctor [--self-test] [--json]` | The status dashboard, or isolated synthetic pipeline probes without model calls |
 | `omhc log [--last N] [--grep P] [--verb V] [--file P]` | Indexed events, one per line, each starting with a `<session>#N` ref you can paste into `show` |
 | `omhc trace <path> [--all] [--last N] [--json]` | Every indexed event that modified `path`, across both harnesses' sessions. `--all` adds reads and command mentions |
 | `omhc show <E1\|#137\|abcdef01#137> [--full]` | **Reads the original bytes back by offset.** Bare `#N` means the most recently delivered session |
-| `omhc note "<text>"` | Leaves a note for the next handoff. Either harness's agent can call it |
+| `omhc note [--ttl 1d] "<text>"` / `note list [--json]` / `note delete <id>` | Leaves, inspects, or removes notes; custom TTL is at most 7 days |
 | `omhc hooks install\|uninstall [--harness ID]` | Merges or strips omhc's own `SessionStart` and `UserPromptSubmit` hooks |
 | `omhc clear` | Removes this repo's installed markers, outbox files and reject records |
 | `omhc watch [--stop\|--once]` | Optional accelerator daemon; results are identical without it |
 | `omhc brief --harness X --dry-run` | Previews the handoff the next session would get, without claiming it, archiving or delivering |
 | `omhc mark` / `omhc brief --harness X` | Called by the hook: record the session start, then print the handoff |
 | `omhc turn --harness X` | Called by the `UserPromptSubmit` hook on each human turn: warns, once, when the other harness modified a file this session already touched, plus — opt-in via [`OMHC_LIVE=1`](docs/install.md#live-notes-from-a-still-running-session) — the other session's newest human turn and unresolved failures (docs/v2-concurrency.md, phases 2-3) |
+
+Read-only diagnostics, note IDs/expiry, and self-test scope: [docs/diagnostics.md](docs/diagnostics.md).
 
 Turn it off with `OMHC_OFF=1` or an `~/.omhc/<repo-key>/off` file. Headless
 sessions (`claude -p`, `codex exec`) are never handoff sources unless you set

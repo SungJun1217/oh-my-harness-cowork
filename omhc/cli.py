@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import (
     adapters, agents_md, brief, collect, deliver, due, fsio, gate, hookconf, index,
-    ledger, locate, managed_block, mint, pin, turn, watch,
+    ledger, locate, managed_block, mint, notes, pin, turn, watch,
 )
 from .adapter import AdapterUnavailable
 
@@ -297,20 +297,44 @@ def cmd_note(args, *, home=None, out=sys.stdout, err=None) -> int:
     if reason:
         err.write("{}\n".format(reason))
         return 2
-    os.makedirs(state, exist_ok=True)
-    path = os.path.join(state, NOTES_NAME)
-    # Keep one stamped record even when a single argument contains newlines.
-    text = " ".join(" ".join(args.text).split())
-    if not text:
-        out.write("nothing to note\n")
+    words = list(args.text)
+    action = words.pop(0) if words and words[0] in ("add", "list", "delete") else "add"
+    try:
+        if action == "list":
+            if words or args.ttl is not None:
+                raise notes.NoteError("usage: omhc note list [--json]")
+            records = notes.list_notes(state)
+            if args.json:
+                out.write(json.dumps(records, ensure_ascii=False, indent=2) + "\n")
+            elif not records:
+                out.write("no notes\n")
+            else:
+                for record in records:
+                    status = "expired" if record["expired"] else ("legacy" if record["legacy"] else "active")
+                    expiry = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record["expires_at"]))
+                              if record["expires_at"] is not None else "unknown")
+                    out.write("{} {} expires={} copies={} {}\n".format(
+                        record["id"], status, expiry, record["copies"], " ".join(record["text"].split())))
+            return 0
+        if args.json:
+            raise notes.NoteError("--json is only available with `omhc note list`")
+        if action == "delete":
+            if len(words) != 1 or args.ttl is not None:
+                raise notes.NoteError("usage: omhc note delete <id>")
+            out.write("deleted {} note record(s)\n".format(notes.delete(state, words[0])))
+            return 0
+        text = " ".join(words).strip()
+        if not text:
+            out.write("nothing to note\n")
+            return 0
+        record = notes.add(state, text, ttl=args.ttl)
+        count = sum(r["copies"] for r in notes.list_notes(state))
+        out.write("noted ({} notes, {}B) id={}\n".format(
+            count, os.path.getsize(os.path.join(state, NOTES_NAME)), record["id"]))
         return 0
-    # Attaches the write time — a note older than 7 days doesn't ride along in the handoff (#36).
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write("{:.0f}\t{}\n".format(time.time(), text))
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        lines = [line for line in fh if line.strip()]
-    out.write("noted ({} notes, {}B)\n".format(len(lines), os.path.getsize(path)))
-    return 0
+    except (notes.NoteError, OSError, UnicodeError) as exc:
+        err.write("{}\n".format(exc))
+        return 1
 
 
 # --- pull rate ---------------------------------------------------------------
@@ -1566,6 +1590,86 @@ def cmd_watch(args, *, home=None, out=sys.stdout) -> int:
         return 1
 
 
+def cmd_doctor(args, *, home=None, out=sys.stdout) -> int:
+    if not args.self_test:
+        code = cmd_status(args, home=home, out=out)
+        if not args.json:
+            out.write("Run `omhc doctor --self-test` for isolated synthetic pipeline checks.\n")
+        return code
+    from . import selftest
+    result = selftest.run()
+    if args.json:
+        out.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    else:
+        out.write(result["scope"] + "\n")
+        for row in result["checks"]:
+            out.write("{} {}: {}\n".format(_verdict_word(row["ok"]), row["label"], row["detail"]))
+    return 0 if result["ok"] else 1
+
+
+def cmd_explain(args, *, home=None, out=sys.stdout) -> int:
+    from . import diagnostics
+    root, _key, _state = _state_for(home)
+    if locate.refused_root(root):
+        reason = locate.refused_root(root)
+        out.write((json.dumps({"error": reason}) if args.json else reason) + "\n")
+        return 1
+    result = diagnostics.explain(root, args.harness, session=args.session, home=home)
+    if args.json:
+        out.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    else:
+        out.write("{}: {}\n{}\n".format(args.harness, result["detail"], result["scope"]))
+        seen = set()
+        width = mint.unique_prefix_len([e["session"] for e in result["events"] if e.get("session")])
+        for event in result["events"]:
+            identity = (event.get("harness"), event.get("session"), event["reason"])
+            if identity in seen or event["reason"] not in diagnostics.REASONS:
+                continue
+            seen.add(identity)
+            out.write("{} {}: {}\n".format(event.get("harness", "-"),
+                      event.get("session", "-")[:width], diagnostics.REASONS[event["reason"]]))
+        if result["gate_claimed"] is not None:
+            out.write("Receiving session gate: {}\n".format("claimed" if result["gate_claimed"] else "open"))
+        out.write("Hooks: {}\n".format(result["hooks"]["detail"]))
+        for action in result["actions"]:
+            out.write("Next: {}\n".format(action))
+        if result["preview"]:
+            out.write("\nPreview ({} bytes):\n{}".format(
+                len(result["preview"].encode("utf-8")), result["preview"]))
+    return 1 if result["outcome"] == "error" else 0
+
+
+def cmd_sessions(args, *, home=None, out=sys.stdout) -> int:
+    from . import diagnostics
+    root, _key, _state = _state_for(home)
+    if locate.refused_root(root):
+        reason = locate.refused_root(root)
+        out.write((json.dumps({"error": reason}) if args.json else reason) + "\n")
+        return 1
+    if not 1 <= args.last <= 100:
+        out.write("--last must be between 1 and 100\n")
+        return 1
+    result = diagnostics.sessions(root, args.harness, home=home, last=args.last)
+    if args.json:
+        out.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    else:
+        out.write(result["scope"] + "\n")
+        n = mint.unique_prefix_len([r["session"] for r in result["sessions"]])
+        for row in result["sessions"]:
+            out.write("{} {} {} delivered={}\n".format(
+                row["harness"], row["session"][:n], row["reason"], str(row["delivered"]).lower()))
+            if row["goal"]:
+                goal = " ".join(row["goal"].split())
+                out.write("  GOAL  {}\n".format(goal if len(goal) <= 180 else goal[:179] + "…"))
+            if row["resume_hint"]:
+                out.write("  Resume: {}\n".format(row["resume_hint"]))
+            if row.get("read_error"):
+                out.write("  Read error: {}\n".format(" ".join(row["read_error"].split())))
+        if not result["sessions"]:
+            out.write("no recorded sessions\n")
+    return 0
+
+
 # --- parser -----------------------------------------------------------------
 
 
@@ -1629,8 +1733,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_trace)
 
     p = sub.add_parser("note", help="Leaves a note (an agent can call this too)")
-    p.add_argument("text", nargs="+")
+    p.add_argument("text", nargs="*", help="[add] <text> | list | delete <id>; use add for reserved words")
+    p.add_argument("--ttl", type=notes.parse_ttl, default=None, help="Expiry such as 30m or 1d (maximum 7d)")
+    p.add_argument("--json", action="store_true", help="JSON output for note list")
     p.set_defaults(func=cmd_note)
+
+    p = sub.add_parser("explain", help="Explains why a handoff would be sent or omitted (read-only)")
+    p.add_argument("--harness", required=True, help="Receiving harness ID")
+    p.add_argument("--session", default="", help="Receiving session ID, to inspect its existing gate")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_explain)
+
+    p = sub.add_parser("sessions", help="Lists recorded sessions and their delivery decisions (read-only)")
+    p.add_argument("--harness", required=True, help="Receiving harness ID")
+    p.add_argument("--last", type=int, default=20)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_sessions)
+
+    p = sub.add_parser("doctor", help="Checks installation; optionally probes an isolated synthetic pipeline")
+    p.add_argument("--self-test", action="store_true", help="Temporary HOME only; never starts a model or harness")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("status", help="The one human dashboard")
     p.add_argument("--json", action="store_true")
