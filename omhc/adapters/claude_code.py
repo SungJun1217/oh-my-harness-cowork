@@ -545,7 +545,10 @@ class ClaudeCodeAdapter:
                     bump("compact_summary")
                     continue
 
-                message = row.get("message") or {}
+                message = row.get("message")
+                if not isinstance(message, dict):
+                    unparsed += 1
+                    continue
                 if kind == "assistant" and (
                     row.get("isApiErrorMessage") is True
                     or row.get("isVirtual") is True

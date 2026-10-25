@@ -47,11 +47,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.local/bin/omhc mark --harness codex-cli"
+            "command": "\"$HOME/.local/bin/omhc\" mark --harness codex-cli"
           },
           {
             "type": "command",
-            "command": "$HOME/.local/bin/omhc brief --harness codex-cli --wire claude"
+            "command": "\"$HOME/.local/bin/omhc\" brief --harness codex-cli --wire claude"
           }
         ]
       }
@@ -61,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.local/bin/omhc turn --harness codex-cli"
+            "command": "\"$HOME/.local/bin/omhc\" turn --harness codex-cli"
           }
         ]
       }

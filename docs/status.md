@@ -82,7 +82,10 @@ For every detected harness, status also adds a `<adapter-id> hooks` row
 hooks are actually merged into that harness's own config, not just that the
 harness directory exists. Matching is structural (parsed as argv, not a
 byte-for-byte string compare), so an absolute path, `~`, `${HOME}`, a quoted
-command, or a bare `omhc` found on `PATH` all still count as installed. It
+command, or a bare `omhc` found on `PATH` all still count as installed. An old
+unquoted `$HOME` executable path fails when HOME contains whitespace or
+glob characters; rerun `omhc hooks install` for JSON fragments, or quote
+the executable path in inline TOML hooks. It
 FAILs (and gates) when the config file is missing (pointing at `omhc hooks
 install`) or unparseable, when the `mark`/`brief` commands aren't there in
 the order and with the flags the shipped fragment expects (a stale `--wire

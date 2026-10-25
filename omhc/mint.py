@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import guard, locate
@@ -444,9 +445,12 @@ def mint(
         pull_bits.insert(0, "omhc show E1")
     # A single long path can push the PULL line past 100 bytes and crowd out
     # content slots. Only use a short path as the hint.
-    short_paths = sorted(modified_paths, key=len)
+    short_paths = sorted((p for p in modified_paths if p.isprintable()), key=len)
     if short_paths and len(short_paths[0]) <= 32:
-        pull_bits.append("omhc log --file {}".format(short_paths[0]))
+        path = short_paths[0]
+        # Hints are copied into a shell: filenames must remain one argument.
+        flag = "--file=" if path.startswith("-") else "--file "
+        pull_bits.append("omhc log {}{}".format(flag, shlex.quote(path)))
     pull = "PULL" + SEP + " · ".join(pull_bits)
 
     # --- fit the budget ------------------------------------------------------

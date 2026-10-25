@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import shlex
+import subprocess
+import tempfile
 import unittest
 
 from omhc import adapter as A
@@ -126,6 +130,53 @@ class TestBudget(unittest.TestCase):
         self.assertIn("GOAL", tight, "a verified goal was dropped before a claim")
         self.assertNotIn("PLAN?", tight)
         self.assertIn("plan?", " ".join(tight.get("MORE", [])).lower())
+
+
+class TestPullShellArguments(unittest.TestCase):
+    def _render(self, path, budget=900):
+        return mint.mint(read_of([
+            ev(1, text="Keep the export compatible"),
+            ev(2, author="agent", verb="modified", paths=("/repo/" + path,)),
+        ]), to_adapter_id="claude-code", now=NOW, budget=budget)
+
+    def test_copying_a_hint_preserves_the_filename_without_running_it(self):
+        with tempfile.TemporaryDirectory() as work:
+            binary = os.path.join(work, "omhc")
+            capture = os.path.join(work, "argv.txt")
+            with open(binary, "w") as fh:
+                fh.write("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$OMHC_CAPTURE\"\n")
+            os.chmod(binary, 0o755)
+            env = dict(os.environ, HOME=work, OMHC_CAPTURE=capture,
+                       PATH=work + os.pathsep + os.environ.get("PATH", ""))
+            for path in ("src/my file.py", "a;touch sentinel", "$(touch sentinel)",
+                         "a`touch sentinel`", "a'quote.py", "-n.py"):
+                with self.subTest(path=path):
+                    body = self._render(path)
+                    hints = slots_of(body)["PULL"][0].split(" · ")
+                    hint = next(h for h in hints if h.startswith("omhc log --file"))
+                    got = subprocess.run(["/bin/sh", "-c", hint], cwd=work,
+                                         env=env, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(got.returncode, 0, got.stderr)
+                    with open(capture) as fh:
+                        argv = fh.read().splitlines()
+                    expected = ["log", "--file=" + path] if path.startswith("-") else ["log", "--file", path]
+                    self.assertEqual(argv, expected)
+                    self.assertFalse(os.path.exists(os.path.join(work, "sentinel")))
+                    self.assertLessEqual(len(body.encode("utf-8")), 900)
+
+    def test_nonprintable_paths_do_not_create_multiline_commands(self):
+        for path in ("a\nb.py", "a\rb.py", "a\tb.py"):
+            with self.subTest(path=path):
+                body = self._render(path)
+                self.assertEqual(slots_of(body)["PULL"], ["omhc log --last 30"])
+
+    def test_expanded_shell_quoting_stays_within_the_byte_budget(self):
+        for budget in (200, 300, 900):
+            body = self._render("'" * 31, budget=budget)
+            self.assertLessEqual(len(body.encode("utf-8")), budget)
+            for hint in slots_of(body).get("PULL", [""])[0].split(" · "):
+                if hint:
+                    shlex.split(hint)  # A retained hint must never have partial quotes.
 
 
 class TestProvenanceSlots(unittest.TestCase):

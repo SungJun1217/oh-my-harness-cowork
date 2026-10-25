@@ -73,7 +73,7 @@ PULL  omhc show E1 · omhc log --last 30 · omhc log --file omhc/event.py
 | `SAID` | 중간 사람 턴 | 최근순이 아니라 긴 문장 우선(최대 3개). "어디까지 됐어?"보다 요구사항 문장이 쓸모 있음 |
 | `ALSO` | 아직 전달되지 않은 다른 하네스의 이전 세션(최대 2개 더, 최신순) | 세션마다 한 줄: 하네스·세션·경과시간·원문 그대로의 `GOAL`, 실패가 있으면 태그도. 우선순위가 가장 낮아 예산이 부족하면 먼저 버려짐 |
 | `MORE` | 버린 슬롯·해소된 실패·숨긴 이벤트의 집계 | **감춘 것을 공개함.** 조용히 사라지는 것이 없게 함 |
-| `PULL` | omhc가 생성 | `omhc log --last 30`은 늘 있고, 미해소 실패가 있으면 `omhc show E1`, 수정 경로가 짧으면 `omhc log --file …`이 붙음. 절대 버리지 않음 |
+| `PULL` | omhc가 생성 | `omhc log --last 30`은 늘 있고, 미해소 실패가 있으면 `omhc show E1`, 수정 경로가 짧고 출력 가능한 문자로만 되어 있으면 셸 인용을 적용한 `omhc log --file …`이 붙음. 절대 버리지 않음 |
 
 슬롯마다의 정확한 규칙과 `log`/`show`/`trace`로 원본을 파보는 방법은
 [docs/handoff.md](docs/handoff.md)에 있습니다.

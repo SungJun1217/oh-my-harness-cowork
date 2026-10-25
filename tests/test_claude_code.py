@@ -538,6 +538,23 @@ class TestReadSessionForgedRecords(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_malformed_messages_are_counted_without_losing_valid_turns(self):
+        for kind in ("user", "assistant"):
+            for malformed in (None, [], ["unexpected schema"], "text", 17, True):
+                with self.subTest(kind=kind, message=malformed):
+                    read = self._read([
+                        {"type": "user", "message": {"content": "Keep the goal"}},
+                        {"type": kind, "message": malformed},
+                        {"type": "user", "message": {"content": "Keep the latest request"}},
+                    ])
+                    self.assertEqual([e.text for e in read.events],
+                                     ["Keep the goal", "Keep the latest request"])
+                    self.assertEqual(read.unparsed, 1)
+                    from omhc import mint
+                    body = mint.mint(read, to_adapter_id="codex-cli", now=1758500000.0)
+                    self.assertIn("GOAL  Keep the goal", body)
+                    self.assertIn("NEXT  Keep the latest request", body)
+
     def test_failed_tool_result_sets_ok_false(self):
         read = self._read([
             {"type": "assistant", "cwd": REPO, "timestamp": "2026-09-22T00:00:00.000Z",
