@@ -16,21 +16,24 @@ permissions:
 
 jobs:
   test:
+    # Keep required check names stable when a matrix entry needs an older image.
+    name: test (${{ matrix.os }}, ${{ matrix.python }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
         include:
           # Python 3.9 has no setup-python build for Ubuntu 26.04.
-          - os: ubuntu-24.04
+          - os: ubuntu-latest
             python: "3.9"
+            runner: ubuntu-24.04
           # Hardlinks, inodes and path slugs differ by OS; macOS runs only the two end versions.
           - os: macos-latest
             python: "3.9"
           - os: macos-latest
             python: "3.14"
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner || matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
